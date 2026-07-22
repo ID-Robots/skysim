@@ -157,6 +157,27 @@ int main() {
         CHECK(wind[0] == 3.0 && wind[1] == -1.0 && wind[2] == 0.0);
     }
 
+    // --- Contact events: vehicle-vehicle impact counted on BOTH; ground touch is static. ---
+    {
+        World w(test_cfg());
+        w.add_ground_plane();
+        VehicleBodyParams pa;
+        pa.start_pos_ned = {0.0, 0.0, -10.0}; // falls onto B
+        VehicleBodyParams pb;
+        pb.start_pos_ned = {0.0, 0.0, -(pb.half_extents_frd[2] + 0.005)};
+        const uint32_t a = w.add_vehicle(pa);
+        const uint32_t b = w.add_vehicle(pb);
+        for (int i = 0; i < 2400; ++i) { // 3 s: B settles (static contact), A lands on B
+            w.step();
+        }
+        const BodyState sa = w.get_state(a);
+        const BodyState sb = w.get_state(b);
+        CHECK(sa.midair_collisions >= 1); // A hit B...
+        CHECK(sb.midair_collisions >= 1); // ...and B knows it too
+        CHECK(sb.static_contacts >= 1);   // B touched the ground
+        CHECK(sa.midair_collisions == sb.midair_collisions);
+    }
+
     // --- Raycast: straight down from 10 m above ground hits at ~10 m. ---
     {
         World w(test_cfg());

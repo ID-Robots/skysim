@@ -10,6 +10,7 @@ eeprom.bin
 /terrain/
 logs/
 *.parm.bak
-collision_demo_truth_*.csv
+*_truth_*.csv
+determinism_servo.csv
 demo_map*/
 build-cov/

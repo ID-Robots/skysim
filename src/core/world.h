@@ -37,7 +37,9 @@ struct BodyState {
     Quat quat_ned_frd{1.0, 0.0, 0.0, 0.0};
     Vec3 gyro_frd{};       // body rates, rad/s
     Vec3 accel_body_frd{}; // specific force (accelerometer), clamped +/-16 g
-    bool on_ground = false;
+    // Contact-event counters (new manifolds only, so resting contact counts once):
+    uint64_t midair_collisions = 0; // vehicle-vehicle impacts — the crash signal
+    uint64_t static_contacts = 0;   // ground/building touches (landings included)
 };
 
 class World {

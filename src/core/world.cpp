@@ -9,6 +9,7 @@
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
 #include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
@@ -17,6 +18,8 @@
 #include <Jolt/RegisterTypes.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -109,7 +112,35 @@ constexpr double kAccelClamp = 16.0 * kGravity; // per DESIGN.md ground-contact 
 struct VehicleEntry {
     JPH::BodyID body;
     double mass_kg = 0.0;
-    Vec3 prev_vel_ned{}; // for specific-force finite difference
+    Vec3 prev_vel_ned{};            // for specific-force finite difference
+    uint64_t midair_collisions = 0; // vehicle-vehicle contact manifolds
+    uint64_t static_contacts = 0;   // ground/tile contact manifolds
+};
+
+// CLAUDE.md "Jolt-specific rules": contact callbacks run on Jolt's job threads during
+// Update and must only enqueue, lock-free. Fixed slots + an atomic cursor; overflow events
+// are dropped (counted) rather than blocking the solver.
+class EnqueueOnlyContactListener final : public JPH::ContactListener {
+  public:
+    void OnContactAdded(const JPH::Body &body1, const JPH::Body &body2, const JPH::ContactManifold &,
+                        JPH::ContactSettings &) override {
+        const size_t slot = count_.fetch_add(1, std::memory_order_relaxed);
+        if (slot < events_.size()) {
+            events_[slot] = {body1.GetID(), body2.GetID()};
+        }
+    }
+
+    // Drain on the tick thread after PhysicsSystem::Update returns (no callbacks running).
+    template <typename Fn> void drain(Fn &&fn) {
+        const size_t n = std::min(count_.exchange(0, std::memory_order_relaxed), events_.size());
+        for (size_t i = 0; i < n; ++i) {
+            fn(events_[i].first, events_[i].second);
+        }
+    }
+
+  private:
+    std::array<std::pair<JPH::BodyID, JPH::BodyID>, 256> events_{};
+    std::atomic<size_t> count_{0};
 };
 
 } // namespace
@@ -118,6 +149,7 @@ struct World::Impl {
     BpLayerInterface bp_interface;
     ObjectVsBpFilter obj_vs_bp;
     ObjectPairFilter obj_pair;
+    EnqueueOnlyContactListener contacts;
     std::unique_ptr<JPH::TempAllocatorImpl> temp_allocator;
     std::unique_ptr<JPH::JobSystemThreadPool> job_system;
     std::unique_ptr<JPH::PhysicsSystem> physics;
@@ -163,6 +195,7 @@ World::World(const WorldConfig &cfg) : impl_(std::make_unique<Impl>()), dt_s_(cf
                          impl_->obj_vs_bp, impl_->obj_pair);
     // NED gravity (0,0,+g) is Jolt (0,-g,0) — Jolt's default, but set it explicitly.
     impl_->physics->SetGravity(JPH::Vec3(0.0f, -static_cast<float>(kGravity), 0.0f));
+    impl_->physics->SetContactListener(&impl_->contacts);
 
     impl_->wind_steady = cfg.wind_steady_ned;
     impl_->gust_sigma = cfg.gust_sigma_mps;
@@ -363,6 +396,28 @@ void World::step() {
     impl_->physics->Update(static_cast<float>(impl_->dt_s), 1, impl_->temp_allocator.get(),
                            impl_->job_system.get());
     ++impl_->tick;
+
+    // Attribute this step's new contact manifolds to vehicles (tick thread, callbacks done).
+    impl_->contacts.drain([this](JPH::BodyID a, JPH::BodyID b) {
+        VehicleEntry *va = nullptr;
+        VehicleEntry *vb = nullptr;
+        for (auto &[id, v] : impl_->vehicles) {
+            if (v.body == a) {
+                va = &v;
+            }
+            if (v.body == b) {
+                vb = &v;
+            }
+        }
+        if (va != nullptr && vb != nullptr) {
+            ++va->midair_collisions;
+            ++vb->midair_collisions;
+        } else if (va != nullptr) {
+            ++va->static_contacts;
+        } else if (vb != nullptr) {
+            ++vb->static_contacts;
+        }
+    });
 }
 
 Vec3 World::wind_ned() const {
@@ -397,6 +452,8 @@ BodyState World::get_state(uint32_t id) const {
     for (double &a : out.accel_body_frd) {
         a = std::clamp(a, -kAccelClamp, kAccelClamp);
     }
+    out.midair_collisions = v.midair_collisions;
+    out.static_contacts = v.static_contacts;
     return out;
 }
 
