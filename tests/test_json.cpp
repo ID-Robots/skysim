@@ -2,6 +2,7 @@
 // parser rules (docs/PROTOCOL.md): no spaces, '\n'-terminated, keytable field names.
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 
 #include "protocol/packets.h"
@@ -75,6 +76,21 @@ int main() {
     // Overflow contract: returns 0 when the buffer is too small.
     char tiny[32];
     CHECK(skysim::protocol::build_state_json(t, tiny, sizeof(tiny)) == 0);
+
+    // Non-finite guard (PROTOCOL.md: no NaN/Inf ever reaches the wire — ArduPilot's
+    // skip-to-digit parser walks over "nan"/"inf" and desyncs the whole field scan).
+    skysim::protocol::VehicleTruth bad{};
+    bad.timestamp_s = 1.0;
+    bad.gyro_rps[0] = std::numeric_limits<double>::quiet_NaN();
+    bad.vel_ned_mps[2] = std::numeric_limits<double>::infinity();
+    bad.pos_ned_m[1] = -std::numeric_limits<double>::infinity();
+    bad.quat_wxyz[0] = std::numeric_limits<double>::quiet_NaN(); // whole quat -> identity
+    const size_t n3 = skysim::protocol::build_state_json(bad, buf, sizeof(buf));
+    CHECK(n3 > 0);
+    const std::string s3(buf, n3);
+    CHECK(s3.find("nan") == std::string::npos);
+    CHECK(s3.find("inf") == std::string::npos);
+    CHECK(s3.find("\"quaternion\":[1.0000000,0.0000000,0.0000000,0.0000000]") != std::string::npos);
 
     if (g_failures == 0) {
         std::printf("test_json: all checks OK\n");

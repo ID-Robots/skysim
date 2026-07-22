@@ -14,6 +14,13 @@ int main(int argc, char **argv) {
     }
     const std::filesystem::path out_dir = argv[1];
     std::filesystem::create_directories(out_dir);
+    // Remove products of previous cooks: a stale .jshape from a removed input would be
+    // silently loaded by the sim as phantom geometry.
+    for (const auto &entry : std::filesystem::directory_iterator(out_dir)) {
+        if (entry.path().extension() == ".jshape" || entry.path().filename() == "index.json") {
+            std::filesystem::remove(entry.path());
+        }
+    }
 
     std::string index; // one JSON object per tile entry, assembled by hand (no JSON dep)
     size_t total_tris = 0;

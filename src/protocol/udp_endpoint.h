@@ -24,6 +24,13 @@ class UdpEndpoint {
     // first datagram. Never blocks the tick beyond a non-blocking sendto.
     void send_reply(const char *json, size_t len);
 
+    // True iff the datagram last returned by take_latest() ARRIVED after the last
+    // send_reply(). A kDuplicate that arrived before our latest reply was already answered
+    // by it — re-replying would double-answer the frame and desync ArduPilot's lockstep
+    // (it advances frame_counter once per parsed reply line). Only re-reply duplicates for
+    // which this returns true (the ~1 s ArduPilot re-send / handshake case).
+    bool last_taken_unanswered() const;
+
     int port() const;
 
   private:

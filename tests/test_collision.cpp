@@ -69,6 +69,7 @@ int main() {
     skysim::core::World w(cfg());
     w.add_ground_plane();
     CHECK(w.load_tiles(dir) == 1);
+    CHECK(w.load_tiles("/nonexistent/skysim/tiles") == 0); // must not throw/abort
 
     // --- (a) Drop onto the roof from 5 m above: must come to rest ON the roof (z=-30). ---
     {

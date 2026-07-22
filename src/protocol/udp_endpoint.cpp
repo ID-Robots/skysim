@@ -40,6 +40,7 @@ struct UdpEndpoint::Impl {
 
     // Tick-thread state (single writer: only take_latest / send_reply touch these).
     uint64_t consumed_seq = 0;
+    uint64_t answered_up_to_seq = 0; // newest ARRIVED seq at the moment of the last reply
     std::optional<uint32_t> last_frame_count;
     sockaddr_in reply_addr{};
     bool have_reply_addr = false;
@@ -140,7 +141,13 @@ void UdpEndpoint::send_reply(const char *json, size_t len) {
     }
     ::sendto(impl_->fd, json, len, MSG_DONTWAIT, reinterpret_cast<const sockaddr *>(&impl_->reply_addr),
              sizeof(impl_->reply_addr));
+    // Everything that has arrived up to now is answered by this reply (ArduPilot parses the
+    // most recent complete line, so one reply covers all earlier re-sends of the frame).
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->answered_up_to_seq = impl_->seq;
 }
+
+bool UdpEndpoint::last_taken_unanswered() const { return impl_->consumed_seq > impl_->answered_up_to_seq; }
 
 int UdpEndpoint::port() const { return impl_->port; }
 

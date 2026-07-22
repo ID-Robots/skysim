@@ -117,6 +117,11 @@ int main(int argc, char **argv) {
         if (!opt.tiles.empty()) {
             const size_t n = world->load_tiles(opt.tiles);
             std::printf("skysim: loaded %zu tile(s) from %s\n", n, opt.tiles.c_str());
+            if (n == 0) {
+                // A requested map that silently loads empty is a phantom-free world — abort.
+                std::fprintf(stderr, "skysim: --tiles %s yielded no tiles\n", opt.tiles.c_str());
+                return 1;
+            }
         }
     }
 
@@ -175,8 +180,10 @@ int main(int argc, char **argv) {
                     v->has_pending_input = true;
                     break;
                 case FrameStatus::kDuplicate:
-                    // Normal during handshake (docs/PROTOCOL.md): don't re-step, do re-reply.
-                    if (v->last_json_len > 0) {
+                    // Normal during handshake (docs/PROTOCOL.md): don't re-step, do re-reply —
+                    // but only if this re-send arrived AFTER our last reply. A duplicate that
+                    // was already answered must not be answered twice (lockstep desync).
+                    if (v->last_json_len > 0 && v->endpoint->last_taken_unanswered()) {
                         v->endpoint->send_reply(v->last_json, v->last_json_len);
                     }
                     break;

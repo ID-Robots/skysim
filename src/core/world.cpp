@@ -170,7 +170,12 @@ void World::add_ground_plane() {
 
 size_t World::load_tiles(const std::filesystem::path &dir) {
     size_t loaded = 0;
-    for (const auto &entry : std::filesystem::directory_iterator(dir)) {
+    std::error_code ec;
+    if (!std::filesystem::is_directory(dir, ec)) {
+        std::fprintf(stderr, "world: --tiles path is not a directory: %s\n", dir.c_str());
+        return 0;
+    }
+    for (const auto &entry : std::filesystem::directory_iterator(dir, ec)) {
         if (entry.path().extension() != ".jshape") {
             continue;
         }

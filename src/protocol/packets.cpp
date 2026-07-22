@@ -2,6 +2,7 @@
 #include "protocol/packets.h"
 
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -68,6 +69,16 @@ ParsedServos parse_servo_datagram(std::span<const std::byte> datagram,
 // ArduPilot's strstr parser rules (docs/PROTOCOL.md): compact JSON, no spaces anywhere,
 // "velocity" must appear before any key containing it as a substring (we emit it once),
 // single line, '\n'-terminated. Field order matches the pybullet reference implementation.
+//
+// Non-finite guard: PROTOCOL.md makes "no NaN/Inf in the reply" a hard interop rule —
+// glibc prints "nan"/"inf", which ArduPilot's skip-to-digit parser walks straight over,
+// desyncing the field scan (required-field reject => permanent lockstep stall, or silent
+// value theft from the next field). The emitter is the last line of defense: substitute
+// 0.0 so the reply stays parseable; upstream owns not producing non-finites.
+namespace {
+double fin(double v) { return std::isfinite(v) ? v : 0.0; }
+} // namespace
+
 size_t build_state_json(const VehicleTruth &t, char *buf, size_t buf_size) {
     size_t off = 0;
     auto emit = [&](const char *fmt, auto... args) {
@@ -82,20 +93,26 @@ size_t build_state_json(const VehicleTruth &t, char *buf, size_t buf_size) {
         return true;
     };
 
-    bool ok = emit("{\"timestamp\":%.6f,\"imu\":{\"gyro\":[%.6f,%.6f,%.6f],\"accel_body\":[%.6f,%.6f,%.6f]},",
-                   t.timestamp_s, t.gyro_rps[0], t.gyro_rps[1], t.gyro_rps[2], t.accel_body[0],
-                   t.accel_body[1], t.accel_body[2]) &&
-              emit("\"position\":[%.6f,%.6f,%.6f],\"velocity\":[%.6f,%.6f,%.6f],", t.pos_ned_m[0],
-                   t.pos_ned_m[1], t.pos_ned_m[2], t.vel_ned_mps[0], t.vel_ned_mps[1], t.vel_ned_mps[2]) &&
-              emit("\"quaternion\":[%.7f,%.7f,%.7f,%.7f]", t.quat_wxyz[0], t.quat_wxyz[1], t.quat_wxyz[2],
-                   t.quat_wxyz[3]);
+    // A quaternion with any non-finite component is unusable as a whole: fall back to identity.
+    const bool quat_ok = std::isfinite(t.quat_wxyz[0]) && std::isfinite(t.quat_wxyz[1]) &&
+                         std::isfinite(t.quat_wxyz[2]) && std::isfinite(t.quat_wxyz[3]);
+
+    bool ok =
+        emit("{\"timestamp\":%.6f,\"imu\":{\"gyro\":[%.6f,%.6f,%.6f],\"accel_body\":[%.6f,%.6f,%.6f]},",
+             fin(t.timestamp_s), fin(t.gyro_rps[0]), fin(t.gyro_rps[1]), fin(t.gyro_rps[2]),
+             fin(t.accel_body[0]), fin(t.accel_body[1]), fin(t.accel_body[2])) &&
+        emit("\"position\":[%.6f,%.6f,%.6f],\"velocity\":[%.6f,%.6f,%.6f],", fin(t.pos_ned_m[0]),
+             fin(t.pos_ned_m[1]), fin(t.pos_ned_m[2]), fin(t.vel_ned_mps[0]), fin(t.vel_ned_mps[1]),
+             fin(t.vel_ned_mps[2])) &&
+        emit("\"quaternion\":[%.7f,%.7f,%.7f,%.7f]", quat_ok ? t.quat_wxyz[0] : 1.0,
+             quat_ok ? t.quat_wxyz[1] : 0.0, quat_ok ? t.quat_wxyz[2] : 0.0, quat_ok ? t.quat_wxyz[3] : 0.0);
     if (ok && t.rangefinder_m.has_value()) {
         const auto &rng = *t.rangefinder_m;
         for (size_t i = 0; ok && i < rng.size(); ++i) {
-            ok = emit(",\"rng_%zu\":%.4f", i + 1, rng[i]);
+            ok = emit(",\"rng_%zu\":%.4f", i + 1, fin(rng[i]));
         }
     }
-    if (!ok || !emit("}\n")) {
+    if (!ok || !emit("%s", "}\n")) {
         return 0;
     }
     return off;
