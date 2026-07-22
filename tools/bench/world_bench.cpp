@@ -30,11 +30,14 @@ int main(int argc, char **argv) {
     int ticks = argc > 2 ? std::atoi(argv[2]) : 2000;
     bool collide = false;
     int threads = -1;
+    double spacing_override = -1.0; // meters between vehicles; overrides --collide's 0.3
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--collide") == 0) {
             collide = true;
         } else if (std::strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
             threads = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--spacing") == 0 && i + 1 < argc) {
+            spacing_override = std::atof(argv[++i]);
         }
     }
 
@@ -54,8 +57,8 @@ int main(int argc, char **argv) {
     std::vector<V> fleet(static_cast<size_t>(n));
     for (int i = 0; i < n; ++i) {
         skysim::core::VehicleBodyParams bp;
-        // Grid layout; if --collide, pack them 0.3 m apart so they overlap and generate contacts.
-        const double spacing = collide ? 0.3 : 5.0;
+        // Grid layout; --collide packs to 0.3 m (overlap soup); --spacing S sets it explicitly.
+        const double spacing = spacing_override > 0.0 ? spacing_override : (collide ? 0.3 : 5.0);
         const int cols = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(n))));
         bp.start_pos_ned = {spacing * (i / cols), spacing * (i % cols), -50.0};
         fleet[static_cast<size_t>(i)].id = world.add_vehicle(bp);
