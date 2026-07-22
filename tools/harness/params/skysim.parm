@@ -1,0 +1,4 @@
+# skysim overlay defaults — appended after copter.parm via ArduPilot's comma-separated
+# --defaults list. SIM_RATE_HZ=400 aligns ArduPilot's requested physics rate with skysim's
+# fixed dt (1/400 s, docs/DESIGN.md "Time policy") and cuts SITL cost ~3x at scale.
+SIM_RATE_HZ 400

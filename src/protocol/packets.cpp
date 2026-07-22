@@ -3,6 +3,7 @@
 
 #include <bit>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 
 namespace skysim::protocol {
@@ -62,6 +63,42 @@ ParsedServos parse_servo_datagram(std::span<const std::byte> datagram,
         out.status = FrameStatus::kGap;
     }
     return out;
+}
+
+// ArduPilot's strstr parser rules (docs/PROTOCOL.md): compact JSON, no spaces anywhere,
+// "velocity" must appear before any key containing it as a substring (we emit it once),
+// single line, '\n'-terminated. Field order matches the pybullet reference implementation.
+size_t build_state_json(const VehicleTruth &t, char *buf, size_t buf_size) {
+    size_t off = 0;
+    auto emit = [&](const char *fmt, auto... args) {
+        if (off >= buf_size) {
+            return false;
+        }
+        const int n = std::snprintf(buf + off, buf_size - off, fmt, args...);
+        if (n < 0 || static_cast<size_t>(n) >= buf_size - off) {
+            return false;
+        }
+        off += static_cast<size_t>(n);
+        return true;
+    };
+
+    bool ok = emit("{\"timestamp\":%.6f,\"imu\":{\"gyro\":[%.6f,%.6f,%.6f],\"accel_body\":[%.6f,%.6f,%.6f]},",
+                   t.timestamp_s, t.gyro_rps[0], t.gyro_rps[1], t.gyro_rps[2], t.accel_body[0],
+                   t.accel_body[1], t.accel_body[2]) &&
+              emit("\"position\":[%.6f,%.6f,%.6f],\"velocity\":[%.6f,%.6f,%.6f],", t.pos_ned_m[0],
+                   t.pos_ned_m[1], t.pos_ned_m[2], t.vel_ned_mps[0], t.vel_ned_mps[1], t.vel_ned_mps[2]) &&
+              emit("\"quaternion\":[%.7f,%.7f,%.7f,%.7f]", t.quat_wxyz[0], t.quat_wxyz[1], t.quat_wxyz[2],
+                   t.quat_wxyz[3]);
+    if (ok && t.rangefinder_m.has_value()) {
+        const auto &rng = *t.rangefinder_m;
+        for (size_t i = 0; ok && i < rng.size(); ++i) {
+            ok = emit(",\"rng_%zu\":%.4f", i + 1, rng[i]);
+        }
+    }
+    if (!ok || !emit("}\n")) {
+        return 0;
+    }
+    return off;
 }
 
 } // namespace skysim::protocol

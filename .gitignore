@@ -6,3 +6,7 @@ compile_commands.json
 tests/fixtures/*.bin
 # committed protocol fixtures are the exception — tests and CI need them
 !tests/fixtures/servo_frame.bin
+eeprom.bin
+terrain/
+logs/
+*.parm.bak

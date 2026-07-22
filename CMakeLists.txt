@@ -19,8 +19,13 @@ FetchContent_Declare(JoltPhysics
 FetchContent_MakeAvailable(JoltPhysics)
 
 # --- protocol (no Jolt dependency; shared by server and tests) -------------------------------
-add_library(skysim_protocol STATIC src/protocol/packets.cpp)
+find_package(Threads REQUIRED)
+add_library(skysim_protocol STATIC
+    src/protocol/packets.cpp
+    src/protocol/udp_endpoint.cpp
+)
 target_include_directories(skysim_protocol PUBLIC src)
+target_link_libraries(skysim_protocol PUBLIC Threads::Threads)
 target_compile_options(skysim_protocol PRIVATE -Wall -Wextra -Wshadow)
 
 # --- skysim server --------------------------------------------------------------------------
@@ -47,3 +52,8 @@ target_link_libraries(test_packets PRIVATE skysim_protocol)
 target_compile_definitions(test_packets PRIVATE SKYSIM_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_compile_options(test_packets PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME packets COMMAND test_packets)
+
+add_executable(test_json tests/test_json.cpp)
+target_link_libraries(test_json PRIVATE skysim_protocol)
+target_compile_options(test_json PRIVATE -Wall -Wextra -Wshadow)
+add_test(NAME json COMMAND test_json)
