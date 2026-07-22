@@ -45,16 +45,23 @@ target_include_directories(skysim_core PUBLIC src)
 target_link_libraries(skysim_core PRIVATE Jolt)
 target_compile_options(skysim_core PRIVATE -Wall -Wextra -Wshadow)
 
+# --- terrain: OBJ -> MeshShape cooker library ------------------------------------------------
+add_library(skysim_terrain STATIC src/terrain/cook.cpp)
+target_include_directories(skysim_terrain PUBLIC src)
+target_link_libraries(skysim_terrain PRIVATE Jolt)
+target_compile_options(skysim_terrain PRIVATE -Wall -Wextra -Wshadow)
+
 # --- skysim server --------------------------------------------------------------------------
 add_executable(skysim src/main.cpp)
 target_include_directories(skysim PRIVATE src)
 target_link_libraries(skysim PRIVATE skysim_protocol skysim_core skysim_vehicle)
 target_compile_options(skysim PRIVATE -Wall -Wextra -Wshadow)
 
-# --- tile cooker (M5) -----------------------------------------------------------------------
+# --- tile cooker ------------------------------------------------------------------------------
 add_executable(tile_cooker tools/cooker/main.cpp)
 target_include_directories(tile_cooker PRIVATE src)
-target_link_libraries(tile_cooker PRIVATE Jolt)
+target_link_libraries(tile_cooker PRIVATE skysim_terrain)
+target_compile_options(tile_cooker PRIVATE -Wall -Wextra -Wshadow)
 
 # --- tests ----------------------------------------------------------------------------------
 enable_testing()
@@ -83,3 +90,8 @@ add_executable(test_world tests/test_world.cpp)
 target_link_libraries(test_world PRIVATE skysim_core)
 target_compile_options(test_world PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME world COMMAND test_world)
+
+add_executable(test_collision tests/test_collision.cpp)
+target_link_libraries(test_collision PRIVATE skysim_core skysim_terrain)
+target_compile_options(test_collision PRIVATE -Wall -Wextra -Wshadow)
+add_test(NAME collision COMMAND test_collision)

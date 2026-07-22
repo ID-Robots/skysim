@@ -70,14 +70,16 @@ class ObjectPairFilter final : public JPH::ObjectLayerPairFilter {
     }
 };
 
-// Factory/type registration is process-global; init once and keep it (multiple sequential
-// Worlds in tests must not re-register).
+// Factory/type registration is process-global; init once and keep it. The nullptr guard
+// coordinates with terrain/cook.cpp, which may have initialized Jolt first in-process.
 void init_jolt_once() {
     static std::once_flag flag;
     std::call_once(flag, [] {
         JPH::RegisterDefaultAllocator();
-        JPH::Factory::sInstance = new JPH::Factory();
-        JPH::RegisterTypes();
+        if (JPH::Factory::sInstance == nullptr) {
+            JPH::Factory::sInstance = new JPH::Factory();
+            JPH::RegisterTypes();
+        }
     });
 }
 

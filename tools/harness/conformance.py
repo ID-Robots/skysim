@@ -82,7 +82,9 @@ def launch_sitl(binary: str, instance: int, home: str, defaults: str) -> subproc
         "--home", home,
         "--defaults", defaults,
     ]
-    return subprocess.Popen(cmd, cwd=run_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log = open(os.path.join(run_dir, "sitl.log"), "w")  # kept for post-mortem debugging
+    print(f"  [I{instance}] run dir: {run_dir}")
+    return subprocess.Popen(cmd, cwd=run_dir, stdout=log, stderr=subprocess.STDOUT)
 
 
 def wait_ready(v: Vehicle, timeout: float = 120.0) -> None:

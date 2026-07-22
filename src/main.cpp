@@ -26,6 +26,7 @@ struct Options {
     double dt_s = 1.0 / 400.0;
     std::string time_mode = "strict";
     std::string tiles;
+    std::string truth_log; // CSV: t,vehicle,north,east,down — ground-truth flight records
     bool canned = false;
 };
 
@@ -49,6 +50,8 @@ Options parse_args(int argc, char **argv) {
             o.time_mode = need_value("--time-mode");
         } else if (std::strcmp(argv[i], "--tiles") == 0) {
             o.tiles = need_value("--tiles");
+        } else if (std::strcmp(argv[i], "--truth-log") == 0) {
+            o.truth_log = need_value("--truth-log");
         } else if (std::strcmp(argv[i], "--canned") == 0) {
             o.canned = true;
         } else {
@@ -137,6 +140,16 @@ int main(int argc, char **argv) {
                 opt.time_mode.c_str(), opt.canned ? "canned physics (M1)" : "jolt physics");
     std::fflush(stdout);
 
+    FILE *truth_log = nullptr;
+    if (!opt.truth_log.empty()) {
+        truth_log = std::fopen(opt.truth_log.c_str(), "w");
+        if (truth_log == nullptr) {
+            std::fprintf(stderr, "skysim: cannot open --truth-log %s\n", opt.truth_log.c_str());
+            return 1;
+        }
+        std::fprintf(truth_log, "t,vehicle,north,east,down\n");
+    }
+
     double canned_time = 0.0;
     using skysim::protocol::FrameStatus;
     while (!g_stop.load(std::memory_order_relaxed)) {
@@ -199,8 +212,12 @@ int main(int argc, char **argv) {
             }
             world->step();
             now_s = world->now();
-            for (auto &v : fleet) {
-                v->state = world->get_state(v->body_id);
+            for (size_t i = 0; i < fleet.size(); ++i) {
+                fleet[i]->state = world->get_state(fleet[i]->body_id);
+                if (truth_log != nullptr) {
+                    const auto &pos = fleet[i]->state.pos_ned;
+                    std::fprintf(truth_log, "%.4f,%zu,%.4f,%.4f,%.4f\n", now_s, i, pos[0], pos[1], pos[2]);
+                }
             }
         } else {
             canned_time += opt.dt_s;
@@ -228,6 +245,9 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (truth_log != nullptr) {
+        std::fclose(truth_log);
+    }
     for (size_t i = 0; i < fleet.size(); ++i) {
         std::printf("skysim: vehicle %zu ticks=%llu gaps=%llu reboots=%llu bad=%llu\n", i,
                     static_cast<unsigned long long>(fleet[i]->ticks),
