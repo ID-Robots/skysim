@@ -18,3 +18,13 @@ jobs:
       - run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
       - run: cmake --build build -j
       - run: ctest --test-dir build --output-on-failure
+  coverage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build gcovr
+      - run: bash tools/coverage.sh --min 60
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: build-cov/coverage*.html

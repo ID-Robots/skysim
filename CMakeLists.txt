@@ -33,6 +33,14 @@ FetchContent_Declare(httplib
 )
 FetchContent_MakeAvailable(httplib)
 
+# --- coverage instrumentation (our targets only; third-party stays clean) --------------------
+# Everything declared after this point picks up --coverage; Jolt/httplib are declared above.
+option(SKYSIM_COVERAGE "Instrument skysim targets for gcov/gcovr" OFF)
+if(SKYSIM_COVERAGE)
+    add_compile_options(--coverage -O0 -g)
+    add_link_options(--coverage)
+endif()
+
 # --- protocol (no Jolt dependency; shared by server and tests) -------------------------------
 find_package(Threads REQUIRED)
 add_library(skysim_protocol STATIC
@@ -114,3 +122,27 @@ add_executable(test_collision tests/test_collision.cpp)
 target_link_libraries(test_collision PRIVATE skysim_core skysim_terrain)
 target_compile_options(test_collision PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME collision COMMAND test_collision)
+
+add_executable(test_endpoint tests/test_endpoint.cpp)
+target_link_libraries(test_endpoint PRIVATE skysim_protocol)
+target_compile_options(test_endpoint PRIVATE -Wall -Wextra -Wshadow)
+add_test(NAME endpoint COMMAND test_endpoint)
+
+add_executable(test_manager tests/test_manager.cpp)
+target_link_libraries(test_manager PRIVATE skysim_vehicle)
+target_include_directories(test_manager PRIVATE src)
+target_compile_options(test_manager PRIVATE -Wall -Wextra -Wshadow)
+add_test(NAME manager COMMAND test_manager)
+
+add_executable(test_api tests/test_api.cpp)
+target_link_libraries(test_api PRIVATE skysim_api httplib::httplib)
+target_compile_options(test_api PRIVATE -Wall -Wextra -Wshadow)
+add_test(NAME api COMMAND test_api)
+
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+    add_test(NAME app_smoke
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/app_smoke.py
+                     $<TARGET_FILE:skysim>)
+    set_tests_properties(app_smoke PROPERTIES TIMEOUT 180)
+endif()

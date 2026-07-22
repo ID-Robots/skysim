@@ -43,8 +43,9 @@ class VehicleManager {
 
     // Fork/exec an arducopter for `instance`; returns pid or nullopt on failure.
     std::optional<pid_t> launch_sitl(int instance);
-    void stop_sitl(pid_t pid); // SIGTERM, reaped asynchronously via reap()
-    void reap();               // call once per tick: waitpid(WNOHANG) zombies
+    void stop_sitl(pid_t pid);                           // SIGTERM, reaped asynchronously via reap()
+    void reap();                                         // call once per tick: waitpid(WNOHANG) zombies
+    size_t children() const { return children_.size(); } // unreaped managed processes
 
   private:
     int base_instance_;

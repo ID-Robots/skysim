@@ -12,3 +12,4 @@ logs/
 *.parm.bak
 collision_demo_truth_*.csv
 demo_map*/
+build-cov/

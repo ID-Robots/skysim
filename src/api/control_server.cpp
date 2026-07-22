@@ -118,6 +118,11 @@ ControlServer::ControlServer(int port, CommandQueue &queue, Snapshots snapshots)
         throw std::runtime_error("ControlServer: cannot bind 127.0.0.1:" + std::to_string(port));
     }
     impl_->thread = std::thread([this] { impl_->server.listen_after_bind(); });
+    // Wait for the listen loop to actually start: stop() delivered before is_running()
+    // would be lost and ~ControlServer would join() forever (httplib stop/listen race).
+    for (int i = 0; i < 1000 && !s.is_running(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     std::printf("skysim: control plane on http://127.0.0.1:%d\n", port);
 }
 
