@@ -124,3 +124,44 @@ it or start numbering from 2 (skysim [S1] honors the gateway's numbers either wa
   design already supports that). Local server first.
 - One skysim world = one geographic origin: all SITLs in a world should share `--home`
   (the gateway currently uses one default home — compatible).
+
+## Test results (2026-07-22, local stack)
+
+Implemented and exercised through the real dashboard UI + gateway API.
+
+**Proven working:**
+- Dashboard "Simulated" drone create → gateway reserves the skysim slot
+  (`skysim: reserved instance N`), sets `SITL_MODEL=json:127.0.0.1`, starts the SITL/core/
+  gamepad trio (host networking). Two drones (sim-alpha, sim-bravo) created via the UI both
+  **join one skysim world** — `GET /vehicles` shows both `connected`, spawned 10 m apart,
+  physics frames exchanged (positions update). Instance numbering stays gateway-authoritative
+  (skysim `POST /vehicles {"instance":N}`).
+- Gateway control path drives the SITLs: `guided/arm/takeoff/goto_gps_location` all return 200
+  via rosbridge→MAVROS.
+- Crash monitor runs and reconciles drone identity from the DB after a gateway restart.
+- Independently verified: an arducopter with the **exact container args** + a stable MAVLink
+  link reaches EKF origin / GPS against skysim (strict and interactive); skysim reports
+  `midair_collisions`; the gateway emits `crash_alert` + LOG telemetry.
+
+**Open issue — SITL boot stability under skysim lockstep (not the integration wiring):**
+The container arducopter, driven by skysim's lockstep JSON physics, often gets one physics
+frame then stalls at boot, with `New/Closed connection on SERIAL0` churn — it never reaches
+EKF. A **bare** arducopter with the same args + a *stable* MAVLink client boots fine, so the
+trigger is the container's mavlink-router ↔ SERIAL0 cadence interacting with lockstep timing.
+Two contributing factors, both diagnosed:
+1. **skysim time policy for a dynamic fleet.** Strict mode's global barrier stalls every
+   vehicle when *any* connected SITL is slow/stopped/crash-looping (fatal when the control
+   plane starts/stops SITLs independently). Interactive mode's straggler freeze was far too
+   aggressive (`hold_ticks` default 3 = ~2.5 ms at 1200 Hz), freezing a booting SITL
+   repeatedly. Raising `--hold-ticks` removed the freeze thrash but not the SERIAL0 churn.
+2. **Real-time margin.** skysim tick p99 (~1.7 ms) exceeds the 0.833 ms budget for 1200 Hz
+   lockstep under this host's load (~11); the `SIM_RATE_HZ 800` overlay (doc [C2], skipped in
+   this pass) gives headroom and should be applied.
+
+**Recommended next steps (skysim side):**
+- Add a **per-vehicle lockstep** time mode: advance each vehicle's own clock by dt per
+  consumed frame on the shared world, with no global barrier and freeze-from-barrier for
+  non-responders — the correct model for a dynamic, independently-managed SITL fleet.
+- Apply the `SIM_RATE_HZ 800` container overlay ([C2]) and run skysim at `--dt 1/800`.
+- Investigate the skyhub_sitl mavlink-router SERIAL0 hold under `--model json` (it is stable
+  under `--model quad`; the long-lived quad SITL runs for days).
