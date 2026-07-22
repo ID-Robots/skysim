@@ -74,6 +74,29 @@ static bodies at tick boundaries. Rangefinders/lidar = raycasts against the same
 - Metrics endpoint exports: tick time p50/p99, per-stage breakdown, straggler counts,
   per-vehicle frame lag, resident tiles. Watch tick p99 < dt.
 
+### Measured performance (single host, one world, `tools/bench`)
+
+Optimizations landed and where the tick budget went (RelWithDebInfo, x86-64):
+
+1. **Physics job system single-threaded by default.** Jolt's `JobSystemThreadPool` loses to
+   `JobSystemSingleThreaded` below ~1000 bodies — dispatch/barrier/wakeup jitter dwarfs the
+   per-step work for a fleet of quads. `worker_threads<=0` (the default) picks the
+   single-threaded system; `>0` opts back into the pool for huge single worlds. We scale by
+   sharding worlds across processes, not threads within one (see above).
+2. **Integer JSON formatter.** `build_state_json` was snprintf-bound on `%f` float formatting;
+   the hand-rolled fixed-precision `append_fixed` (integer scale + round-half-away) is byte-
+   identical to the golden output and cut the reply-build cost by a large multiple. This moved
+   the reply stage from ~89% to ~14% of a core at 200 vehicles.
+3. **O(1) contact attribution.** Contact-event drain looked up the two vehicles by linear scan
+   (O(N·M)); a `BodyID→vehicle` map makes it O(1) per event.
+4. **Parallel reply path.** `sendto` is kernel-bound (~2.5 µs remote peer, ~6 µs loopback) and
+   does not batch, but it is embarrassingly parallel per vehicle. Above
+   `kReplyParallelThreshold` (48) vehicles the build+send fans across `--io-threads` (default 3)
+   cores; below it the serial path avoids dispatch overhead.
+
+Result: one world sustains ~200 quads at 800 Hz with ~5× realtime headroom, physics on a single
+core. Beyond that, shard. Re-measure with `world_bench` / `proto_bench` before tuning further.
+
 ## Control plane (SkyHub integration)
 
 - `POST /vehicles {frame, home, params_file}` → allocates instance id, launches arducopter
