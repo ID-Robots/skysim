@@ -11,7 +11,16 @@ Read in order: `CLAUDE.md` → `docs/PROTOCOL.md` → `docs/DESIGN.md` → `docs
 ## Prerequisites
 
 - Ubuntu 22.04/24.04, CMake ≥ 3.24, Ninja, GCC 12+ or Clang 16+
-- ArduPilot checkout built for SITL, exported as `ARDUPILOT_ROOT` (tag pinned in `docs/PROTOCOL.md`)
+- ArduPilot checkout built for SITL, exported as `ARDUPILOT_ROOT` (tag pinned in `docs/PROTOCOL.md`,
+  currently **Copter-4.7.0**):
+
+  ```bash
+  git clone --recurse-submodules https://github.com/ArduPilot/ardupilot ~/ardupilot
+  cd ~/ardupilot && git checkout Copter-4.7.0 && git submodule update --init --recursive
+  ./waf configure --board sitl && ./waf copter
+  export ARDUPILOT_ROOT=~/ardupilot   # add to your shell profile
+  ```
+
 - `pip install pymavlink` (harness), `pip install trimesh` (mesh pre-processing, M5)
 
 ## Build & smoke test
