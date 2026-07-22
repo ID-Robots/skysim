@@ -1,4 +1,5 @@
 # skysim overlay defaults — appended after copter.parm via ArduPilot's comma-separated
-# --defaults list. SIM_RATE_HZ=400 aligns ArduPilot's requested physics rate with skysim's
-# fixed dt (1/400 s, docs/DESIGN.md "Time policy") and cuts SITL cost ~3x at scale.
-SIM_RATE_HZ 400
+# --defaults list. SIM_RATE_HZ=800 pairs with skysim --dt 0.00125: the prearm gyro-rate
+# check requires >= 1.8x SCHED_LOOP_RATE (400 Hz on copter), so 400 Hz sim rate trips
+# "PreArm: Gyro 0 rate ... < loop rate*1.8" while 800 Hz clears it (observed at M1).
+SIM_RATE_HZ 800
