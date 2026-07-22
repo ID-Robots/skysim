@@ -17,9 +17,11 @@
 #include <Jolt/RegisterTypes.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <mutex>
+#include <random>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -126,6 +128,14 @@ struct World::Impl {
     std::unordered_map<uint32_t, VehicleEntry> vehicles;
     std::vector<JPH::BodyID> static_bodies;
 
+    // Wind: steady + OU gusts, all randomness from this world-owned PRNG (invariant 4).
+    Vec3 wind_steady{};
+    Vec3 gust{};
+    double gust_sigma = 0.0;
+    double gust_tau = 2.0;
+    std::mt19937_64 rng;
+    std::normal_distribution<double> gauss{0.0, 1.0};
+
     struct PendingWrench {
         uint32_t id;
         Vec3 force_frd;
@@ -152,6 +162,11 @@ World::World(const WorldConfig &cfg) : impl_(std::make_unique<Impl>()), dt_s_(cf
                          impl_->obj_vs_bp, impl_->obj_pair);
     // NED gravity (0,0,+g) is Jolt (0,-g,0) — Jolt's default, but set it explicitly.
     impl_->physics->SetGravity(JPH::Vec3(0.0f, -static_cast<float>(kGravity), 0.0f));
+
+    impl_->wind_steady = cfg.wind_steady_ned;
+    impl_->gust_sigma = cfg.gust_sigma_mps;
+    impl_->gust_tau = cfg.gust_tau_s > 0.0 ? cfg.gust_tau_s : 2.0;
+    impl_->rng.seed(cfg.rng_seed);
 }
 
 World::~World() = default;
@@ -201,12 +216,22 @@ size_t World::load_tiles(const std::filesystem::path &dir) {
     return loaded;
 }
 
-double World::raycast(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_dist_m) const {
+double World::raycast(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_dist_m,
+                      uint32_t ignore_vehicle_id) const {
     const JPH::RVec3 origin(to_jolt(origin_ned));
     const JPH::Vec3 dir = to_jolt(dir_ned) * static_cast<float>(max_dist_m);
     JPH::RRayCast ray{origin, dir};
     JPH::RayCastResult hit;
-    if (impl_->physics->GetNarrowPhaseQuery().CastRay(ray, hit)) {
+    JPH::BodyID ignore;
+    if (ignore_vehicle_id != 0) {
+        auto it = impl_->vehicles.find(ignore_vehicle_id);
+        if (it != impl_->vehicles.end()) {
+            ignore = it->second.body;
+        }
+    }
+    const JPH::IgnoreSingleBodyFilter body_filter(ignore);
+    if (impl_->physics->GetNarrowPhaseQuery().CastRay(ray, hit, JPH::BroadPhaseLayerFilter{},
+                                                      JPH::ObjectLayerFilter{}, body_filter)) {
         return hit.mFraction * max_dist_m;
     }
     return -1.0;
@@ -278,9 +303,25 @@ void World::step() {
         v.prev_vel_ned = from_jolt(bi.GetLinearVelocity(v.body));
     }
 
+    // Advance gusts (exact OU discretization: stationary sigma, correlation time tau).
+    // Draw all three gaussians even when sigma is 0 so enabling wind never shifts the
+    // stream consumed by future randomness sources (determinism across configs).
+    if (impl_->gust_sigma > 0.0 || impl_->gust_tau > 0.0) {
+        const double decay = std::exp(-impl_->dt_s / impl_->gust_tau);
+        const double diffuse = impl_->gust_sigma * std::sqrt(1.0 - decay * decay);
+        for (int k = 0; k < 3; ++k) {
+            impl_->gust[k] = impl_->gust[k] * decay + diffuse * impl_->gauss(impl_->rng);
+        }
+    }
+
     impl_->physics->Update(static_cast<float>(impl_->dt_s), 1, impl_->temp_allocator.get(),
                            impl_->job_system.get());
     ++impl_->tick;
+}
+
+Vec3 World::wind_ned() const {
+    return {impl_->wind_steady[0] + impl_->gust[0], impl_->wind_steady[1] + impl_->gust[1],
+            impl_->wind_steady[2] + impl_->gust[2]};
 }
 
 BodyState World::get_state(uint32_t id) const {

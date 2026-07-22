@@ -60,8 +60,9 @@ struct VehicleTruth {
     double pos_ned_m[3];
     double vel_ned_mps[3];
     double quat_wxyz[4];
-    // Optional sensor extras (emitted only if enabled for the vehicle):
-    std::optional<std::array<double, 6>> rangefinder_m;
+    // Optional sensors: rng_1..rng_<count> emitted iff rangefinder_count > 0.
+    std::array<double, 6> rangefinder_m{};
+    uint8_t rangefinder_count = 0;
 };
 
 // Serialize one reply datagram: single JSON object, '\n'-terminated, snprintf into buf,

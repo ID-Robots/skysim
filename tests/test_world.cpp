@@ -2,6 +2,7 @@
 // hover balance, yaw torque, and same-build determinism (CLAUDE.md invariant 4).
 #include <cmath>
 #include <cstdio>
+#include <utility>
 
 #include "core/world.h"
 
@@ -117,6 +118,43 @@ int main() {
         CHECK(a.pos_ned[0] == b.pos_ned[0] && a.pos_ned[1] == b.pos_ned[1] && a.pos_ned[2] == b.pos_ned[2]);
         CHECK(a.vel_ned[0] == b.vel_ned[0] && a.vel_ned[1] == b.vel_ned[1] && a.vel_ned[2] == b.vel_ned[2]);
         CHECK(a.quat_ned_frd[0] == b.quat_ned_frd[0] && a.quat_ned_frd[3] == b.quat_ned_frd[3]);
+    }
+
+    // --- Wind: same seed => bit-identical gust sequence; different seed => different. ---
+    {
+        auto gust_trace = [](uint64_t seed) {
+            WorldConfig cfg = test_cfg();
+            cfg.wind_steady_ned = {5.0, 0.0, 0.0};
+            cfg.gust_sigma_mps = 2.0;
+            cfg.gust_tau_s = 1.0;
+            cfg.rng_seed = seed;
+            World w(cfg);
+            double acc = 0.0;
+            Vec3 last{};
+            for (int i = 0; i < 400; ++i) {
+                w.step();
+                last = w.wind_ned();
+                acc += last[0] + last[1] + last[2];
+            }
+            return std::pair{acc, last};
+        };
+        const auto [acc1, last1] = gust_trace(42);
+        const auto [acc2, last2] = gust_trace(42);
+        const auto [acc3, last3] = gust_trace(43);
+        CHECK(acc1 == acc2 && last1[0] == last2[0] && last1[2] == last2[2]); // bit-identical
+        CHECK(acc1 != acc3);                                                 // seed matters
+        CHECK(std::abs(last1[0] - 5.0) < 10.0);    // gusts fluctuate around the steady wind
+        CHECK(last1[0] != 5.0 || last1[1] != 0.0); // and are actually non-zero
+    }
+
+    // --- No gusts configured: wind is exactly the steady vector. ---
+    {
+        WorldConfig cfg = test_cfg();
+        cfg.wind_steady_ned = {3.0, -1.0, 0.0};
+        World w(cfg);
+        w.step();
+        const Vec3 wind = w.wind_ned();
+        CHECK(wind[0] == 3.0 && wind[1] == -1.0 && wind[2] == 0.0);
     }
 
     // --- Raycast: straight down from 10 m above ground hits at ~10 m. ---

@@ -73,6 +73,16 @@ class Vehicle:
         raise TimeoutError(f"[I{self.instance}] timeout waiting for {what}")
 
 
+def stop(proc: subprocess.Popen, timeout: float = 10.0) -> None:
+    """Terminate and WAIT. Back-to-back runs collide on SITL ports otherwise."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
 def launch_sitl(binary: str, instance: int, home: str, defaults: str) -> subprocess.Popen:
     run_dir = tempfile.mkdtemp(prefix=f"skysim_sitl_I{instance}_")
     cmd = [
@@ -190,8 +200,8 @@ def main() -> int:
         return 0
     finally:
         for v in vehicles:
-            v.proc.terminate()
-        sim.terminate()
+            stop(v.proc)
+        stop(sim)
 
 
 if __name__ == "__main__":

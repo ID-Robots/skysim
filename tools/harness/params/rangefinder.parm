@@ -1,0 +1,7 @@
+# Enable ArduPilot's SITL rangefinder driver fed by skysim's rng_1 (down-facing raycast).
+# Names verified at Copter-4.7.0: RNGFND1_MIN/MAX are meters (AP_RangeFinder_Params.cpp:107,115),
+# TYPE 100 = SIM (AP_RangeFinder.h:201), ORIENT 25 = down.
+RNGFND1_TYPE 100
+RNGFND1_ORIENT 25
+RNGFND1_MIN 0.05
+RNGFND1_MAX 40

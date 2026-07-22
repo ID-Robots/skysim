@@ -50,6 +50,7 @@ int main() {
         "{\"timestamp\":12.345600,"
         "\"imu\":{\"gyro\":[0.010000,-0.020000,0.030000],\"accel_body\":[0.000000,0.000000,-9.810000]},"
         "\"position\":[1.500000,-2.500000,-10.000000],\"velocity\":[0.500000,0.000000,-1.000000],"
+        "\"attitude\":[0.0000000,0.0000000,0.0000000],"
         "\"quaternion\":[1.0000000,0.0000000,0.0000000,0.0000000]}\n";
     if (s != expected) {
         std::printf("FAIL golden mismatch:\n  got: %s  want: %s", s.c_str(), expected.c_str());
@@ -63,8 +64,9 @@ int main() {
     CHECK(s.find("\"velocity\"") != std::string::npos);
     CHECK(s.find("velocity") == s.rfind("velocity")); // exactly one "velocity" substring
 
-    // Rangefinders: optional keys appended with exact keytable spelling rng_1..rng_6.
+    // Rangefinders: optional keys appended with exact keytable spelling rng_1..rng_<count>.
     t.rangefinder_m = {1.25, 2.5, 3.75, 5.0, 6.25, 7.5};
+    t.rangefinder_count = 6;
     const size_t n2 = skysim::protocol::build_state_json(t, buf, sizeof(buf));
     CHECK(n2 > n);
     const std::string s2(buf, n2);
@@ -72,6 +74,13 @@ int main() {
     CHECK(s2.find("\"rng_6\":7.5000") != std::string::npos);
     CHECK(s2.find(' ') == std::string::npos);
     CHECK(s2.back() == '\n');
+
+    // Count 1 emits only rng_1.
+    t.rangefinder_count = 1;
+    const size_t n2b = skysim::protocol::build_state_json(t, buf, sizeof(buf));
+    const std::string s2b(buf, n2b);
+    CHECK(s2b.find("\"rng_1\":") != std::string::npos);
+    CHECK(s2b.find("\"rng_2\":") == std::string::npos);
 
     // Overflow contract: returns 0 when the buffer is too small.
     char tiny[32];

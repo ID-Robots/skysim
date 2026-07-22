@@ -14,6 +14,13 @@ struct WorldConfig {
     uint32_t max_bodies = 4096;
     int worker_threads = -1; // -1 => hardware_concurrency - 1
     uint64_t rng_seed = 1;   // all randomness derives from this (determinism invariant)
+
+    // Wind = steady + gusts. Gusts are a per-axis Ornstein-Uhlenbeck process driven by the
+    // world-owned PRNG (DESIGN.md "Vehicle model"): stationary std dev gust_sigma_mps,
+    // correlation time gust_tau_s. Advanced once per step(), exact discretization.
+    Vec3 wind_steady_ned{0.0, 0.0, 0.0};
+    double gust_sigma_mps = 0.0;
+    double gust_tau_s = 2.0;
 };
 
 struct VehicleBodyParams {
@@ -44,7 +51,10 @@ class World {
     void add_ground_plane();                             // flat ground at NED z = 0
     size_t load_tiles(const std::filesystem::path &dir); // cooked .jshape tiles + index.json
     // Ray from origin_ned along dir_ned (unit); returns hit distance or a negative value.
-    double raycast(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_dist_m) const;
+    // ignore_vehicle_id: skip that vehicle's own body (rangefinders ray from the body center,
+    // which would otherwise hit the vehicle's own collision box at distance 0).
+    double raycast(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_dist_m,
+                   uint32_t ignore_vehicle_id = 0) const;
 
     // Vehicles (tick boundaries only). Returns body id used by the calls below.
     uint32_t add_vehicle(const VehicleBodyParams &p);
@@ -55,6 +65,9 @@ class World {
     void step();
 
     BodyState get_state(uint32_t id) const;
+
+    // Current wind (steady + gust), NED m/s. Constant within a tick; changes only in step().
+    Vec3 wind_ned() const;
 
     double now() const;
     uint64_t tick_index() const;

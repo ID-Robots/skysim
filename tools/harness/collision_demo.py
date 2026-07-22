@@ -27,7 +27,7 @@ import time
 
 from pymavlink import mavutil
 
-from conformance import Vehicle, launch_sitl, wait_ready  # same-dir import
+from conformance import Vehicle, launch_sitl, stop, wait_ready  # same-dir import
 
 ROOF_Z = -20.0          # building (1,1) top, NED
 BLDG_N = (80.0, 120.0)  # north extent
@@ -138,12 +138,8 @@ def main() -> int:
                 break
         print(f"  EKF max east during impact: {ekf_max_east:.2f} m (estimate only, may drift)")
     finally:
-        v.proc.terminate()
-        sim.terminate()
-        try:
-            sim.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            sim.kill()
+        stop(v.proc)
+        stop(sim)
 
     # Ground-truth no-tunneling check: in the impact band (below the roof, in the building's
     # north span), the TRUE east position must stop at the wall plane (80) minus the body

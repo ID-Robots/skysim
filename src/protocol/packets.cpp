@@ -1,6 +1,7 @@
 // See docs/PROTOCOL.md. Layouts verified against SIM_JSON.h @ Copter-4.7.0.
 #include "protocol/packets.h"
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -96,21 +97,31 @@ size_t build_state_json(const VehicleTruth &t, char *buf, size_t buf_size) {
     // A quaternion with any non-finite component is unusable as a whole: fall back to identity.
     const bool quat_ok = std::isfinite(t.quat_wxyz[0]) && std::isfinite(t.quat_wxyz[1]) &&
                          std::isfinite(t.quat_wxyz[2]) && std::isfinite(t.quat_wxyz[3]);
+    const double qw = quat_ok ? t.quat_wxyz[0] : 1.0;
+    const double qx = quat_ok ? t.quat_wxyz[1] : 0.0;
+    const double qy = quat_ok ? t.quat_wxyz[2] : 0.0;
+    const double qz = quat_ok ? t.quat_wxyz[3] : 0.0;
 
-    bool ok =
-        emit("{\"timestamp\":%.6f,\"imu\":{\"gyro\":[%.6f,%.6f,%.6f],\"accel_body\":[%.6f,%.6f,%.6f]},",
-             fin(t.timestamp_s), fin(t.gyro_rps[0]), fin(t.gyro_rps[1]), fin(t.gyro_rps[2]),
-             fin(t.accel_body[0]), fin(t.accel_body[1]), fin(t.accel_body[2])) &&
-        emit("\"position\":[%.6f,%.6f,%.6f],\"velocity\":[%.6f,%.6f,%.6f],", fin(t.pos_ned_m[0]),
-             fin(t.pos_ned_m[1]), fin(t.pos_ned_m[2]), fin(t.vel_ned_mps[0]), fin(t.vel_ned_mps[1]),
-             fin(t.vel_ned_mps[2])) &&
-        emit("\"quaternion\":[%.7f,%.7f,%.7f,%.7f]", quat_ok ? t.quat_wxyz[0] : 1.0,
-             quat_ok ? t.quat_wxyz[1] : 0.0, quat_ok ? t.quat_wxyz[2] : 0.0, quat_ok ? t.quat_wxyz[3] : 0.0);
-    if (ok && t.rangefinder_m.has_value()) {
-        const auto &rng = *t.rangefinder_m;
-        for (size_t i = 0; ok && i < rng.size(); ++i) {
-            ok = emit(",\"rng_%zu\":%.4f", i + 1, fin(rng[i]));
-        }
+    // Euler attitude is emitted IN ADDITION to the quaternion (which ArduPilot prefers,
+    // SIM_JSON.cpp:430-435) because of an upstream quirk at Copter-4.7.0: the rangefinder
+    // copy loop (SIM_JSON.cpp:465-470) still uses pre-lat/lon/alt keytable bit indices, so
+    // rangefinder_m[0] is only updated when the EULER_ATT bit is present. See PROTOCOL.md.
+    const double sinp = std::clamp(2.0 * (qw * qy - qx * qz), -1.0, 1.0);
+    const double roll = std::atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy));
+    const double pitch = std::asin(sinp);
+    const double yaw = std::atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
+
+    bool ok = emit("{\"timestamp\":%.6f,\"imu\":{\"gyro\":[%.6f,%.6f,%.6f],\"accel_body\":[%.6f,%.6f,%.6f]},",
+                   fin(t.timestamp_s), fin(t.gyro_rps[0]), fin(t.gyro_rps[1]), fin(t.gyro_rps[2]),
+                   fin(t.accel_body[0]), fin(t.accel_body[1]), fin(t.accel_body[2])) &&
+              emit("\"position\":[%.6f,%.6f,%.6f],\"velocity\":[%.6f,%.6f,%.6f],", fin(t.pos_ned_m[0]),
+                   fin(t.pos_ned_m[1]), fin(t.pos_ned_m[2]), fin(t.vel_ned_mps[0]), fin(t.vel_ned_mps[1]),
+                   fin(t.vel_ned_mps[2])) &&
+              emit("\"attitude\":[%.7f,%.7f,%.7f],", roll, pitch, yaw) &&
+              emit("\"quaternion\":[%.7f,%.7f,%.7f,%.7f]", qw, qx, qy, qz);
+    const size_t n_rng = std::min<size_t>(t.rangefinder_count, t.rangefinder_m.size());
+    for (size_t i = 0; ok && i < n_rng; ++i) {
+        ok = emit(",\"rng_%zu\":%.4f", i + 1, fin(t.rangefinder_m[i]));
     }
     if (!ok || !emit("%s", "}\n")) {
         return 0;

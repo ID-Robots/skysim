@@ -109,6 +109,17 @@ quaternion above are optional too):
 `SIM_JSON.cpp:406-416`) · `no_lockstep` (bool: SITL free-runs, non-blocking receive,
 `SIM_JSON.cpp:309-319,418-427`) · `rc {rc_1..rc_12}` (µs) · `battery {voltage, current}` (V, A).
 
+### Upstream quirk: rangefinder copy is gated on the euler-attitude bit (Copter-4.7.0)
+
+The loop that copies parsed `rng_*` values into `state.rangefinder_m[]`
+(`SIM_JSON.cpp:465-470`) iterates received-bitmask bits 7..12 — stale indices from before
+`latitude/longitude/altitude` were added to the keytable (rng_1 is actually bit 10,
+`SIM_JSON.h:179`). Net effect: `rangefinder_m[0]` is updated only when the **euler
+`attitude` key** (bit 7) is present. A quaternion-only sender's rangefinder data is
+silently dropped. skysim therefore always emits `attitude` (derived from the quaternion)
+alongside `quaternion`; ArduPilot still uses the quaternion for attitude when both are
+present (`SIM_JSON.cpp:430-435`).
+
 ### ArduPilot's parser is strstr-based, not a real JSON parser (`SIM_JSON.cpp:177-297`)
 
 Hard interop rules for our emitter:
