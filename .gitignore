@@ -1,0 +1,6 @@
+build/
+.cache/
+__pycache__/
+*.pyc
+compile_commands.json
+tests/fixtures/*.bin
