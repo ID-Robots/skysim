@@ -267,6 +267,22 @@ uint32_t World::add_vehicle(const VehicleBodyParams &p) {
     return id;
 }
 
+void World::set_frozen(uint32_t id, bool frozen) {
+    auto it = impl_->vehicles.find(id);
+    if (it == impl_->vehicles.end()) {
+        return;
+    }
+    auto &bi = impl_->bodies();
+    const JPH::BodyID body = it->second.body;
+    if (frozen) {
+        bi.SetLinearAndAngularVelocity(body, JPH::Vec3::sZero(), JPH::Vec3::sZero());
+        bi.SetMotionType(body, JPH::EMotionType::Kinematic, JPH::EActivation::Activate);
+    } else {
+        bi.SetMotionType(body, JPH::EMotionType::Dynamic, JPH::EActivation::Activate);
+    }
+    it->second.prev_vel_ned = {0.0, 0.0, 0.0};
+}
+
 void World::remove_vehicle(uint32_t id) {
     auto it = impl_->vehicles.find(id);
     if (it == impl_->vehicles.end()) {

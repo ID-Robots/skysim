@@ -60,6 +60,10 @@ class World {
     uint32_t add_vehicle(const VehicleBodyParams &p);
     void remove_vehicle(uint32_t id);
 
+    // Straggler policy (DESIGN.md "interactive"): frozen = kinematic hold — the body keeps
+    // its pose, ignores forces and gravity, still collides as an obstacle for others.
+    void set_frozen(uint32_t id, bool frozen);
+
     // Per-tick: queue a body wrench (force/torque in body FRD), then step once by dt.
     void apply_body_wrench(uint32_t id, const Vec3 &force_frd, const Vec3 &torque_frd);
     void step();

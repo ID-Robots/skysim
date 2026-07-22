@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -113,7 +114,7 @@ def wait_ready(v: Vehicle, timeout: float = 120.0) -> None:
     print(f"  [I{v.instance}] prearm clean")
 
 
-def flight(v: Vehicle) -> None:
+def flight(v: Vehicle, east_offset: float = 0.0) -> None:
     m = v.mav
     assert m is not None
     m.set_mode("GUIDED")
@@ -142,7 +143,8 @@ def flight(v: Vehicle) -> None:
                  90, f"takeoff to {TAKEOFF_ALT_M} m")
     print(f"  [I{v.instance}] takeoff {TAKEOFF_ALT_M} m OK")
 
-    for i, (north, east) in enumerate(SQUARE_NE):
+    for i, (north, east_rel) in enumerate(SQUARE_NE):
+        east = east_rel + east_offset  # per-vehicle airspace cell (shared physical world)
         m.mav.set_position_target_local_ned_send(
             0, m.target_system, m.target_component, mavutil.mavlink.MAV_FRAME_LOCAL_NED,
             POSITION_ONLY_MASK, north, east, -TAKEOFF_ALT_M, 0, 0, 0, 0, 0, 0, 0, 0)
@@ -173,6 +175,7 @@ def main() -> int:
     ap.add_argument("--home", default="42.1354,24.7453,164,0")
     ap.add_argument("--tiles", default="")
     ap.add_argument("--dt", default="0.00125")  # 800 Hz, pairs with SIM_RATE_HZ=800 overlay
+    ap.add_argument("--spacing", type=float, default=30.0)  # per-vehicle airspace cell, m
     args = ap.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
@@ -182,7 +185,8 @@ def main() -> int:
     ])
 
     sim_cmd = [args.sim, "--vehicles", str(args.vehicles), "--base-instance",
-               str(args.base_instance), "--time-mode", "strict", "--dt", args.dt]
+               str(args.base_instance), "--time-mode", "strict", "--dt", args.dt,
+               "--spacing", str(args.spacing), "--strict-timeout", "60"]
     if args.tiles:
         sim_cmd += ["--tiles", args.tiles]
     sim = subprocess.Popen(sim_cmd)
@@ -192,16 +196,35 @@ def main() -> int:
                         launch_sitl(args.binary, args.base_instance + i, args.home, defaults))
                 for i in range(args.vehicles)]
     try:
-        for v in vehicles:
-            wait_ready(v)
-        for v in vehicles:  # TODO(M4): run concurrently (threads) once multi-vehicle lands
-            flight(v)
+        # Readiness and flights run concurrently: strict lockstep couples all vehicles, so a
+        # sequential flight loop would stall everyone else's clock at each barrier.
+        errors: list[str] = []
+
+        def fly(idx: int, v: Vehicle) -> None:
+            try:
+                wait_ready(v)
+                flight(v, east_offset=args.spacing * idx)
+            except Exception as e:  # noqa: BLE001 — report per-vehicle, fail the run below
+                errors.append(f"I{v.instance}: {e}")
+
+        threads = [threading.Thread(target=fly, args=(i, v), daemon=True)
+                   for i, v in enumerate(vehicles)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        if errors:
+            for e in errors:
+                print(f"FAIL {e}")
+            return 1
         print(f"PASS: {len(vehicles)} vehicle(s)")
         return 0
     finally:
+        # Sim first: killing SITLs one by one would otherwise trip the strict straggler
+        # abort while later SITLs are still sending (harmless, but noisy).
+        stop(sim)
         for v in vehicles:
             stop(v.proc)
-        stop(sim)
 
 
 if __name__ == "__main__":

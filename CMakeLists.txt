@@ -21,6 +21,18 @@ FetchContent_MakeAvailable(JoltPhysics)
 set_target_properties(Jolt PROPERTIES
     INTERFACE_SYSTEM_INCLUDE_DIRECTORIES $<TARGET_PROPERTY:Jolt,INTERFACE_INCLUDE_DIRECTORIES>)
 
+# --- cpp-httplib (control plane, M4; header-only) ---------------------------------------------
+set(HTTPLIB_REQUIRE_OPENSSL OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_ZLIB_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_BROTLI_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_ZSTD_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(httplib
+    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+    GIT_TAG        v0.18.3
+)
+FetchContent_MakeAvailable(httplib)
+
 # --- protocol (no Jolt dependency; shared by server and tests) -------------------------------
 find_package(Threads REQUIRED)
 add_library(skysim_protocol STATIC
@@ -31,13 +43,20 @@ target_include_directories(skysim_protocol PUBLIC src)
 target_link_libraries(skysim_protocol PUBLIC Threads::Threads)
 target_compile_options(skysim_protocol PRIVATE -Wall -Wextra -Wshadow)
 
-# --- vehicle model (no Jolt dependency) ------------------------------------------------------
+# --- vehicle model + lifecycle (no Jolt dependency) ------------------------------------------
 add_library(skysim_vehicle STATIC
     src/vehicle/motor_model.cpp
     src/vehicle/quad.cpp
+    src/vehicle/manager.cpp
 )
 target_include_directories(skysim_vehicle PUBLIC src)
 target_compile_options(skysim_vehicle PRIVATE -Wall -Wextra -Wshadow)
+
+# --- control plane (M4) -----------------------------------------------------------------------
+add_library(skysim_api STATIC src/api/control_server.cpp)
+target_include_directories(skysim_api PUBLIC src)
+target_link_libraries(skysim_api PUBLIC skysim_vehicle Threads::Threads PRIVATE httplib::httplib)
+target_compile_options(skysim_api PRIVATE -Wall -Wextra -Wshadow)
 
 # --- core: Jolt world (the only Jolt consumer above tools/) ----------------------------------
 add_library(skysim_core STATIC src/core/world.cpp)
@@ -54,7 +73,7 @@ target_compile_options(skysim_terrain PRIVATE -Wall -Wextra -Wshadow)
 # --- skysim server --------------------------------------------------------------------------
 add_executable(skysim src/main.cpp)
 target_include_directories(skysim PRIVATE src)
-target_link_libraries(skysim PRIVATE skysim_protocol skysim_core skysim_vehicle)
+target_link_libraries(skysim PRIVATE skysim_protocol skysim_core skysim_vehicle skysim_api)
 target_compile_options(skysim PRIVATE -Wall -Wextra -Wshadow)
 
 # --- tile cooker ------------------------------------------------------------------------------
