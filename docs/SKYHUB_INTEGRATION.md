@@ -165,3 +165,35 @@ Two contributing factors, both diagnosed:
 - Apply the `SIM_RATE_HZ 800` container overlay ([C2]) and run skysim at `--dt 1/800`.
 - Investigate the skyhub_sitl mavlink-router SERIAL0 hold under `--model json` (it is stable
   under `--model quad`; the long-lived quad SITL runs for days).
+
+## Update — SITL boot root cause narrowed (2026-07-22, cont.)
+
+The container arducopter under `--model json` receives the first physics frame
+("JSON received") then stalls (~12% CPU = idle-blocked), never reaching EKF/GPS, so no
+position telemetry reaches the dashboard map. Systematically ruled OUT as causes:
+- skysim time mode (strict AND interactive both fail identically),
+- lockstep (added `--no-lockstep`; ArduPilot confirms "lockstep DISABLED" but still stalls),
+- host load (fails at load ~5 with a single SITL),
+- the strict barrier (fails with one vehicle, alone),
+- CPU cgroup limit (4 CPUs, using 12%),
+- SERIAL0 "New/Closed connection" churn (NORMAL — the healthy 4-day `--model quad` SITL
+  shows the identical pattern),
+- a stable external GCS on SERIAL0.
+
+**Established facts:** a *bare* arducopter with the EXACT container args (`--speedup 1
+--serial0 tcp:0 --model json:127.0.0.1 --defaults copter.parm`) + an active MAVLink client
+reaches EKF origin against skysim (proven repeatedly). The SAME container image with
+`--model quad` runs healthy for days. Only `--model json` INSIDE the container stalls.
+
+**Leading remaining hypothesis:** the json backend's boot needs an active MAVLink peer
+early; in the bare test the pymavlink GCS connects and streams immediately, whereas in the
+container MAVROS (separate core container) is slow to establish its FCU link through
+mavlink-router, and the json autopilot stalls in that gap. Next debugging step: confirm
+`/mavros/state` `connected=true` on the SITL, and/or have the SITL container hold a local
+GCS/stream on SERIAL0 at boot (independent of the core container's MAVROS).
+
+**What is fully working:** the integration plumbing end-to-end via the real dashboard —
+Simulated-drone create → gateway reserves skysim slot + `SITL_MODEL=json` → SITL/core/gamepad
+trio starts → both drones join one skysim world (`connected`, physics exchanged); gateway
+crash monitor live. skysim standalone: bare SITL flies to EKF/GPS, mid-air + building
+collisions detected. The gap is only the container arducopter completing EKF boot.
