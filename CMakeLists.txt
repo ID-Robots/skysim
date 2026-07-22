@@ -72,8 +72,11 @@ target_include_directories(skysim_core PUBLIC src)
 target_link_libraries(skysim_core PRIVATE Jolt)
 target_compile_options(skysim_core PRIVATE -Wall -Wextra -Wshadow)
 
-# --- terrain: OBJ -> MeshShape cooker library ------------------------------------------------
-add_library(skysim_terrain STATIC src/terrain/cook.cpp)
+# --- terrain: OBJ -> MeshShape cooker + tile streamer ----------------------------------------
+add_library(skysim_terrain STATIC
+    src/terrain/cook.cpp
+    src/terrain/tile_streamer.cpp
+)
 target_include_directories(skysim_terrain PUBLIC src)
 target_link_libraries(skysim_terrain PRIVATE Jolt)
 target_compile_options(skysim_terrain PRIVATE -Wall -Wextra -Wshadow)
@@ -81,7 +84,7 @@ target_compile_options(skysim_terrain PRIVATE -Wall -Wextra -Wshadow)
 # --- skysim server --------------------------------------------------------------------------
 add_executable(skysim src/main.cpp)
 target_include_directories(skysim PRIVATE src)
-target_link_libraries(skysim PRIVATE skysim_protocol skysim_core skysim_vehicle skysim_api)
+target_link_libraries(skysim PRIVATE skysim_protocol skysim_core skysim_vehicle skysim_api skysim_terrain)
 target_compile_options(skysim PRIVATE -Wall -Wextra -Wshadow)
 
 # --- tile cooker ------------------------------------------------------------------------------
@@ -138,6 +141,11 @@ add_executable(test_api tests/test_api.cpp)
 target_link_libraries(test_api PRIVATE skysim_api httplib::httplib)
 target_compile_options(test_api PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME api COMMAND test_api)
+
+add_executable(test_streamer tests/test_streamer.cpp)
+target_link_libraries(test_streamer PRIVATE skysim_terrain skysim_core)
+target_compile_options(test_streamer PRIVATE -Wall -Wextra -Wshadow)
+add_test(NAME streamer COMMAND test_streamer)
 
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_FOUND)

@@ -13,6 +13,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "api/control_server.h"
@@ -20,6 +21,7 @@
 #include "core/world.h"
 #include "protocol/packets.h"
 #include "protocol/udp_endpoint.h"
+#include "terrain/tile_streamer.h"
 #include "vehicle/manager.h"
 #include "vehicle/quad.h"
 
@@ -38,8 +40,10 @@ struct Options {
     double gust_sigma = 0.0;
     double gust_tau = 2.0;
     uint64_t seed = 1;
-    bool rangefinder = false;
+    int rangefinders = 0; // 0=none, 1=rng_1 down, 2=+rng_2 right (corridor wall tracking)
     bool canned = false;
+    double stream_radius_m = 600.0; // tiles resident within this of any vehicle
+    int stream_max_resident = 64;   // hard tile memory bound
     // M4: control plane + straggler policy + managed SITL processes.
     int api_port = 0;               // 0 = control plane disabled
     int hold_ticks = 3;             // interactive: reuse last PWM for up to k missed deadlines
@@ -91,7 +95,13 @@ Options parse_args(int argc, char **argv) {
         } else if (std::strcmp(argv[i], "--seed") == 0) {
             o.seed = std::strtoull(need_value("--seed"), nullptr, 10);
         } else if (std::strcmp(argv[i], "--rangefinder") == 0) {
-            o.rangefinder = true;
+            o.rangefinders = std::max(o.rangefinders, 1);
+        } else if (std::strcmp(argv[i], "--rangefinders") == 0) {
+            o.rangefinders = std::atoi(need_value("--rangefinders"));
+        } else if (std::strcmp(argv[i], "--stream-radius") == 0) {
+            o.stream_radius_m = std::atof(need_value("--stream-radius"));
+        } else if (std::strcmp(argv[i], "--stream-max") == 0) {
+            o.stream_max_resident = std::atoi(need_value("--stream-max"));
         } else if (std::strcmp(argv[i], "--canned") == 0) {
             o.canned = true;
         } else if (std::strcmp(argv[i], "--api-port") == 0) {
@@ -253,11 +263,16 @@ int send_replies(skysim::core::World *world, Fleet &fleet, const Options &opt, d
         skysim::protocol::VehicleTruth truth;
         if (world != nullptr) {
             truth = truth_from_state(v->state, now_s);
-            if (opt.rangefinder) {
-                const auto down_world = skysim::core::quat_rotate(v->state.quat_ned_frd, {0.0, 0.0, 1.0});
-                const double d = world->raycast(v->state.pos_ned, down_world, 40.0, v->body_id);
-                truth.rangefinder_m[0] = d < 0.0 ? 40.0 : d;
-                truth.rangefinder_count = 1;
+            if (opt.rangefinders > 0) {
+                // rng_1: down (body +z), rng_2: right (body +y) — corridor wall tracking.
+                const skysim::core::Vec3 body_dirs[2] = {{0.0, 0.0, 1.0}, {0.0, 1.0, 0.0}};
+                const int n = std::min(opt.rangefinders, 2);
+                for (int r = 0; r < n; ++r) {
+                    const auto dir_world = skysim::core::quat_rotate(v->state.quat_ned_frd, body_dirs[r]);
+                    const double d = world->raycast(v->state.pos_ned, dir_world, 40.0, v->body_id);
+                    truth.rangefinder_m[r] = d < 0.0 ? 40.0 : d;
+                }
+                truth.rangefinder_count = static_cast<uint8_t>(n);
             }
         } else {
             truth = {};
@@ -332,10 +347,42 @@ struct App {
     Options opt;
     std::unique_ptr<skysim::core::World> world;
     std::unique_ptr<skysim::vehicle::VehicleManager> manager;
+    std::unique_ptr<skysim::terrain::TileStreamer> streamer;
+    std::unordered_map<size_t, uint32_t> tile_world_ids; // streamer index -> world tile id
     Fleet fleet;
     skysim::api::CommandQueue queue;
     skysim::core::TickMetrics metrics;
     uint32_t next_vehicle_id = 1;
+
+    // Re-evaluate tile residency every ~0.125 s of sim time (tick boundaries only).
+    void stream_tiles() {
+        if (!streamer || world->tick_index() % 100 != 0) {
+            return;
+        }
+        std::vector<skysim::core::Vec3> positions;
+        positions.reserve(fleet.size());
+        for (const auto &v : fleet) {
+            positions.push_back(v->state.pos_ned);
+        }
+        const auto plan = streamer->update(positions);
+        for (size_t idx : plan.remove) {
+            auto it = tile_world_ids.find(idx);
+            if (it != tile_world_ids.end()) {
+                world->remove_static_tile(it->second);
+                tile_world_ids.erase(it);
+            }
+        }
+        for (size_t idx : plan.add) {
+            const uint32_t id = world->add_static_tile(streamer->tile_path(idx));
+            if (id != 0) {
+                tile_world_ids.emplace(idx, id);
+            }
+        }
+        if (!plan.add.empty() || !plan.remove.empty()) {
+            std::printf("skysim: tiles +%zu -%zu (resident %zu)\n", plan.add.size(), plan.remove.size(),
+                        streamer->resident_count());
+        }
+    }
 
     std::mutex snapshot_mutex;
     std::vector<skysim::api::VehicleInfo> vehicle_snapshot;
@@ -432,6 +479,7 @@ struct App {
         m.tick = world ? world->tick_index() : 0;
         m.sim_time_s = world ? world->now() : 0.0;
         m.vehicles = fleet.size();
+        m.resident_tiles = streamer ? streamer->resident_count() : 0;
         std::lock_guard<std::mutex> lock(snapshot_mutex);
         vehicle_snapshot = std::move(infos);
         metrics_snapshot = m;
@@ -446,6 +494,7 @@ int run_strict(App &app, FILE *truth_log, FILE *record_log) {
     bool barrier_was_complete = true;
     while (!g_stop.load(std::memory_order_relaxed)) {
         app.drain_commands();
+        app.stream_tiles();
 
         bool all_fresh = true;
         bool any_fresh = false;
@@ -508,6 +557,7 @@ int run_interactive(App &app, FILE *truth_log, FILE *record_log) {
         }
 
         app.drain_commands();
+        app.stream_tiles();
 
         for (auto &v : app.fleet) {
             const bool fresh = poll_endpoint(*v);
@@ -591,14 +641,30 @@ int main(int argc, char **argv) {
     wcfg.gust_sigma_mps = opt.gust_sigma;
     wcfg.gust_tau_s = opt.gust_tau;
     wcfg.rng_seed = opt.seed;
+    const bool replaying = !opt.replay_servo.empty();
     if (!opt.canned) {
         app.world = std::make_unique<skysim::core::World>(wcfg);
         app.world->add_ground_plane();
-        if (!opt.tiles.empty()) {
+        if (!opt.tiles.empty() && replaying) {
+            // Replay: all tiles resident up front (streaming decisions are not on the tape).
             const size_t n = app.world->load_tiles(opt.tiles);
             std::printf("skysim: loaded %zu tile(s) from %s\n", n, opt.tiles.c_str());
             if (n == 0) {
                 std::fprintf(stderr, "skysim: --tiles %s yielded no tiles\n", opt.tiles.c_str());
+                return 1;
+            }
+        } else if (!opt.tiles.empty()) {
+            try {
+                skysim::terrain::StreamerConfig scfg;
+                scfg.tile_dir = opt.tiles;
+                scfg.keep_radius_m = opt.stream_radius_m;
+                scfg.max_resident = static_cast<size_t>(opt.stream_max_resident);
+                app.streamer = std::make_unique<skysim::terrain::TileStreamer>(scfg);
+                std::printf("skysim: streaming %zu tile(s) from %s (radius %.0f m, max %d)\n",
+                            app.streamer->tiles().size(), opt.tiles.c_str(), opt.stream_radius_m,
+                            opt.stream_max_resident);
+            } catch (const std::exception &e) {
+                std::fprintf(stderr, "skysim: %s\n", e.what());
                 return 1;
             }
         }
@@ -611,7 +677,6 @@ int main(int argc, char **argv) {
     pcfg.run_dir = "/tmp/skysim_managed";
     app.manager = std::make_unique<skysim::vehicle::VehicleManager>(opt.base_instance, pcfg);
 
-    const bool replaying = !opt.replay_servo.empty();
     if (replaying && (!app.world || opt.time_mode != "strict")) {
         std::fprintf(stderr, "skysim: --replay-servo requires strict mode + jolt physics\n");
         return 1;

@@ -127,6 +127,7 @@ struct World::Impl {
     uint32_t next_id = 1;
     std::unordered_map<uint32_t, VehicleEntry> vehicles;
     std::vector<JPH::BodyID> static_bodies;
+    std::unordered_map<uint32_t, JPH::BodyID> static_tiles; // streamed (M5)
 
     // Wind: steady + OU gusts, all randomness from this world-owned PRNG (invariant 4).
     Vec3 wind_steady{};
@@ -183,6 +184,28 @@ void World::add_ground_plane() {
     impl_->static_bodies.push_back(id);
 }
 
+namespace {
+// Tiles are cooked in Jolt frame with world-absolute vertices; place at identity.
+JPH::BodyID create_tile_body(JPH::BodyInterface &bodies, const std::filesystem::path &jshape) {
+    std::ifstream in(jshape, std::ios::binary);
+    if (!in) {
+        std::fprintf(stderr, "world: cannot open tile %s\n", jshape.c_str());
+        return {};
+    }
+    JPH::StreamInWrapper stream(in);
+    JPH::Shape::ShapeResult result = JPH::Shape::sRestoreFromBinaryState(stream);
+    if (result.HasError()) {
+        std::fprintf(stderr, "world: tile %s: %s\n", jshape.c_str(), result.GetError().c_str());
+        return {};
+    }
+    JPH::BodyCreationSettings s(result.Get(), JPH::RVec3::sZero(), JPH::Quat::sIdentity(),
+                                JPH::EMotionType::Static, object_layers::kStatic);
+    s.mFriction = 0.8f;
+    s.mRestitution = 0.0f;
+    return bodies.CreateAndAddBody(s, JPH::EActivation::DontActivate);
+}
+} // namespace
+
 size_t World::load_tiles(const std::filesystem::path &dir) {
     size_t loaded = 0;
     std::error_code ec;
@@ -194,26 +217,33 @@ size_t World::load_tiles(const std::filesystem::path &dir) {
         if (entry.path().extension() != ".jshape") {
             continue;
         }
-        std::ifstream in(entry.path(), std::ios::binary);
-        if (!in) {
-            std::fprintf(stderr, "world: cannot open tile %s\n", entry.path().c_str());
-            continue;
+        const JPH::BodyID body = create_tile_body(impl_->bodies(), entry.path());
+        if (!body.IsInvalid()) {
+            impl_->static_bodies.push_back(body);
+            ++loaded;
         }
-        JPH::StreamInWrapper stream(in);
-        JPH::Shape::ShapeResult result = JPH::Shape::sRestoreFromBinaryState(stream);
-        if (result.HasError()) {
-            std::fprintf(stderr, "world: tile %s: %s\n", entry.path().c_str(), result.GetError().c_str());
-            continue;
-        }
-        // Tiles are cooked in Jolt frame with world-absolute vertices; place at identity.
-        JPH::BodyCreationSettings s(result.Get(), JPH::RVec3::sZero(), JPH::Quat::sIdentity(),
-                                    JPH::EMotionType::Static, object_layers::kStatic);
-        s.mFriction = 0.8f;
-        s.mRestitution = 0.0f;
-        impl_->static_bodies.push_back(impl_->bodies().CreateAndAddBody(s, JPH::EActivation::DontActivate));
-        ++loaded;
     }
     return loaded;
+}
+
+uint32_t World::add_static_tile(const std::filesystem::path &jshape) {
+    const JPH::BodyID body = create_tile_body(impl_->bodies(), jshape);
+    if (body.IsInvalid()) {
+        return 0;
+    }
+    const uint32_t id = impl_->next_id++;
+    impl_->static_tiles.emplace(id, body);
+    return id;
+}
+
+void World::remove_static_tile(uint32_t id) {
+    auto it = impl_->static_tiles.find(id);
+    if (it == impl_->static_tiles.end()) {
+        return;
+    }
+    impl_->bodies().RemoveBody(it->second);
+    impl_->bodies().DestroyBody(it->second);
+    impl_->static_tiles.erase(it);
 }
 
 double World::raycast(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_dist_m,

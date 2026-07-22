@@ -1,0 +1,6 @@
+# Second SITL rangefinder: right-facing (ORIENT 2 = ROTATION_YAW_90), fed by skysim rng_2.
+# Used by the M5 corridor test to track building walls abeam the flight path.
+RNGFND2_TYPE 100
+RNGFND2_ORIENT 2
+RNGFND2_MIN 0.05
+RNGFND2_MAX 40

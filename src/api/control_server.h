@@ -33,6 +33,7 @@ struct MetricsInfo {
     uint64_t tick = 0;
     double sim_time_s = 0.0;
     size_t vehicles = 0;
+    size_t resident_tiles = 0; // streamed-in city tiles (M5 memory bound observable)
 };
 
 struct SpawnCommand {

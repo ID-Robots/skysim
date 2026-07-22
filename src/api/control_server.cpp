@@ -107,10 +107,10 @@ ControlServer::ControlServer(int port, CommandQueue &queue, Snapshots snapshots)
         std::snprintf(buf, sizeof(buf),
                       "{\"tick\":%llu,\"sim_time_s\":%.3f,\"tick_p50_us\":%.1f,"
                       "\"tick_p99_us\":%.1f,\"straggler_events\":%llu,\"freezes\":%llu,"
-                      "\"vehicles\":%zu}",
+                      "\"vehicles\":%zu,\"resident_tiles\":%zu}",
                       static_cast<unsigned long long>(m.tick), m.sim_time_s, m.tick_p50_us, m.tick_p99_us,
                       static_cast<unsigned long long>(m.straggler_events),
-                      static_cast<unsigned long long>(m.freezes), m.vehicles);
+                      static_cast<unsigned long long>(m.freezes), m.vehicles, m.resident_tiles);
         res.set_content(buf, "application/json");
     });
 

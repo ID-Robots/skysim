@@ -49,7 +49,12 @@ class World {
 
     // Static environment (add at startup / tick boundaries only).
     void add_ground_plane();                             // flat ground at NED z = 0
-    size_t load_tiles(const std::filesystem::path &dir); // cooked .jshape tiles + index.json
+    size_t load_tiles(const std::filesystem::path &dir); // load ALL tiles (tests, replay)
+
+    // Streamed tiles (M5): add/remove one cooked .jshape at tick boundaries.
+    // Returns 0 on load failure.
+    uint32_t add_static_tile(const std::filesystem::path &jshape);
+    void remove_static_tile(uint32_t id);
     // Ray from origin_ned along dir_ned (unit); returns hit distance or a negative value.
     // ignore_vehicle_id: skip that vehicle's own body (rangefinders ray from the body center,
     // which would otherwise hit the vehicle's own collision box at distance 0).
