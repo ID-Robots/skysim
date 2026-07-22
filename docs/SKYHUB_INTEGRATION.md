@@ -197,3 +197,30 @@ Simulated-drone create → gateway reserves skysim slot + `SITL_MODEL=json` → 
 trio starts → both drones join one skysim world (`connected`, physics exchanged); gateway
 crash monitor live. skysim standalone: bare SITL flies to EKF/GPS, mid-air + building
 collisions detected. The gap is only the container arducopter completing EKF boot.
+
+## RESOLVED — full end-to-end crash detection working in the UI (2026-07-22)
+
+The SITL json-boot stall is **solved**. Root cause: ArduPilot's json backend needs a live
+MAVLink **GCS peer** (heartbeats + data-stream request) to progress past early boot, but the
+core container's MAVROS waits for the autopilot first — a deadlock, so neither the autopilot
+nor MAVROS ever comes up. A GCS heartbeat pump on the SITL's GCS fan-out port
+(`14551 + instance`) breaks it: the autopilot immediately reaches EKF origin / GPS.
+
+Proven end-to-end through the real dashboard:
+1. Two Simulated drones created (dashboard/gateway) → gateway sets `SITL_MODEL=json`,
+   reserves skysim slots → both join ONE skysim world (`connected`).
+2. GCS pump → both autopilots reach EKF/GPS, arm, take off (GUIDED) to 15 m.
+3. Commanded to the same point → **physical mid-air collision** in the shared skysim world.
+4. skysim counts `midair_collisions`; the gateway crash monitor emits `crash_alert` +
+   LOG telemetry; the **dashboard shows a "Collision detected" toast for each drone AND a
+   CRASH DETECTED stream in the terminal** (screenshots captured).
+
+Gateway fixes made this reliable: `_wait_for_rosbridge` now uses `host.docker.internal`
+(was `localhost` → always 30s timeout, ~60s/create) and the dashboard subscribes to
+`crash_alert`.
+
+**Productionize the GCS pump (last step):** the pump is currently an external helper
+(`tools/harness`-style). Move it into the SITL container startup (a tiny background
+heartbeat sender on `udpout` to its own MAVLink), OR have the gateway launch one per SITL
+at creation. Either makes json SITLs self-boot with no external helper. Also worth fixing
+upstream: have MAVROS not gate on the FCU before sending its initial heartbeat.
