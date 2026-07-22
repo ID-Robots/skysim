@@ -1,0 +1,111 @@
+- generic [ref=f1e2]:
+  - generic:
+    - alertdialog
+  - generic [ref=f1e76]:
+    - banner [ref=f1e78]:
+      - generic [ref=f1e79]:
+        - link "SkyHub home" [ref=f1e80] [cursor=pointer]:
+          - /url: /
+          - img "SkyHub" [ref=f1e81]
+        - text: 
+        - navigation "Primary" [ref=f1e82]:
+          - generic [ref=f1e83]:
+            - link "Features" [ref=f1e84] [cursor=pointer]:
+              - /url: /#features
+            - link "Pricing" [ref=f1e85] [cursor=pointer]:
+              - /url: /#pricing
+            - link "Docs" [ref=f1e86] [cursor=pointer]:
+              - /url: https://docs.skyhub.ai/
+            - link "Community" [ref=f1e87] [cursor=pointer]:
+              - /url: https://discord.gg/cehaEQHbP6
+          - link "Open the Map" [ref=f1e89] [cursor=pointer]:
+            - /url: /portal/map
+    - generic [ref=f1e91]:
+      - complementary [ref=f1e93]:
+        - menu [ref=f1e96]:
+          - text: Navigation
+          - menuitem "Home" [ref=f1e97]:
+            - generic [ref=f1e99] [cursor=pointer]:
+              - generic [ref=f1e100]: 
+              - generic [ref=f1e101]: Home
+          - menuitem "Map" [ref=f1e102]:
+            - generic [ref=f1e104] [cursor=pointer]:
+              - generic [ref=f1e105]: 
+              - generic [ref=f1e106]: Map
+          - menuitem "Vehicles" [ref=f1e107]:
+            - generic [ref=f1e109] [cursor=pointer]:
+              - generic [ref=f1e110]: 
+              - generic [ref=f1e111]: Vehicles
+          - menuitem "Calendar" [ref=f1e112]:
+            - generic [ref=f1e114] [cursor=pointer]:
+              - generic [ref=f1e115]: 
+              - generic [ref=f1e116]: Calendar
+          - menuitem "Reports" [ref=f1e117]:
+            - generic [ref=f1e119] [cursor=pointer]:
+              - generic [ref=f1e120]: 
+              - generic [ref=f1e121]: Reports
+          - menuitem "Gallery" [ref=f1e122]:
+            - generic [ref=f1e124] [cursor=pointer]:
+              - generic [ref=f1e125]: 
+              - generic [ref=f1e126]: Gallery
+          - text: Developers
+          - menuitem "Docs" [ref=f1e127]:
+            - generic [ref=f1e129] [cursor=pointer]:
+              - generic [ref=f1e130]: 
+              - generic [ref=f1e131]: Docs
+          - menuitem "Gamepad" [ref=f1e132]:
+            - generic [ref=f1e134] [cursor=pointer]:
+              - generic [ref=f1e135]: 
+              - generic [ref=f1e136]: Gamepad
+          - text: Account
+          - menuitem "Settings" [ref=f1e137]:
+            - generic [ref=f1e139] [cursor=pointer]:
+              - generic [ref=f1e140]: 
+              - generic [ref=f1e141]: Settings
+          - menuitem "Billing" [ref=f1e142]:
+            - generic [ref=f1e144] [cursor=pointer]:
+              - generic [ref=f1e145]: 
+              - generic [ref=f1e146]: Billing
+          - menuitem "Sign out" [ref=f1e147]:
+            - generic [ref=f1e149] [cursor=pointer]:
+              - generic [ref=f1e150]: 
+              - generic [ref=f1e151]: Sign out
+      - main [ref=f1e152]:
+        - generic [ref=f1e153]:
+          - heading "Welcome to SkyHub" [level=1] [ref=f1e154]
+          - paragraph [ref=f1e155]: Your fleet control center. Open the live map to command your vehicles, plan missions, and watch telemetry and video in real time — or manage your account from the menu.
+          - generic [ref=f1e156]:
+            - link "Open Map" [ref=f1e157] [cursor=pointer]:
+              - /url: /portal/map
+              - generic [ref=f1e158]: 
+              - text: Open Map
+            - link "Settings" [ref=f1e159] [cursor=pointer]:
+              - /url: /portal/settings
+              - generic [ref=f1e160]: 
+              - text: Settings
+            - link "Billing & subscription" [ref=f1e161] [cursor=pointer]:
+              - /url: /portal/billing
+              - generic [ref=f1e162]: 
+              - text: Billing & subscription
+            - link "Documentation" [ref=f1e163] [cursor=pointer]:
+              - /url: https://docs.skyhub.ai/
+              - generic [ref=f1e164]: 
+              - text: Documentation
+    - contentinfo [ref=f1e166]:
+      - generic [ref=f1e167]:
+        - img "SkyHub" [ref=f1e168]
+        - generic [ref=f1e169]: © 2026 ID Robots Ltd.
+        - navigation "Footer" [ref=f1e170]:
+          - link "Docs" [ref=f1e171] [cursor=pointer]:
+            - /url: https://docs.skyhub.ai/drone-os/guides/getting-started
+          - link "API" [ref=f1e172] [cursor=pointer]:
+            - /url: https://docs.skyhub.ai/reference/api
+          - link "About" [ref=f1e173] [cursor=pointer]:
+            - /url: https://idrobots.com/about
+          - link "Contact" [ref=f1e174] [cursor=pointer]:
+            - /url: https://idrobots.com/contact
+          - link "Discord" [ref=f1e175] [cursor=pointer]:
+            - /url: https://discord.gg/cehaEQHbP6
+          - link "GitHub" [ref=f1e176] [cursor=pointer]:
+            - /url: https://github.com/ID-Robots
+            - generic [ref=f1e177]: 

@@ -53,8 +53,12 @@ python3 tools/harness/conformance.py --binary $ARDUPILOT_ROOT/build/sitl/bin/ard
 - Include `<Jolt/Jolt.h>` before any other Jolt header. Do not let clang-format or an editor
   reorder Jolt includes.
 - Init order at startup: `RegisterDefaultAllocator()` → `Factory::sInstance = new Factory` →
-  `RegisterTypes()` → create `TempAllocatorImpl` and `JobSystemThreadPool`
-  (threads = hardware_concurrency − 1) → create `PhysicsSystem`.
+  `RegisterTypes()` → create `TempAllocatorImpl` and the job system → create `PhysicsSystem`.
+  Job system default is **single-threaded** (`JobSystemSingleThreaded`): for the tens-to-hundreds
+  of bodies one world holds, a thread pool is a net loss (dispatch + barrier + wakeup jitter
+  inflate tick p99 several-fold; crossover is ~1000 bodies). Scale by sharding worlds across
+  processes, not threads. `WorldConfig.worker_threads > 0` opts into a pool. Measure with
+  `tools/bench/world_bench`.
 - Static city geometry = `MeshShape` per tile. Mesh collision is one-sided: the cooker must
   guarantee outward winding. Dynamic bodies (vehicles) are convex primitives only.
 - Broad-phase layers: `STATIC` (tiles) and `MOVING` (vehicles). Vehicles collide with both.

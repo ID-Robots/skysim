@@ -1,0 +1,137 @@
+- generic [ref=f4e3]:
+  - generic:
+    - alertdialog
+  - generic [ref=f4e4]:
+    - generic [ref=f4e5]:
+      - banner [ref=f4e7]:
+        - generic [ref=f4e8]:
+          - link "SkyHub home" [ref=f4e9] [cursor=pointer]:
+            - /url: /
+            - img "SkyHub" [ref=f4e10]
+          - text: 
+          - navigation "Primary" [ref=f4e11]:
+            - generic [ref=f4e12]:
+              - link "Features" [ref=f4e13] [cursor=pointer]:
+                - /url: /#features
+              - link "Pricing" [ref=f4e14] [cursor=pointer]:
+                - /url: /#pricing
+              - link "Docs" [ref=f4e15] [cursor=pointer]:
+                - /url: https://docs.skyhub.ai/
+              - link "Community" [ref=f4e16] [cursor=pointer]:
+                - /url: https://discord.gg/cehaEQHbP6
+            - link "Open the Map" [ref=f4e18] [cursor=pointer]:
+              - /url: /portal/map
+      - generic [ref=f4e20]:
+        - complementary [ref=f4e22]:
+          - menu [ref=f4e25]:
+            - text: Navigation
+            - menuitem "Home" [ref=f4e26]:
+              - generic [ref=f4e28] [cursor=pointer]:
+                - generic [ref=f4e29]: 
+                - generic [ref=f4e30]: Home
+            - menuitem "Map" [ref=f4e31]:
+              - generic [ref=f4e33] [cursor=pointer]:
+                - generic [ref=f4e34]: 
+                - generic [ref=f4e35]: Map
+            - menuitem "Vehicles" [ref=f4e36]:
+              - generic [ref=f4e38] [cursor=pointer]:
+                - generic [ref=f4e39]: 
+                - generic [ref=f4e40]: Vehicles
+            - menuitem "Calendar" [ref=f4e41]:
+              - generic [ref=f4e43] [cursor=pointer]:
+                - generic [ref=f4e44]: 
+                - generic [ref=f4e45]: Calendar
+            - menuitem "Reports" [ref=f4e46]:
+              - generic [ref=f4e48] [cursor=pointer]:
+                - generic [ref=f4e49]: 
+                - generic [ref=f4e50]: Reports
+            - menuitem "Gallery" [ref=f4e51]:
+              - generic [ref=f4e53] [cursor=pointer]:
+                - generic [ref=f4e54]: 
+                - generic [ref=f4e55]: Gallery
+            - text: Developers
+            - menuitem "Docs" [ref=f4e56]:
+              - generic [ref=f4e58] [cursor=pointer]:
+                - generic [ref=f4e59]: 
+                - generic [ref=f4e60]: Docs
+            - menuitem "Gamepad" [ref=f4e61]:
+              - generic [ref=f4e63] [cursor=pointer]:
+                - generic [ref=f4e64]: 
+                - generic [ref=f4e65]: Gamepad
+            - text: Account
+            - menuitem "Settings" [ref=f4e66]:
+              - generic [ref=f4e68] [cursor=pointer]:
+                - generic [ref=f4e69]: 
+                - generic [ref=f4e70]: Settings
+            - menuitem "Billing" [ref=f4e71]:
+              - generic [ref=f4e73] [cursor=pointer]:
+                - generic [ref=f4e74]: 
+                - generic [ref=f4e75]: Billing
+            - menuitem "Sign out" [ref=f4e76]:
+              - generic [ref=f4e78] [cursor=pointer]:
+                - generic [ref=f4e79]: 
+                - generic [ref=f4e80]: Sign out
+        - main [ref=f4e81]:
+          - generic [ref=f4e83]:
+            - heading "Vehicles" [level=1] [ref=f4e85]
+            - button " Add New" [ref=f4e88] [cursor=pointer]:
+              - generic [ref=f4e89]: 
+              - generic [ref=f4e90]: Add New
+            - generic [ref=f4e91]:
+              - table [ref=f4e93]:
+                - rowgroup [ref=f4e94]:
+                  - row [ref=f4e95]:
+                    - columnheader "ID" [ref=f4e96]
+                    - columnheader "Name" [ref=f4e97]
+                    - columnheader "Type" [ref=f4e98]
+                    - columnheader "Vehicle" [ref=f4e99]
+                    - columnheader "Status" [ref=f4e100]
+                    - columnheader "Last Online" [ref=f4e101]
+                    - columnheader "Action" [ref=f4e102]
+                - rowgroup
+              - generic [ref=f4e103]:
+                - button "First Page"
+                - button "Previous Page" [disabled]
+                - button "Next Page" [disabled]
+                - button "Last Page" [disabled]
+      - contentinfo [ref=f4e105]:
+        - generic [ref=f4e106]:
+          - img "SkyHub" [ref=f4e107]
+          - generic [ref=f4e108]: © 2026 ID Robots Ltd.
+          - navigation "Footer" [ref=f4e109]:
+            - link "Docs" [ref=f4e110] [cursor=pointer]:
+              - /url: https://docs.skyhub.ai/drone-os/guides/getting-started
+            - link "API" [ref=f4e111] [cursor=pointer]:
+              - /url: https://docs.skyhub.ai/reference/api
+            - link "About" [ref=f4e112] [cursor=pointer]:
+              - /url: https://idrobots.com/about
+            - link "Contact" [ref=f4e113] [cursor=pointer]:
+              - /url: https://idrobots.com/contact
+            - link "Discord" [ref=f4e114] [cursor=pointer]:
+              - /url: https://discord.gg/cehaEQHbP6
+            - link "GitHub" [ref=f4e115] [cursor=pointer]:
+              - /url: https://github.com/ID-Robots
+              - generic [ref=f4e116]: 
+    - dialog "Add Vehicle" [ref=f4e118]:
+      - generic [ref=f4e121]:
+        - generic [ref=f4e122]: Add Vehicle
+        - generic [ref=f4e123]:
+          - button "Maximize" [ref=f4e124] [cursor=pointer]
+          - button [ref=f4e127] [cursor=pointer]
+      - generic [ref=f4e131]:
+        - generic [ref=f4e133]:
+          - generic [ref=f4e134]: "Name:"
+          - textbox [active] [ref=f4e135]
+        - generic [ref=f4e137]:
+          - generic [ref=f4e138]: "Type:"
+          - generic [ref=f4e139] [cursor=pointer]:
+            - combobox "Physical" [ref=f4e140]
+            - button "dropdown trigger" [ref=f4e141]
+        - generic [ref=f4e145]:
+          - generic [ref=f4e146]: "Vehicle Type:"
+          - generic [ref=f4e147] [cursor=pointer]:
+            - combobox "Copter" [ref=f4e148]
+            - button "dropdown trigger" [ref=f4e149]
+      - button " Connect" [ref=f4e155] [cursor=pointer]:
+        - generic [ref=f4e156]: 
+        - generic [ref=f4e157]: Connect

@@ -12,8 +12,12 @@ namespace skysim::core {
 struct WorldConfig {
     double dt_s = 1.0 / 400.0;
     uint32_t max_bodies = 4096;
-    int worker_threads = -1; // -1 => hardware_concurrency - 1
-    uint64_t rng_seed = 1;   // all randomness derives from this (determinism invariant)
+    // Physics job-system threads. 0 or -1 => single-threaded (calling thread runs all jobs —
+    // the fastest, lowest-jitter choice for the tens-to-hundreds of bodies one world holds;
+    // see tools/bench/world_bench). N>0 => JobSystemThreadPool with N worker threads, only worth
+    // it past ~1000 bodies. skysim scales by sharding worlds across processes, not threads.
+    int worker_threads = 0;
+    uint64_t rng_seed = 1; // all randomness derives from this (determinism invariant)
 
     // Wind = steady + gusts. Gusts are a per-axis Ornstein-Uhlenbeck process driven by the
     // world-owned PRNG (DESIGN.md "Vehicle model"): stationary std dev gust_sigma_mps,

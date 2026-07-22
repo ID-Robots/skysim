@@ -1,0 +1,284 @@
+- generic [ref=e2]:
+  - generic:
+    - alertdialog
+  - generic [ref=e4]:
+    - banner [ref=e6]:
+      - generic [ref=e7]:
+        - link "SkyHub home" [ref=e8] [cursor=pointer]:
+          - /url: /
+          - img "SkyHub" [ref=e9]
+        - text: 
+        - navigation "Primary" [ref=e10]:
+          - generic [ref=e11]:
+            - link "Features" [ref=e12] [cursor=pointer]:
+              - /url: /#features
+            - link "Pricing" [ref=e13] [cursor=pointer]:
+              - /url: /#pricing
+            - link "Docs" [ref=e14] [cursor=pointer]:
+              - /url: https://docs.skyhub.ai/
+            - link "Community" [ref=e15] [cursor=pointer]:
+              - /url: https://discord.gg/cehaEQHbP6
+          - generic [ref=e16]:
+            - link "Sign in" [ref=e17] [cursor=pointer]:
+              - /url: /login
+            - link "Sign up" [ref=e19] [cursor=pointer]:
+              - /url: /register
+    - main [ref=e21]:
+      - region [ref=e22]:
+        - generic [ref=e23]:
+          - paragraph [ref=e24]: Watch the demo
+          - heading "Command your fleet from the cloud" [level=2] [ref=e25]
+          - paragraph [ref=e26]: Every vehicle, every mission, and live video on one screen — with any ArduPilot or PX4 aircraft. No lock-in.
+      - region [ref=e29]:
+        - generic [ref=e30]:
+          - paragraph [ref=e31]: How it works
+          - heading "Take command in three steps" [level=2] [ref=e32]
+        - list [ref=e33]:
+          - listitem [ref=e34]:
+            - generic [ref=e35]: "1"
+            - heading "Connect" [level=3] [ref=e36]
+            - paragraph [ref=e37]: Link any ArduPilot or PX4 vehicle — or start today with a free simulated drone.
+          - listitem [ref=e38]:
+            - generic [ref=e39]: "2"
+            - heading "Plan" [level=3] [ref=e40]
+            - paragraph [ref=e41]: Draw missions, waypoints, and geofences right in the browser. No installs.
+          - listitem [ref=e42]:
+            - generic [ref=e43]: "3"
+            - heading "Command" [level=3] [ref=e44]
+            - paragraph [ref=e45]: Fly the whole fleet with live telemetry and sub-second video — from anywhere.
+      - region [ref=e46]:
+        - generic [ref=e47]:
+          - paragraph [ref=e48]: Platform capabilities
+          - heading "Everything you need to fly with confidence" [level=2] [ref=e49]
+          - paragraph [ref=e50]: One operational picture, from planning to post-flight reporting.
+        - generic [ref=e51]:
+          - article [ref=e52]:
+            - generic [ref=e53]: 
+            - heading "Hardware-agnostic" [level=3] [ref=e55]
+            - paragraph [ref=e56]: Works with any MAVLink autopilot — ArduPilot, PX4, Auterion. No vendor lock-in.
+          - article [ref=e57]:
+            - generic [ref=e58]: 
+            - heading "Real-time fleet control" [level=3] [ref=e60]
+            - paragraph [ref=e61]: Live telemetry and mission coordination for unlimited vehicles simultaneously.
+          - article [ref=e62]:
+            - generic [ref=e63]: 
+            - heading "WebRTC video" [level=3] [ref=e65]
+            - paragraph [ref=e66]: Real-time, sub-second video streaming from any vehicle. Monitor your fleet from anywhere.
+          - article [ref=e67]:
+            - generic [ref=e68]: 
+            - heading "Edge AI (Jetson)" [level=3] [ref=e70]
+            - paragraph [ref=e71]: NVIDIA Jetson integration for on-device AI inference and local processing.
+          - article [ref=e72]:
+            - generic [ref=e73]: 
+            - heading "Enterprise security" [level=3] [ref=e75]
+            - paragraph [ref=e76]: WireGuard VPN and AES-256 encryption, with a SOC 2 path and on-premise deployment.
+          - article [ref=e77]:
+            - generic [ref=e78]: 
+            - heading "SLAM navigation" [level=3] [ref=e80]
+            - paragraph [ref=e81]: GPS-denied navigation with real-time SLAM and obstacle avoidance.
+          - article [ref=e82]:
+            - generic [ref=e83]: 
+            - heading "Open REST API" [level=3] [ref=e85]
+            - paragraph [ref=e86]: Full API access for custom integrations. Build on top of SkyHub in hours.
+          - article [ref=e87]:
+            - generic [ref=e88]: 
+            - heading "RTK GPS precision" [level=3] [ref=e90]
+            - paragraph [ref=e91]: Centimeter-level positioning with RTK/PPK GPS support.
+          - article [ref=e92]:
+            - generic [ref=e93]: 
+            - heading "SITL simulation" [level=3] [ref=e95]
+            - paragraph [ref=e96]: Test with unlimited simulated vehicles before deploying to the field.
+      - region [ref=e97]:
+        - generic [ref=e98]:
+          - generic [ref=e99]:
+            - paragraph [ref=e100]: We fly our own fleets
+            - heading "Built by operators, on open standards" [level=2] [ref=e101]
+            - paragraph [ref=e102]: "SkyHub is built by ID Robots — the team behind the Observer drone and NexusBox docking station — and it commands the same production fleets we deploy for our own customers. We know what a dropped video feed mid-mission feels like. That's why SkyHub speaks MAVLink to any autopilot, streams video over WebRTC in under a second, and runs entirely in the browser: plan a mission at your desk and monitor it from the field on the same live view."
+            - list [ref=e103]:
+              - listitem [ref=e104]:
+                - generic [ref=e105]: 
+                - text: ArduPilot / PX4 / any MAVLink autopilot
+              - listitem [ref=e106]:
+                - generic [ref=e107]: 
+                - text: Real-time SocketIO telemetry & commands
+              - listitem [ref=e108]:
+                - generic [ref=e109]: 
+                - text: WebRTC low-latency video
+              - listitem [ref=e110]:
+                - generic [ref=e111]: 
+                - text: Simulated (SITL) and physical vehicles
+          - generic [ref=e112]:
+            - generic [ref=e113]:
+              - generic [ref=e114]: 2D / 3D
+              - generic [ref=e115]: Tactical map views
+            - generic [ref=e116]:
+              - generic [ref=e117]: REST + WS
+              - generic [ref=e118]: Open API & live events
+            - generic [ref=e119]:
+              - generic [ref=e120]: Browser
+              - generic [ref=e121]: Zero install
+      - region [ref=e122]:
+        - generic [ref=e123]:
+          - paragraph [ref=e124]: SkyHub pricing
+          - heading "Simple, per-vehicle pricing" [level=2] [ref=e125]
+          - paragraph [ref=e126]: Start free with a simulated vehicle — no credit card, no lock-in. Up to 64% cheaper than DJI FlightHub 2.
+        - generic [ref=e127]:
+          - article [ref=e128]:
+            - paragraph [ref=e129]: SITL testing
+            - heading "Starter" [level=3] [ref=e130]
+            - paragraph [ref=e131]:
+              - generic [ref=e132]: €0
+            - paragraph [ref=e133]: Perfect for development & testing.
+            - list [ref=e134]:
+              - listitem [ref=e135]:
+                - generic [ref=e136]: 
+                - text: 1 SITL (simulated) vehicle slot
+              - listitem [ref=e137]:
+                - generic [ref=e138]: 
+                - text: Basic telemetry streaming
+              - listitem [ref=e139]:
+                - generic [ref=e140]: 
+                - text: Mission planning
+              - listitem [ref=e141]:
+                - generic [ref=e142]: 
+                - text: REST API access
+              - listitem [ref=e143]:
+                - generic [ref=e144]: 
+                - text: Community support
+            - link "Start free" [ref=e145] [cursor=pointer]:
+              - /url: /login?register=true
+          - article [ref=e147]:
+            - generic [ref=e148]: Most popular
+            - paragraph [ref=e149]: SkyHub Fleet
+            - heading "Pro" [level=3] [ref=e150]
+            - paragraph [ref=e151]:
+              - generic [ref=e152]: €120
+              - generic [ref=e153]: / vehicle / year
+            - paragraph [ref=e154]: For live fleet deployment.
+            - list [ref=e155]:
+              - listitem [ref=e156]:
+                - generic [ref=e157]: 
+                - text: 1 physical vehicle slot
+              - listitem [ref=e158]:
+                - generic [ref=e159]: 
+                - text: 1 SITL slot included
+              - listitem [ref=e160]:
+                - generic [ref=e161]: 
+                - text: Real-time telemetry & control
+              - listitem [ref=e162]:
+                - generic [ref=e163]: 
+                - text: WebRTC video streaming
+              - listitem [ref=e164]:
+                - generic [ref=e165]: 
+                - text: Geofencing & safety zones
+              - listitem [ref=e166]:
+                - generic [ref=e167]: 
+                - text: Mission history & reports
+              - listitem [ref=e168]:
+                - generic [ref=e169]: 
+                - text: Priority email support
+            - link "Get Started" [ref=e170] [cursor=pointer]:
+              - /url: /login?register=true
+          - article [ref=e172]:
+            - paragraph [ref=e173]: Custom scale
+            - heading "Enterprise" [level=3] [ref=e174]
+            - paragraph [ref=e175]:
+              - generic [ref=e176]: Custom
+            - paragraph [ref=e177]: For massive fleet operations.
+            - list [ref=e178]:
+              - listitem [ref=e179]:
+                - generic [ref=e180]: 
+                - text: Everything in Pro
+              - listitem [ref=e181]:
+                - generic [ref=e182]: 
+                - text: Volume discounts (10+ vehicles)
+              - listitem [ref=e183]:
+                - generic [ref=e184]: 
+                - text: Dedicated SLA support
+              - listitem [ref=e185]:
+                - generic [ref=e186]: 
+                - text: On-premise deployment option
+              - listitem [ref=e187]:
+                - generic [ref=e188]: 
+                - text: Custom integrations
+              - listitem [ref=e189]:
+                - generic [ref=e190]: 
+                - text: Training & onboarding
+            - link "Contact Sales" [ref=e191] [cursor=pointer]:
+              - /url: https://idrobots.com/contact
+      - region [ref=e193]:
+        - generic [ref=e194]:
+          - paragraph [ref=e195]: FAQ
+          - heading "Frequently asked questions" [level=2] [ref=e196]
+        - generic [ref=e197]:
+          - group [ref=e198]:
+            - generic "What autopilots does SkyHub support? " [ref=e199] [cursor=pointer]:
+              - text: What autopilots does SkyHub support?
+              - generic [ref=e200]: 
+          - group [ref=e201]:
+            - generic "What is SITL (Software-In-The-Loop)? " [ref=e202] [cursor=pointer]:
+              - text: What is SITL (Software-In-The-Loop)?
+              - generic [ref=e203]: 
+          - group [ref=e204]:
+            - generic "Can I add more vehicles later? " [ref=e205] [cursor=pointer]:
+              - text: Can I add more vehicles later?
+              - generic [ref=e206]: 
+          - group [ref=e207]:
+            - generic "How does the free tier work? " [ref=e208] [cursor=pointer]:
+              - text: How does the free tier work?
+              - generic [ref=e209]: 
+          - group [ref=e210]:
+            - generic "What is on-premise deployment? " [ref=e211] [cursor=pointer]:
+              - text: What is on-premise deployment?
+              - generic [ref=e212]: 
+      - region [ref=e213]:
+        - generic [ref=e214]:
+          - heading "Ready to take command?" [level=2] [ref=e215]
+          - paragraph [ref=e216]: Every mission flown across scattered tools is a blind spot you don't need. Book a live walkthrough with our team, or start free in minutes — and put your whole fleet on one screen.
+          - generic [ref=e217]:
+            - link " Book a Meeting" [ref=e218] [cursor=pointer]:
+              - /url: https://calendly.com/yanko-idrobots
+              - generic [ref=e219]: 
+              - generic [ref=e220]: Book a Meeting
+            - link "Get Started Free" [ref=e221] [cursor=pointer]:
+              - /url: /login?register=true
+    - contentinfo [ref=e224]:
+      - generic [ref=e225]:
+        - generic [ref=e226]:
+          - img "SkyHub" [ref=e227]
+          - paragraph [ref=e228]: The cloud fleet control system for autonomous drone operations.
+        - navigation "Product" [ref=e229]:
+          - heading "Product" [level=4] [ref=e230]
+          - link "Features" [ref=e231] [cursor=pointer]:
+            - /url: /#features
+          - link "Pricing" [ref=e232] [cursor=pointer]:
+            - /url: /#pricing
+          - link "Sign In" [ref=e233] [cursor=pointer]:
+            - /url: /login
+        - navigation "Developers" [ref=e234]:
+          - heading "Developers" [level=4] [ref=e235]
+          - link "Documentation" [ref=e236] [cursor=pointer]:
+            - /url: https://docs.skyhub.ai/drone-os/guides/getting-started
+          - link "API Reference" [ref=e237] [cursor=pointer]:
+            - /url: https://docs.skyhub.ai/reference/api
+          - link "GitHub" [ref=e238] [cursor=pointer]:
+            - /url: https://github.com/ID-Robots
+        - navigation "Company" [ref=e239]:
+          - heading "Company" [level=4] [ref=e240]
+          - link "About" [ref=e241] [cursor=pointer]:
+            - /url: https://idrobots.com/about
+          - link "Contact" [ref=e242] [cursor=pointer]:
+            - /url: https://idrobots.com/contact
+          - link "Discord" [ref=e243] [cursor=pointer]:
+            - /url: https://discord.gg/cehaEQHbP6
+      - generic [ref=e244]:
+        - generic [ref=e245]:
+          - img "Operational Programme Innovations and Competitiveness" [ref=e246]
+          - img "Fund of Funds — Fund Manager of Financial Instruments in Bulgaria" [ref=e247]
+          - img "Co-funded by the European Union" [ref=e248]
+        - paragraph [ref=e249]: This company is backed by Vitosha Ventures – Fund 2 LP, whose operations are co-financed by the European Regional Development Fund under the Operational Programme 'Competitiveness and Innovation in Enterprises' 2021-2027, structured and mandated by the Fund Manager of Financial Instruments in Bulgaria (FMFIB).
+      - generic [ref=e250]:
+        - generic [ref=e251]: © 2026 ID Robots Ltd. All rights reserved.
+        - link "GitHub" [ref=e252] [cursor=pointer]:
+          - /url: https://github.com/ID-Robots
+          - generic [ref=e253]: 

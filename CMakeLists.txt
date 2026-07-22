@@ -87,6 +87,11 @@ target_include_directories(skysim PRIVATE src)
 target_link_libraries(skysim PRIVATE skysim_protocol skysim_core skysim_vehicle skysim_api skysim_terrain)
 target_compile_options(skysim PRIVATE -Wall -Wextra -Wshadow)
 
+# --- world-step benchmark (performance) ------------------------------------------------------
+add_executable(world_bench tools/bench/world_bench.cpp)
+target_link_libraries(world_bench PRIVATE skysim_core skysim_vehicle)
+target_compile_options(world_bench PRIVATE -Wall -Wextra -Wshadow)
+
 # --- tile cooker ------------------------------------------------------------------------------
 add_executable(tile_cooker tools/cooker/main.cpp)
 target_include_directories(tile_cooker PRIVATE src)

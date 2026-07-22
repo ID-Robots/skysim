@@ -1,0 +1,137 @@
+- generic [ref=f5e3]:
+  - generic:
+    - alertdialog
+  - generic [ref=f5e4]:
+    - generic [ref=f5e5]:
+      - banner [ref=f5e7]:
+        - generic [ref=f5e8]:
+          - link "SkyHub home" [ref=f5e9] [cursor=pointer]:
+            - /url: /
+            - img "SkyHub" [ref=f5e10]
+          - text: 
+          - navigation "Primary" [ref=f5e11]:
+            - generic [ref=f5e12]:
+              - link "Features" [ref=f5e13] [cursor=pointer]:
+                - /url: /#features
+              - link "Pricing" [ref=f5e14] [cursor=pointer]:
+                - /url: /#pricing
+              - link "Docs" [ref=f5e15] [cursor=pointer]:
+                - /url: https://docs.skyhub.ai/
+              - link "Community" [ref=f5e16] [cursor=pointer]:
+                - /url: https://discord.gg/cehaEQHbP6
+            - link "Open the Map" [ref=f5e18] [cursor=pointer]:
+              - /url: /portal/map
+      - generic [ref=f5e20]:
+        - complementary [ref=f5e22]:
+          - menu [ref=f5e25]:
+            - text: Navigation
+            - menuitem "Home" [ref=f5e26]:
+              - generic [ref=f5e28] [cursor=pointer]:
+                - generic [ref=f5e29]: 
+                - generic [ref=f5e30]: Home
+            - menuitem "Map" [ref=f5e31]:
+              - generic [ref=f5e33] [cursor=pointer]:
+                - generic [ref=f5e34]: 
+                - generic [ref=f5e35]: Map
+            - menuitem "Vehicles" [ref=f5e36]:
+              - generic [ref=f5e38] [cursor=pointer]:
+                - generic [ref=f5e39]: 
+                - generic [ref=f5e40]: Vehicles
+            - menuitem "Calendar" [ref=f5e41]:
+              - generic [ref=f5e43] [cursor=pointer]:
+                - generic [ref=f5e44]: 
+                - generic [ref=f5e45]: Calendar
+            - menuitem "Reports" [ref=f5e46]:
+              - generic [ref=f5e48] [cursor=pointer]:
+                - generic [ref=f5e49]: 
+                - generic [ref=f5e50]: Reports
+            - menuitem "Gallery" [ref=f5e51]:
+              - generic [ref=f5e53] [cursor=pointer]:
+                - generic [ref=f5e54]: 
+                - generic [ref=f5e55]: Gallery
+            - text: Developers
+            - menuitem "Docs" [ref=f5e56]:
+              - generic [ref=f5e58] [cursor=pointer]:
+                - generic [ref=f5e59]: 
+                - generic [ref=f5e60]: Docs
+            - menuitem "Gamepad" [ref=f5e61]:
+              - generic [ref=f5e63] [cursor=pointer]:
+                - generic [ref=f5e64]: 
+                - generic [ref=f5e65]: Gamepad
+            - text: Account
+            - menuitem "Settings" [ref=f5e66]:
+              - generic [ref=f5e68] [cursor=pointer]:
+                - generic [ref=f5e69]: 
+                - generic [ref=f5e70]: Settings
+            - menuitem "Billing" [ref=f5e71]:
+              - generic [ref=f5e73] [cursor=pointer]:
+                - generic [ref=f5e74]: 
+                - generic [ref=f5e75]: Billing
+            - menuitem "Sign out" [ref=f5e76]:
+              - generic [ref=f5e78] [cursor=pointer]:
+                - generic [ref=f5e79]: 
+                - generic [ref=f5e80]: Sign out
+        - main [ref=f5e81]:
+          - generic [ref=f5e83]:
+            - heading "Vehicles" [level=1] [ref=f5e85]
+            - button " Add New" [ref=f5e88] [cursor=pointer]:
+              - generic [ref=f5e89]: 
+              - generic [ref=f5e90]: Add New
+            - generic [ref=f5e91]:
+              - table [ref=f5e93]:
+                - rowgroup [ref=f5e94]:
+                  - row [ref=f5e95]:
+                    - columnheader "ID" [ref=f5e96]
+                    - columnheader "Name" [ref=f5e97]
+                    - columnheader "Type" [ref=f5e98]
+                    - columnheader "Vehicle" [ref=f5e99]
+                    - columnheader "Status" [ref=f5e100]
+                    - columnheader "Last Online" [ref=f5e101]
+                    - columnheader "Action" [ref=f5e102]
+                - rowgroup [ref=f5e103]:
+                  - row [ref=f5e104] [cursor=pointer]:
+                    - cell "246" [ref=f5e105]
+                    - cell "sim-alpha" [ref=f5e106]
+                    - cell "SITL" [ref=f5e107]
+                    - cell "COPTER" [ref=f5e108]
+                    - cell " Online" [ref=f5e109]:
+                      - generic [ref=f5e110]:
+                        - generic [ref=f5e111]: 
+                        - text: Online
+                    - cell "Just now" [ref=f5e112]
+                    - cell [ref=f5e113]:
+                      - generic [ref=f5e114]:
+                        - combobox "Mode" [ref=f5e115]
+                        - button "dropdown trigger" [ref=f5e116]
+                      - button "" [ref=f5e120]
+                      - button "" [ref=f5e123]
+                      - button "" [ref=f5e126]
+              - generic [ref=f5e128]:
+                - button "First Page"
+                - button "Previous Page" [disabled]
+                - button "1" [ref=f5e130] [cursor=pointer]
+                - button "Next Page" [disabled]
+                - button "Last Page" [disabled]
+      - contentinfo [ref=f5e132]:
+        - generic [ref=f5e133]:
+          - img "SkyHub" [ref=f5e134]
+          - generic [ref=f5e135]: © 2026 ID Robots Ltd.
+          - navigation "Footer" [ref=f5e136]:
+            - link "Docs" [ref=f5e137] [cursor=pointer]:
+              - /url: https://docs.skyhub.ai/drone-os/guides/getting-started
+            - link "API" [ref=f5e138] [cursor=pointer]:
+              - /url: https://docs.skyhub.ai/reference/api
+            - link "About" [ref=f5e139] [cursor=pointer]:
+              - /url: https://idrobots.com/about
+            - link "Contact" [ref=f5e140] [cursor=pointer]:
+              - /url: https://idrobots.com/contact
+            - link "Discord" [ref=f5e141] [cursor=pointer]:
+              - /url: https://discord.gg/cehaEQHbP6
+            - link "GitHub" [ref=f5e142] [cursor=pointer]:
+              - /url: https://github.com/ID-Robots
+              - generic [ref=f5e143]: 
+    - dialog [ref=f5e202]:
+      - generic [ref=f5e205]:
+        - progressbar [ref=f5e206]
+        - paragraph [ref=f5e210]: Creating Simulated Vehicle...
+        - paragraph [ref=f5e211]: Please Wait...

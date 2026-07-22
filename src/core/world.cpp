@@ -3,6 +3,7 @@
 #include <Jolt/Jolt.h>
 
 #include <Jolt/Core/Factory.h>
+#include <Jolt/Core/JobSystemSingleThreaded.h>
 #include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Core/StreamWrapper.h>
 #include <Jolt/Core/TempAllocator.h>
@@ -151,7 +152,7 @@ struct World::Impl {
     ObjectPairFilter obj_pair;
     EnqueueOnlyContactListener contacts;
     std::unique_ptr<JPH::TempAllocatorImpl> temp_allocator;
-    std::unique_ptr<JPH::JobSystemThreadPool> job_system;
+    std::unique_ptr<JPH::JobSystem> job_system;
     std::unique_ptr<JPH::PhysicsSystem> physics;
 
     double dt_s = 1.0 / 400.0;
@@ -160,6 +161,9 @@ struct World::Impl {
     std::unordered_map<uint32_t, VehicleEntry> vehicles;
     std::vector<JPH::BodyID> static_bodies;
     std::unordered_map<uint32_t, JPH::BodyID> static_tiles; // streamed (M5)
+    // BodyID (index+sequence) -> vehicle id, so contact-event attribution is O(1) per contact
+    // instead of an O(vehicles) linear scan (matters when many contacts fire in one step).
+    std::unordered_map<uint32_t, uint32_t> body_to_vehicle;
 
     // Wind: steady + OU gusts, all randomness from this world-owned PRNG (invariant 4).
     Vec3 wind_steady{};
@@ -185,10 +189,19 @@ World::World(const WorldConfig &cfg) : impl_(std::make_unique<Impl>()), dt_s_(cf
     impl_->dt_s = cfg.dt_s;
 
     impl_->temp_allocator = std::make_unique<JPH::TempAllocatorImpl>(32 * 1024 * 1024);
-    const int hw = static_cast<int>(std::thread::hardware_concurrency());
-    const int threads = cfg.worker_threads > 0 ? cfg.worker_threads : (hw > 1 ? hw - 1 : 1);
-    impl_->job_system =
-        std::make_unique<JPH::JobSystemThreadPool>(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, threads);
+    // Physics threading. Benchmarking (tools/bench/world_bench) shows that for the fleet sizes
+    // one skysim world holds (tens to a few hundred quads), a multi-thread job system is a net
+    // LOSS: dispatch + barrier + thread-wakeup jitter dwarfs the tiny per-body work and inflates
+    // tick p99 several-fold. The crossover where worker threads win is ~1000 bodies. skysim's
+    // scaling model is many single-world processes (DESIGN.md sharding), so the right default is
+    // a single-threaded job system (calling thread does all jobs, zero sync). worker_threads:
+    //   0 or -1 => single-threaded (default), N>0 => JobSystemThreadPool with N worker threads.
+    if (cfg.worker_threads <= 0) {
+        impl_->job_system = std::make_unique<JPH::JobSystemSingleThreaded>(JPH::cMaxPhysicsJobs);
+    } else {
+        impl_->job_system = std::make_unique<JPH::JobSystemThreadPool>(
+            JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, cfg.worker_threads);
+    }
 
     impl_->physics = std::make_unique<JPH::PhysicsSystem>();
     impl_->physics->Init(cfg.max_bodies, 0, cfg.max_bodies * 2, cfg.max_bodies * 2, impl_->bp_interface,
@@ -326,6 +339,7 @@ uint32_t World::add_vehicle(const VehicleBodyParams &p) {
     VehicleEntry e;
     e.body = impl_->bodies().CreateAndAddBody(s, JPH::EActivation::Activate);
     e.mass_kg = p.mass_kg;
+    impl_->body_to_vehicle.emplace(e.body.GetIndexAndSequenceNumber(), id);
     impl_->vehicles.emplace(id, e);
     return id;
 }
@@ -351,6 +365,7 @@ void World::remove_vehicle(uint32_t id) {
     if (it == impl_->vehicles.end()) {
         return;
     }
+    impl_->body_to_vehicle.erase(it->second.body.GetIndexAndSequenceNumber());
     impl_->bodies().RemoveBody(it->second.body);
     impl_->bodies().DestroyBody(it->second.body);
     impl_->vehicles.erase(it);
@@ -398,17 +413,13 @@ void World::step() {
     ++impl_->tick;
 
     // Attribute this step's new contact manifolds to vehicles (tick thread, callbacks done).
+    // O(1) per contact via the body->vehicle map.
     impl_->contacts.drain([this](JPH::BodyID a, JPH::BodyID b) {
-        VehicleEntry *va = nullptr;
-        VehicleEntry *vb = nullptr;
-        for (auto &[id, v] : impl_->vehicles) {
-            if (v.body == a) {
-                va = &v;
-            }
-            if (v.body == b) {
-                vb = &v;
-            }
-        }
+        auto ia = impl_->body_to_vehicle.find(a.GetIndexAndSequenceNumber());
+        auto ib = impl_->body_to_vehicle.find(b.GetIndexAndSequenceNumber());
+        const auto end = impl_->body_to_vehicle.end();
+        VehicleEntry *va = ia != end ? &impl_->vehicles.at(ia->second) : nullptr;
+        VehicleEntry *vb = ib != end ? &impl_->vehicles.at(ib->second) : nullptr;
         if (va != nullptr && vb != nullptr) {
             ++va->midair_collisions;
             ++vb->midair_collisions;

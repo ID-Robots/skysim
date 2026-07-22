@@ -45,6 +45,8 @@ struct Options {
     bool canned = false;
     double stream_radius_m = 600.0; // tiles resident within this of any vehicle
     int stream_max_resident = 64;   // hard tile memory bound
+    int physics_threads = 0;        // Jolt job-system worker threads; 0 = single-threaded
+                                    // (best for <~1000 bodies — see tools/bench/world_bench)
     // M4: control plane + straggler policy + managed SITL processes.
     int api_port = 0;                   // 0 = control plane disabled
     std::string api_bind = "127.0.0.1"; // 0.0.0.0 when the gateway calls from a bridge net
@@ -104,6 +106,8 @@ Options parse_args(int argc, char **argv) {
             o.stream_radius_m = std::atof(need_value("--stream-radius"));
         } else if (std::strcmp(argv[i], "--stream-max") == 0) {
             o.stream_max_resident = std::atoi(need_value("--stream-max"));
+        } else if (std::strcmp(argv[i], "--physics-threads") == 0) {
+            o.physics_threads = std::atoi(need_value("--physics-threads"));
         } else if (std::strcmp(argv[i], "--no-lockstep") == 0) {
             o.no_lockstep = true;
         } else if (std::strcmp(argv[i], "--canned") == 0) {
@@ -662,6 +666,7 @@ int main(int argc, char **argv) {
     wcfg.gust_sigma_mps = opt.gust_sigma;
     wcfg.gust_tau_s = opt.gust_tau;
     wcfg.rng_seed = opt.seed;
+    wcfg.worker_threads = opt.physics_threads;
     const bool replaying = !opt.replay_servo.empty();
     if (!opt.canned) {
         app.world = std::make_unique<skysim::core::World>(wcfg);

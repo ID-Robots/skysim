@@ -1,0 +1,159 @@
+- generic [ref=f4e1]:
+  - generic [ref=f4e3]:
+    - generic:
+      - alertdialog
+    - generic [ref=f4e4]:
+      - generic [ref=f4e5]:
+        - banner [ref=f4e7]:
+          - generic [ref=f4e8]:
+            - link "SkyHub home" [ref=f4e9] [cursor=pointer]:
+              - /url: /
+              - img "SkyHub" [ref=f4e10]
+            - text: 
+            - navigation "Primary" [ref=f4e11]:
+              - generic [ref=f4e12]:
+                - link "Features" [ref=f4e13] [cursor=pointer]:
+                  - /url: /#features
+                - link "Pricing" [ref=f4e14] [cursor=pointer]:
+                  - /url: /#pricing
+                - link "Docs" [ref=f4e15] [cursor=pointer]:
+                  - /url: https://docs.skyhub.ai/
+                - link "Community" [ref=f4e16] [cursor=pointer]:
+                  - /url: https://discord.gg/cehaEQHbP6
+              - link "Open the Map" [ref=f4e18] [cursor=pointer]:
+                - /url: /portal/map
+        - generic [ref=f4e20]:
+          - complementary [ref=f4e22]:
+            - menu [ref=f4e25]:
+              - text: Navigation
+              - menuitem "Home" [ref=f4e26]:
+                - generic [ref=f4e28] [cursor=pointer]:
+                  - generic [ref=f4e29]: 
+                  - generic [ref=f4e30]: Home
+              - menuitem "Map" [ref=f4e31]:
+                - generic [ref=f4e33] [cursor=pointer]:
+                  - generic [ref=f4e34]: 
+                  - generic [ref=f4e35]: Map
+              - menuitem "Vehicles" [ref=f4e36]:
+                - generic [ref=f4e38] [cursor=pointer]:
+                  - generic [ref=f4e39]: 
+                  - generic [ref=f4e40]: Vehicles
+              - menuitem "Calendar" [ref=f4e41]:
+                - generic [ref=f4e43] [cursor=pointer]:
+                  - generic [ref=f4e44]: 
+                  - generic [ref=f4e45]: Calendar
+              - menuitem "Reports" [ref=f4e46]:
+                - generic [ref=f4e48] [cursor=pointer]:
+                  - generic [ref=f4e49]: 
+                  - generic [ref=f4e50]: Reports
+              - menuitem "Gallery" [ref=f4e51]:
+                - generic [ref=f4e53] [cursor=pointer]:
+                  - generic [ref=f4e54]: 
+                  - generic [ref=f4e55]: Gallery
+              - text: Developers
+              - menuitem "Docs" [ref=f4e56]:
+                - generic [ref=f4e58] [cursor=pointer]:
+                  - generic [ref=f4e59]: 
+                  - generic [ref=f4e60]: Docs
+              - menuitem "Gamepad" [ref=f4e61]:
+                - generic [ref=f4e63] [cursor=pointer]:
+                  - generic [ref=f4e64]: 
+                  - generic [ref=f4e65]: Gamepad
+              - text: Account
+              - menuitem "Settings" [ref=f4e66]:
+                - generic [ref=f4e68] [cursor=pointer]:
+                  - generic [ref=f4e69]: 
+                  - generic [ref=f4e70]: Settings
+              - menuitem "Billing" [ref=f4e71]:
+                - generic [ref=f4e73] [cursor=pointer]:
+                  - generic [ref=f4e74]: 
+                  - generic [ref=f4e75]: Billing
+              - menuitem "Sign out" [ref=f4e76]:
+                - generic [ref=f4e78] [cursor=pointer]:
+                  - generic [ref=f4e79]: 
+                  - generic [ref=f4e80]: Sign out
+          - main [ref=f4e81]:
+            - generic [ref=f4e83]:
+              - heading "Vehicles" [level=1] [ref=f4e85]
+              - button " Add New" [ref=f4e88] [cursor=pointer]:
+                - generic [ref=f4e89]: 
+                - generic [ref=f4e90]: Add New
+              - generic [ref=f4e91]:
+                - table [ref=f4e93]:
+                  - rowgroup [ref=f4e94]:
+                    - row [ref=f4e95]:
+                      - columnheader "ID" [ref=f4e96]
+                      - columnheader "Name" [ref=f4e97]
+                      - columnheader "Type" [ref=f4e98]
+                      - columnheader "Vehicle" [ref=f4e99]
+                      - columnheader "Status" [ref=f4e100]
+                      - columnheader "Last Online" [ref=f4e101]
+                      - columnheader "Action" [ref=f4e102]
+                  - rowgroup [ref=f4e103]:
+                    - row [ref=f4e104] [cursor=pointer]:
+                      - cell "246" [ref=f4e105]
+                      - cell "sim-alpha" [ref=f4e106]
+                      - cell "SITL" [ref=f4e107]
+                      - cell "COPTER" [ref=f4e108]
+                      - cell " Online" [ref=f4e109]:
+                        - generic [ref=f4e110]:
+                          - generic [ref=f4e111]: 
+                          - text: Online
+                      - cell "Just now" [ref=f4e112]
+                      - cell [ref=f4e113]:
+                        - generic [ref=f4e114]:
+                          - combobox "Mode" [ref=f4e115]
+                          - button "dropdown trigger" [ref=f4e116]
+                        - button "" [ref=f4e120]
+                        - button "" [ref=f4e123]
+                        - button "" [ref=f4e126]
+                - generic [ref=f4e128]:
+                  - button "First Page"
+                  - button "Previous Page" [disabled]
+                  - button "1" [ref=f4e130] [cursor=pointer]
+                  - button "Next Page" [disabled]
+                  - button "Last Page" [disabled]
+        - contentinfo [ref=f4e132]:
+          - generic [ref=f4e133]:
+            - img "SkyHub" [ref=f4e134]
+            - generic [ref=f4e135]: © 2026 ID Robots Ltd.
+            - navigation "Footer" [ref=f4e136]:
+              - link "Docs" [ref=f4e137] [cursor=pointer]:
+                - /url: https://docs.skyhub.ai/drone-os/guides/getting-started
+              - link "API" [ref=f4e138] [cursor=pointer]:
+                - /url: https://docs.skyhub.ai/reference/api
+              - link "About" [ref=f4e139] [cursor=pointer]:
+                - /url: https://idrobots.com/about
+              - link "Contact" [ref=f4e140] [cursor=pointer]:
+                - /url: https://idrobots.com/contact
+              - link "Discord" [ref=f4e141] [cursor=pointer]:
+                - /url: https://discord.gg/cehaEQHbP6
+              - link "GitHub" [ref=f4e142] [cursor=pointer]:
+                - /url: https://github.com/ID-Robots
+                - generic [ref=f4e143]: 
+      - dialog "Add Vehicle" [ref=f4e145]:
+        - generic [ref=f4e148]:
+          - generic [ref=f4e149]: Add Vehicle
+          - generic [ref=f4e150]:
+            - button "Maximize" [ref=f4e151] [cursor=pointer]
+            - button [ref=f4e154] [cursor=pointer]
+        - generic [ref=f4e158]:
+          - generic [ref=f4e160]:
+            - generic [ref=f4e161]: "Name:"
+            - textbox [ref=f4e162]: sim-bravo
+          - generic [ref=f4e164]:
+            - generic [ref=f4e165]: "Type:"
+            - generic [ref=f4e166] [cursor=pointer]:
+              - combobox "Physical" [expanded] [active] [ref=f4e167]
+              - button "dropdown trigger" [expanded] [ref=f4e168]
+          - generic [ref=f4e172]:
+            - generic [ref=f4e173]: "Vehicle Type:"
+            - generic [ref=f4e174] [cursor=pointer]:
+              - combobox "Copter" [ref=f4e175]
+              - button "dropdown trigger" [ref=f4e176]
+        - button " Connect" [ref=f4e182] [cursor=pointer]:
+          - generic [ref=f4e183]: 
+          - generic [ref=f4e184]: Connect
+  - listbox "Option List" [ref=f4e192]:
+    - option "Physical" [selected] [ref=f4e194] [cursor=pointer]
+    - option "Simulated" [ref=f4e197] [cursor=pointer]
