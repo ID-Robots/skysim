@@ -123,6 +123,11 @@ size_t build_state_json(const VehicleTruth &t, char *buf, size_t buf_size) {
     for (size_t i = 0; ok && i < n_rng; ++i) {
         ok = emit(",\"rng_%zu\":%.4f", i + 1, fin(t.rangefinder_m[i]));
     }
+    if (ok && t.no_lockstep) {
+        // Compact boolean (no space): ArduPilot's parser reads "true" only without a
+        // leading space, else strtoull (docs/PROTOCOL.md parser rules).
+        ok = emit("%s", ",\"no_lockstep\":1");
+    }
     if (!ok || !emit("%s", "}\n")) {
         return 0;
     }

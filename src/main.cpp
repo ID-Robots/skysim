@@ -40,7 +40,8 @@ struct Options {
     double gust_sigma = 0.0;
     double gust_tau = 2.0;
     uint64_t seed = 1;
-    int rangefinders = 0; // 0=none, 1=rng_1 down, 2=+rng_2 right (corridor wall tracking)
+    int rangefinders = 0;     // 0=none, 1=rng_1 down, 2=+rng_2 right (corridor wall tracking)
+    bool no_lockstep = false; // emit no_lockstep:1 -> ArduPilot free-runs (loaded fleets)
     bool canned = false;
     double stream_radius_m = 600.0; // tiles resident within this of any vehicle
     int stream_max_resident = 64;   // hard tile memory bound
@@ -103,6 +104,8 @@ Options parse_args(int argc, char **argv) {
             o.stream_radius_m = std::atof(need_value("--stream-radius"));
         } else if (std::strcmp(argv[i], "--stream-max") == 0) {
             o.stream_max_resident = std::atoi(need_value("--stream-max"));
+        } else if (std::strcmp(argv[i], "--no-lockstep") == 0) {
+            o.no_lockstep = true;
         } else if (std::strcmp(argv[i], "--canned") == 0) {
             o.canned = true;
         } else if (std::strcmp(argv[i], "--api-port") == 0) {
@@ -277,6 +280,7 @@ int send_replies(skysim::core::World *world, Fleet &fleet, const Options &opt, d
                 }
                 truth.rangefinder_count = static_cast<uint8_t>(n);
             }
+            truth.no_lockstep = opt.no_lockstep;
         } else {
             truth = {};
             truth.timestamp_s = now_s;

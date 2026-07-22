@@ -63,6 +63,10 @@ struct VehicleTruth {
     // Optional sensors: rng_1..rng_<count> emitted iff rangefinder_count > 0.
     std::array<double, 6> rangefinder_m{};
     uint8_t rangefinder_count = 0;
+    // Emit "no_lockstep":1 so ArduPilot free-runs instead of blocking on each reply
+    // (SIM_JSON.cpp:309-319). Needed for a loaded, dynamically-managed SITL fleet where
+    // tight per-frame lockstep isn't achievable; trades determinism for robustness.
+    bool no_lockstep = false;
 };
 
 // Serialize one reply datagram: single JSON object, '\n'-terminated, snprintf into buf,
