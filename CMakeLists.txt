@@ -18,13 +18,18 @@ FetchContent_Declare(JoltPhysics
 )
 FetchContent_MakeAvailable(JoltPhysics)
 
+# --- protocol (no Jolt dependency; shared by server and tests) -------------------------------
+add_library(skysim_protocol STATIC src/protocol/packets.cpp)
+target_include_directories(skysim_protocol PUBLIC src)
+target_compile_options(skysim_protocol PRIVATE -Wall -Wextra -Wshadow)
+
 # --- skysim server --------------------------------------------------------------------------
 add_executable(skysim
     src/main.cpp
-    # M1+: add src/protocol/*.cpp, src/core/*.cpp, src/vehicle/*.cpp, src/terrain/*.cpp, src/api/*.cpp
+    # M1+: add src/core/*.cpp, src/vehicle/*.cpp, src/terrain/*.cpp, src/api/*.cpp
 )
 target_include_directories(skysim PRIVATE src)
-target_link_libraries(skysim PRIVATE Jolt)
+target_link_libraries(skysim PRIVATE skysim_protocol Jolt)
 if(UNIX)
     target_link_libraries(skysim PRIVATE pthread)
 endif()
@@ -38,5 +43,7 @@ target_link_libraries(tile_cooker PRIVATE Jolt)
 # --- tests ----------------------------------------------------------------------------------
 enable_testing()
 add_executable(test_packets tests/test_packets.cpp)
-target_include_directories(test_packets PRIVATE src)
+target_link_libraries(test_packets PRIVATE skysim_protocol)
+target_compile_definitions(test_packets PRIVATE SKYSIM_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_compile_options(test_packets PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME packets COMMAND test_packets)
