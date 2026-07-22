@@ -18,6 +18,7 @@
 
 #include "api/control_server.h"
 #include "core/metrics.h"
+#include "core/thread_pool.h"
 #include "core/world.h"
 #include "protocol/packets.h"
 #include "protocol/udp_endpoint.h"
@@ -47,6 +48,7 @@ struct Options {
     int stream_max_resident = 64;   // hard tile memory bound
     int physics_threads = 0;        // Jolt job-system worker threads; 0 = single-threaded
                                     // (best for <~1000 bodies — see tools/bench/world_bench)
+    int io_threads = 3;             // reply build+send worker threads (>48 vehicles); 0 = serial
     // M4: control plane + straggler policy + managed SITL processes.
     int api_port = 0;                   // 0 = control plane disabled
     std::string api_bind = "127.0.0.1"; // 0.0.0.0 when the gateway calls from a bridge net
@@ -108,6 +110,8 @@ Options parse_args(int argc, char **argv) {
             o.stream_max_resident = std::atoi(need_value("--stream-max"));
         } else if (std::strcmp(argv[i], "--physics-threads") == 0) {
             o.physics_threads = std::atoi(need_value("--physics-threads"));
+        } else if (std::strcmp(argv[i], "--io-threads") == 0) {
+            o.io_threads = std::atoi(need_value("--io-threads"));
         } else if (std::strcmp(argv[i], "--no-lockstep") == 0) {
             o.no_lockstep = true;
         } else if (std::strcmp(argv[i], "--canned") == 0) {
@@ -264,43 +268,75 @@ bool poll_endpoint(VehicleSlot &v) {
     return v.has_pending_input;
 }
 
-// Build + send the reply for every vehicle whose fresh input was consumed this tick.
-int send_replies(skysim::core::World *world, Fleet &fleet, const Options &opt, double now_s) {
-    for (auto &v : fleet) {
-        if (!v->has_pending_input) {
-            continue;
-        }
-        skysim::protocol::VehicleTruth truth;
-        if (world != nullptr) {
-            truth = truth_from_state(v->state, now_s);
-            if (opt.rangefinders > 0) {
-                // rng_1: down (body +z), rng_2: right (body +y) — corridor wall tracking.
-                const skysim::core::Vec3 body_dirs[2] = {{0.0, 0.0, 1.0}, {0.0, 1.0, 0.0}};
-                const int n = std::min(opt.rangefinders, 2);
-                for (int r = 0; r < n; ++r) {
-                    const auto dir_world = skysim::core::quat_rotate(v->state.quat_ned_frd, body_dirs[r]);
-                    const double d = world->raycast(v->state.pos_ned, dir_world, 40.0, v->body_id);
-                    truth.rangefinder_m[r] = d < 0.0 ? 40.0 : d;
-                }
-                truth.rangefinder_count = static_cast<uint8_t>(n);
+// Build + send one vehicle's reply (truth -> JSON -> UDP). Touches only this slot and its own
+// socket, so it is safe to run concurrently for different vehicles. Returns false on JSON
+// buffer overflow. Rangefinder raycasts read the Jolt world read-only (safe after step()).
+bool reply_one(VehicleSlot &v, skysim::core::World *world, const Options &opt, double now_s) {
+    if (!v.has_pending_input) {
+        return true;
+    }
+    skysim::protocol::VehicleTruth truth;
+    if (world != nullptr) {
+        truth = truth_from_state(v.state, now_s);
+        if (opt.rangefinders > 0) {
+            // rng_1: down (body +z), rng_2: right (body +y) — corridor wall tracking.
+            const skysim::core::Vec3 body_dirs[2] = {{0.0, 0.0, 1.0}, {0.0, 1.0, 0.0}};
+            const int n = std::min(opt.rangefinders, 2);
+            for (int r = 0; r < n; ++r) {
+                const auto dir_world = skysim::core::quat_rotate(v.state.quat_ned_frd, body_dirs[r]);
+                const double d = world->raycast(v.state.pos_ned, dir_world, 40.0, v.body_id);
+                truth.rangefinder_m[r] = d < 0.0 ? 40.0 : d;
             }
-            truth.no_lockstep = opt.no_lockstep;
-        } else {
-            truth = {};
-            truth.timestamp_s = now_s;
-            truth.accel_body[2] = -9.81;
-            truth.quat_wxyz[0] = 1.0;
+            truth.rangefinder_count = static_cast<uint8_t>(n);
         }
-        v->last_json_len = skysim::protocol::build_state_json(truth, v->last_json, sizeof(v->last_json));
-        if (v->last_json_len == 0) {
+        truth.no_lockstep = opt.no_lockstep;
+    } else {
+        truth = {};
+        truth.timestamp_s = now_s;
+        truth.accel_body[2] = -9.81;
+        truth.quat_wxyz[0] = 1.0;
+    }
+    v.last_json_len = skysim::protocol::build_state_json(truth, v.last_json, sizeof(v.last_json));
+    if (v.last_json_len == 0) {
+        return false;
+    }
+    if (v.endpoint) {
+        v.endpoint->send_reply(v.last_json, v.last_json_len);
+    }
+    v.has_pending_input = false;
+    ++v.ticks;
+    return true;
+}
+
+// Build + send the reply for every vehicle whose fresh input was consumed this tick. The
+// per-vehicle reply (JSON format + sendto syscall) is kernel-bound and embarrassingly
+// parallel; above kReplyParallelThreshold vehicles it is fanned across io_pool (each syscall
+// runs on its own core). Below that, the serial path avoids dispatch overhead (same lesson as
+// the physics threading — see core/world.cpp). io_pool == nullptr => always serial.
+constexpr size_t kReplyParallelThreshold = 48;
+
+int send_replies(skysim::core::World *world, Fleet &fleet, const Options &opt, double now_s,
+                 skysim::core::ThreadPool *io_pool) {
+    if (io_pool != nullptr && fleet.size() > kReplyParallelThreshold) {
+        std::atomic<bool> overflow{false};
+        io_pool->parallel_for(fleet.size(), [&](size_t begin, size_t end) {
+            for (size_t i = begin; i < end; ++i) {
+                if (!reply_one(*fleet[i], world, opt, now_s)) {
+                    overflow.store(true, std::memory_order_relaxed);
+                }
+            }
+        });
+        if (overflow.load()) {
             std::fprintf(stderr, "skysim: build_state_json overflow\n");
             return 1;
         }
-        if (v->endpoint) {
-            v->endpoint->send_reply(v->last_json, v->last_json_len);
+        return 0;
+    }
+    for (auto &v : fleet) {
+        if (!reply_one(*v, world, opt, now_s)) {
+            std::fprintf(stderr, "skysim: build_state_json overflow\n");
+            return 1;
         }
-        v->has_pending_input = false;
-        ++v->ticks;
     }
     return 0;
 }
@@ -363,6 +399,7 @@ struct App {
     Fleet fleet;
     skysim::api::CommandQueue queue;
     skysim::core::TickMetrics metrics;
+    std::unique_ptr<skysim::core::ThreadPool> io_pool;
     uint32_t next_vehicle_id = 1;
 
     // Re-evaluate tile residency every ~0.125 s of sim time (tick boundaries only).
@@ -558,7 +595,8 @@ int run_strict(App &app, FILE *truth_log, FILE *record_log) {
         const auto t0 = clock::now();
         step_world(*app.world, app.fleet, app.opt.dt_s, truth_log, record_log);
         app.metrics.record_us(std::chrono::duration<double, std::micro>(clock::now() - t0).count());
-        if (const int rc = send_replies(app.world.get(), app.fleet, app.opt, app.world->now())) {
+        if (const int rc =
+                send_replies(app.world.get(), app.fleet, app.opt, app.world->now(), app.io_pool.get())) {
             return rc;
         }
         app.publish_snapshot();
@@ -610,7 +648,8 @@ int run_interactive(App &app, FILE *truth_log, FILE *record_log) {
         const auto t0 = clock::now();
         step_world(*app.world, app.fleet, app.opt.dt_s, truth_log, record_log);
         app.metrics.record_us(std::chrono::duration<double, std::micro>(clock::now() - t0).count());
-        if (const int rc = send_replies(app.world.get(), app.fleet, app.opt, app.world->now())) {
+        if (const int rc =
+                send_replies(app.world.get(), app.fleet, app.opt, app.world->now(), app.io_pool.get())) {
             return rc;
         }
 
@@ -643,7 +682,7 @@ int run_canned(App &app) {
             continue;
         }
         canned_time += app.opt.dt_s;
-        if (const int rc = send_replies(nullptr, app.fleet, app.opt, canned_time)) {
+        if (const int rc = send_replies(nullptr, app.fleet, app.opt, canned_time, app.io_pool.get())) {
             return rc;
         }
     }
@@ -702,6 +741,9 @@ int main(int argc, char **argv) {
     pcfg.defaults = opt.spawn_defaults;
     pcfg.run_dir = "/tmp/skysim_managed";
     app.manager = std::make_unique<skysim::vehicle::VehicleManager>(opt.base_instance, pcfg);
+    if (opt.io_threads > 0) {
+        app.io_pool = std::make_unique<skysim::core::ThreadPool>(opt.io_threads);
+    }
 
     if (replaying && (!app.world || opt.time_mode != "strict")) {
         std::fprintf(stderr, "skysim: --replay-servo requires strict mode + jolt physics\n");

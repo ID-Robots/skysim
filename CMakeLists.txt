@@ -96,6 +96,10 @@ add_executable(proto_bench tools/bench/proto_bench.cpp)
 target_link_libraries(proto_bench PRIVATE skysim_protocol)
 target_compile_options(proto_bench PRIVATE -Wall -Wextra -Wshadow)
 
+add_executable(reply_bench tools/bench/reply_bench.cpp)
+target_link_libraries(reply_bench PRIVATE skysim_protocol Threads::Threads)
+target_compile_options(reply_bench PRIVATE -Wall -Wextra -Wshadow)
+
 # --- tile cooker ------------------------------------------------------------------------------
 add_executable(tile_cooker tools/cooker/main.cpp)
 target_include_directories(tile_cooker PRIVATE src)
@@ -150,6 +154,12 @@ add_executable(test_api tests/test_api.cpp)
 target_link_libraries(test_api PRIVATE skysim_api httplib::httplib)
 target_compile_options(test_api PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME api COMMAND test_api)
+
+add_executable(test_thread_pool tests/test_thread_pool.cpp)
+target_include_directories(test_thread_pool PRIVATE src)
+target_link_libraries(test_thread_pool PRIVATE Threads::Threads)
+target_compile_options(test_thread_pool PRIVATE -Wall -Wextra -Wshadow)
+add_test(NAME thread_pool COMMAND test_thread_pool)
 
 add_executable(test_streamer tests/test_streamer.cpp)
 target_link_libraries(test_streamer PRIVATE skysim_terrain skysim_core)
