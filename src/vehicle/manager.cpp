@@ -34,6 +34,21 @@ int VehicleManager::allocate_instance() {
     return base_instance_ + static_cast<int>(used_.size()) - 1;
 }
 
+bool VehicleManager::allocate_instance_at(int instance) {
+    if (instance < base_instance_) {
+        return false;
+    }
+    const size_t idx = static_cast<size_t>(instance - base_instance_);
+    if (idx >= used_.size()) {
+        used_.resize(idx + 1, false);
+    }
+    if (used_[idx]) {
+        return false;
+    }
+    used_[idx] = true;
+    return true;
+}
+
 void VehicleManager::release_instance(int instance) {
     const size_t idx = static_cast<size_t>(instance - base_instance_);
     if (idx < used_.size()) {

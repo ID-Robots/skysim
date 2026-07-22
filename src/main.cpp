@@ -45,11 +45,12 @@ struct Options {
     double stream_radius_m = 600.0; // tiles resident within this of any vehicle
     int stream_max_resident = 64;   // hard tile memory bound
     // M4: control plane + straggler policy + managed SITL processes.
-    int api_port = 0;               // 0 = control plane disabled
-    int hold_ticks = 3;             // interactive: reuse last PWM for up to k missed deadlines
-    double grace_s = 30.0;          // interactive: frozen longer than this => auto-despawn
-    double strict_timeout_s = 10.0; // strict: barrier stalled longer => abort with report
-    std::string spawn_binary;       // arducopter for POST /vehicles {"launch_process":true}
+    int api_port = 0;                   // 0 = control plane disabled
+    std::string api_bind = "127.0.0.1"; // 0.0.0.0 when the gateway calls from a bridge net
+    int hold_ticks = 3;                 // interactive: reuse last PWM for up to k missed deadlines
+    double grace_s = 30.0;              // interactive: frozen longer than this => auto-despawn
+    double strict_timeout_s = 10.0;     // strict: barrier stalled longer => abort with report
+    std::string spawn_binary;           // arducopter for POST /vehicles {"launch_process":true}
     std::string spawn_home = "42.1354,24.7453,164,0";
     std::string spawn_defaults;
     double spacing_m = 5.0; // east spacing between spawn positions (fleet airspace layout)
@@ -106,6 +107,8 @@ Options parse_args(int argc, char **argv) {
             o.canned = true;
         } else if (std::strcmp(argv[i], "--api-port") == 0) {
             o.api_port = std::atoi(need_value("--api-port"));
+        } else if (std::strcmp(argv[i], "--api-bind") == 0) {
+            o.api_bind = need_value("--api-bind");
         } else if (std::strcmp(argv[i], "--hold-ticks") == 0) {
             o.hold_ticks = std::atoi(need_value("--hold-ticks"));
         } else if (std::strcmp(argv[i], "--grace") == 0) {
@@ -419,7 +422,20 @@ struct App {
         for (auto &cmd : queue.drain()) {
             if (auto *spawn = std::get_if<skysim::api::SpawnCommand>(&cmd)) {
                 std::optional<skysim::vehicle::SpawnResult> result;
-                const int instance = manager->allocate_instance();
+                int instance = -1;
+                if (spawn->request.instance >= 0) {
+                    // External allocator (SkyHub gateway) is authoritative for numbering.
+                    if (manager->allocate_instance_at(spawn->request.instance)) {
+                        instance = spawn->request.instance;
+                    } else {
+                        std::fprintf(stderr, "skysim: spawn refused — instance %d busy/invalid\n",
+                                     spawn->request.instance);
+                        spawn->done.set_value(result);
+                        continue;
+                    }
+                } else {
+                    instance = manager->allocate_instance();
+                }
                 try {
                     auto slot = make_slot(instance);
                     if (spawn->request.launch_process) {
@@ -742,7 +758,8 @@ int main(int argc, char **argv) {
             std::lock_guard<std::mutex> lock(app.snapshot_mutex);
             return app.metrics_snapshot;
         };
-        api = std::make_unique<skysim::api::ControlServer>(opt.api_port, app.queue, std::move(snaps));
+        api = std::make_unique<skysim::api::ControlServer>(opt.api_bind, opt.api_port, app.queue,
+                                                           std::move(snaps));
     }
 
     int rc = 0;

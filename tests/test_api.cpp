@@ -44,6 +44,7 @@ int main() {
     CommandQueue queue;
     std::atomic<bool> stop{false};
     std::atomic<bool> saw_launch_process{false};
+    std::atomic<int> last_instance{-2};
 
     // Fake tick thread: drain + answer. Spawn -> fixed result; despawn -> ok iff id == 1.
     std::thread consumer([&] {
@@ -51,6 +52,7 @@ int main() {
             for (auto &cmd : queue.drain()) {
                 if (auto *s = std::get_if<SpawnCommand>(&cmd)) {
                     saw_launch_process = s->request.launch_process;
+                    last_instance = s->request.instance;
                     s->done.set_value(skysim::vehicle::SpawnResult{1, 30, 9302, 6060});
                 } else if (auto *d = std::get_if<DespawnCommand>(&cmd)) {
                     d->done.set_value(d->id == 1);
@@ -84,7 +86,7 @@ int main() {
     };
 
     {
-        ControlServer server(kPort, queue, snaps);
+        ControlServer server("127.0.0.1", kPort, queue, snaps);
         httplib::Client client("127.0.0.1", kPort);
         client.set_read_timeout(15, 0);
 
@@ -97,6 +99,11 @@ int main() {
         auto spawn2 = client.Post("/vehicles", "{}", "application/json");
         CHECK(spawn2 && spawn2->status == 200);
         CHECK(!saw_launch_process.load()); // absent key parses as false
+        CHECK(last_instance.load() == -1); // absent instance -> skysim allocates
+
+        auto spawn3 = client.Post("/vehicles", "{\"instance\":7}", "application/json");
+        CHECK(spawn3 && spawn3->status == 200);
+        CHECK(last_instance.load() == 7); // gateway-chosen instance passes through
 
         auto del = client.Delete("/vehicles/1");
         CHECK(del && del->status == 200 && del->body.find("\"ok\":true") != std::string::npos);
@@ -117,7 +124,7 @@ int main() {
     // Rebind after teardown must work (the port is released, not leaked). Note a LIVE
     // conflict cannot be tested here: httplib sets SO_REUSEPORT, so two servers on one
     // port both bind and the kernel load-balances — don't share --api-port between sims.
-    ControlServer server_again(kPort, queue, snaps);
+    ControlServer server_again("127.0.0.1", kPort, queue, snaps);
 
     stop = true;
     consumer.join();

@@ -13,6 +13,8 @@ namespace skysim::vehicle {
 struct SpawnRequest {
     std::string frame = "quad_x"; // only frame supported until per-frame TOML lands (M5+)
     bool launch_process = false;  // true => manager spawns an arducopter for this slot
+    int instance = -1;            // >=0: caller-chosen instance (SkyHub gateway numbering);
+                                  // -1: lowest free (skysim allocates)
 };
 
 struct SpawnResult {
@@ -38,6 +40,9 @@ class VehicleManager {
 
     // Lowest free instance number (leak-free across spawn/despawn cycles — M4 acceptance).
     int allocate_instance();
+    // Claim a specific instance (external allocator, e.g. the SkyHub gateway). False if
+    // already in use or below base_instance.
+    bool allocate_instance_at(int instance);
     void release_instance(int instance);
     size_t instances_in_use() const;
 

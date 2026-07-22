@@ -7,6 +7,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -75,8 +76,9 @@ class ControlServer {
         std::function<MetricsInfo()> metrics;
     };
 
-    // Binds 127.0.0.1:port and serves on its own thread. Throws on bind failure (startup only).
-    ControlServer(int port, CommandQueue &queue, Snapshots snapshots);
+    // Binds bind_addr:port and serves on its own thread. Throws on bind failure (startup
+    // only). Use "0.0.0.0" when the SkyHub gateway calls in from a docker bridge network.
+    ControlServer(const std::string &bind_addr, int port, CommandQueue &queue, Snapshots snapshots);
     ~ControlServer();
     ControlServer(const ControlServer &) = delete;
     ControlServer &operator=(const ControlServer &) = delete;

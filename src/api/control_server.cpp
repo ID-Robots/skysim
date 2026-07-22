@@ -28,6 +28,19 @@ bool parse_launch_process(const std::string &body) {
     return std::strncmp(p, "true", 4) == 0 || *p == '1';
 }
 
+// {"instance":N} — absent key means -1 (skysim picks the lowest free slot).
+int parse_instance(const std::string &body) {
+    const char *p = std::strstr(body.c_str(), "\"instance\"");
+    if (p == nullptr) {
+        return -1;
+    }
+    p += std::strlen("\"instance\"");
+    while (*p == ':' || *p == ' ' || *p == '\t') {
+        ++p;
+    }
+    return std::atoi(p);
+}
+
 std::string vehicle_json(const VehicleInfo &v) {
     char buf[512];
     std::snprintf(buf, sizeof(buf),
@@ -48,13 +61,14 @@ struct ControlServer::Impl {
     std::thread thread;
 };
 
-ControlServer::ControlServer(int port, CommandQueue &queue, Snapshots snapshots)
+ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueue &queue, Snapshots snapshots)
     : impl_(std::make_unique<Impl>()) {
     auto &s = impl_->server;
 
     s.Post("/vehicles", [&queue](const httplib::Request &req, httplib::Response &res) {
         SpawnCommand cmd;
         cmd.request.launch_process = parse_launch_process(req.body);
+        cmd.request.instance = parse_instance(req.body);
         auto future = cmd.done.get_future();
         queue.push(Command{std::move(cmd)});
         if (future.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
@@ -115,8 +129,8 @@ ControlServer::ControlServer(int port, CommandQueue &queue, Snapshots snapshots)
         res.set_content(buf, "application/json");
     });
 
-    if (!s.bind_to_port("127.0.0.1", port)) {
-        throw std::runtime_error("ControlServer: cannot bind 127.0.0.1:" + std::to_string(port));
+    if (!s.bind_to_port(bind_addr, port)) {
+        throw std::runtime_error("ControlServer: cannot bind " + bind_addr + ":" + std::to_string(port));
     }
     impl_->thread = std::thread([this] { impl_->server.listen_after_bind(); });
     // Wait for the listen loop to actually start: stop() delivered before is_running()
@@ -124,7 +138,7 @@ ControlServer::ControlServer(int port, CommandQueue &queue, Snapshots snapshots)
     for (int i = 0; i < 1000 && !s.is_running(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    std::printf("skysim: control plane on http://127.0.0.1:%d\n", port);
+    std::printf("skysim: control plane on http://%s:%d\n", bind_addr.c_str(), port);
 }
 
 ControlServer::~ControlServer() {
