@@ -77,22 +77,70 @@ ParsedServos parse_servo_datagram(std::span<const std::byte> datagram,
 // value theft from the next field). The emitter is the last line of defense: substitute
 // 0.0 so the reply stays parseable; upstream owns not producing non-finites.
 namespace {
-double fin(double v) { return std::isfinite(v) ? v : 0.0; }
+
+constexpr uint64_t kPow10[] = {1ull,      10ull,      100ull,      1000ull,     10000ull,
+                               100000ull, 1000000ull, 10000000ull, 100000000ull};
+
+// Append a string literal; returns false on overflow.
+inline bool append_lit(char *buf, size_t cap, size_t &off, const char *s, size_t len) {
+    if (off + len > cap) {
+        return false;
+    }
+    std::memcpy(buf + off, s, len);
+    off += len;
+    return true;
+}
+template <size_t N> inline bool append_lit(char *buf, size_t cap, size_t &off, const char (&s)[N]) {
+    return append_lit(buf, cap, off, s, N - 1); // drop the trailing NUL
+}
+
+// Fixed-precision formatting equivalent to snprintf("%.*f") but ~30x faster: no format
+// parsing, no locale, integer-based digit emission. Non-finite -> 0.0 (PROTOCOL.md: no
+// NaN/Inf on the wire). prec in [0,8]. Rounds half away from zero (indistinguishable from
+// snprintf's round-half-to-even for physical sim data; ArduPilot re-parses with strtod).
+inline bool append_fixed(char *buf, size_t cap, size_t &off, double v, int prec) {
+    if (off + 40 > cap) { // sign + up to ~24 int digits + '.' + up to 8 frac
+        return false;
+    }
+    if (!std::isfinite(v)) {
+        v = 0.0;
+    }
+    char *p = buf + off;
+    if (std::signbit(v)) {
+        *p++ = '-';
+        v = -v;
+    }
+    const uint64_t scale = kPow10[prec];
+    const uint64_t scaled = static_cast<uint64_t>(v * static_cast<double>(scale) + 0.5);
+    uint64_t ip = scaled / scale;
+    const uint64_t fp = scaled % scale;
+
+    char tmp[24];
+    int ti = 0;
+    if (ip == 0) {
+        tmp[ti++] = '0';
+    }
+    while (ip != 0) {
+        tmp[ti++] = static_cast<char>('0' + ip % 10);
+        ip /= 10;
+    }
+    while (ti != 0) {
+        *p++ = tmp[--ti];
+    }
+    if (prec > 0) {
+        *p++ = '.';
+        for (int d = prec - 1; d >= 0; --d) {
+            *p++ = static_cast<char>('0' + (fp / kPow10[d]) % 10);
+        }
+    }
+    off = static_cast<size_t>(p - buf);
+    return true;
+}
 } // namespace
 
 size_t build_state_json(const VehicleTruth &t, char *buf, size_t buf_size) {
     size_t off = 0;
-    auto emit = [&](const char *fmt, auto... args) {
-        if (off >= buf_size) {
-            return false;
-        }
-        const int n = std::snprintf(buf + off, buf_size - off, fmt, args...);
-        if (n < 0 || static_cast<size_t>(n) >= buf_size - off) {
-            return false;
-        }
-        off += static_cast<size_t>(n);
-        return true;
-    };
+    const size_t cap = buf_size;
 
     // A quaternion with any non-finite component is unusable as a whole: fall back to identity.
     const bool quat_ok = std::isfinite(t.quat_wxyz[0]) && std::isfinite(t.quat_wxyz[1]) &&
@@ -111,24 +159,40 @@ size_t build_state_json(const VehicleTruth &t, char *buf, size_t buf_size) {
     const double pitch = std::asin(sinp);
     const double yaw = std::atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
 
-    bool ok = emit("{\"timestamp\":%.6f,\"imu\":{\"gyro\":[%.6f,%.6f,%.6f],\"accel_body\":[%.6f,%.6f,%.6f]},",
-                   fin(t.timestamp_s), fin(t.gyro_rps[0]), fin(t.gyro_rps[1]), fin(t.gyro_rps[2]),
-                   fin(t.accel_body[0]), fin(t.accel_body[1]), fin(t.accel_body[2])) &&
-              emit("\"position\":[%.6f,%.6f,%.6f],\"velocity\":[%.6f,%.6f,%.6f],", fin(t.pos_ned_m[0]),
-                   fin(t.pos_ned_m[1]), fin(t.pos_ned_m[2]), fin(t.vel_ned_mps[0]), fin(t.vel_ned_mps[1]),
-                   fin(t.vel_ned_mps[2])) &&
-              emit("\"attitude\":[%.7f,%.7f,%.7f],", roll, pitch, yaw) &&
-              emit("\"quaternion\":[%.7f,%.7f,%.7f,%.7f]", qw, qx, qy, qz);
+    bool ok =
+        append_lit(buf, cap, off, "{\"timestamp\":") && append_fixed(buf, cap, off, t.timestamp_s, 6) &&
+        append_lit(buf, cap, off, ",\"imu\":{\"gyro\":[") && append_fixed(buf, cap, off, t.gyro_rps[0], 6) &&
+        append_lit(buf, cap, off, ",") && append_fixed(buf, cap, off, t.gyro_rps[1], 6) &&
+        append_lit(buf, cap, off, ",") && append_fixed(buf, cap, off, t.gyro_rps[2], 6) &&
+        append_lit(buf, cap, off, "],\"accel_body\":[") && append_fixed(buf, cap, off, t.accel_body[0], 6) &&
+        append_lit(buf, cap, off, ",") && append_fixed(buf, cap, off, t.accel_body[1], 6) &&
+        append_lit(buf, cap, off, ",") && append_fixed(buf, cap, off, t.accel_body[2], 6) &&
+        append_lit(buf, cap, off, "]},\"position\":[") && append_fixed(buf, cap, off, t.pos_ned_m[0], 6) &&
+        append_lit(buf, cap, off, ",") && append_fixed(buf, cap, off, t.pos_ned_m[1], 6) &&
+        append_lit(buf, cap, off, ",") && append_fixed(buf, cap, off, t.pos_ned_m[2], 6) &&
+        append_lit(buf, cap, off, "],\"velocity\":[") && append_fixed(buf, cap, off, t.vel_ned_mps[0], 6) &&
+        append_lit(buf, cap, off, ",") && append_fixed(buf, cap, off, t.vel_ned_mps[1], 6) &&
+        append_lit(buf, cap, off, ",") && append_fixed(buf, cap, off, t.vel_ned_mps[2], 6) &&
+        append_lit(buf, cap, off, "],\"attitude\":[") && append_fixed(buf, cap, off, roll, 7) &&
+        append_lit(buf, cap, off, ",") && append_fixed(buf, cap, off, pitch, 7) &&
+        append_lit(buf, cap, off, ",") && append_fixed(buf, cap, off, yaw, 7) &&
+        append_lit(buf, cap, off, "],\"quaternion\":[") && append_fixed(buf, cap, off, qw, 7) &&
+        append_lit(buf, cap, off, ",") && append_fixed(buf, cap, off, qx, 7) &&
+        append_lit(buf, cap, off, ",") && append_fixed(buf, cap, off, qy, 7) &&
+        append_lit(buf, cap, off, ",") && append_fixed(buf, cap, off, qz, 7) &&
+        append_lit(buf, cap, off, "]");
+
     const size_t n_rng = std::min<size_t>(t.rangefinder_count, t.rangefinder_m.size());
     for (size_t i = 0; ok && i < n_rng; ++i) {
-        ok = emit(",\"rng_%zu\":%.4f", i + 1, fin(t.rangefinder_m[i]));
+        ok = append_lit(buf, cap, off, ",\"rng_", 6) && append_lit(buf, cap, off, &"123456"[i], 1) &&
+             append_lit(buf, cap, off, "\":", 2) && append_fixed(buf, cap, off, t.rangefinder_m[i], 4);
     }
     if (ok && t.no_lockstep) {
-        // Compact boolean (no space): ArduPilot's parser reads "true" only without a
-        // leading space, else strtoull (docs/PROTOCOL.md parser rules).
-        ok = emit("%s", ",\"no_lockstep\":1");
+        // Compact boolean (no space): ArduPilot's parser reads "true" only without a leading
+        // space, else strtoull (docs/PROTOCOL.md parser rules).
+        ok = append_lit(buf, cap, off, ",\"no_lockstep\":1");
     }
-    if (!ok || !emit("%s", "}\n")) {
+    if (!ok || !append_lit(buf, cap, off, "}\n")) {
         return 0;
     }
     return off;

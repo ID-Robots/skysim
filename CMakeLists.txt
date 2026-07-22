@@ -92,6 +92,10 @@ add_executable(world_bench tools/bench/world_bench.cpp)
 target_link_libraries(world_bench PRIVATE skysim_core skysim_vehicle)
 target_compile_options(world_bench PRIVATE -Wall -Wextra -Wshadow)
 
+add_executable(proto_bench tools/bench/proto_bench.cpp)
+target_link_libraries(proto_bench PRIVATE skysim_protocol)
+target_compile_options(proto_bench PRIVATE -Wall -Wextra -Wshadow)
+
 # --- tile cooker ------------------------------------------------------------------------------
 add_executable(tile_cooker tools/cooker/main.cpp)
 target_include_directories(tile_cooker PRIVATE src)
