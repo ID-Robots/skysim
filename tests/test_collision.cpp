@@ -112,6 +112,37 @@ int main() {
         w.remove_vehicle(id);
     }
 
+    // --- (b2) Contact attribution: a building strike must be distinguishable from a
+    // landing. static_contacts lumps both together, so building_contacts is what a
+    // crash alert can actually key on. ---
+    {
+        // Land on the ground plane well clear of the building: static_contacts rises,
+        // building_contacts must NOT.
+        skysim::core::VehicleBodyParams p;
+        p.start_pos_ned = {-200.0, 0.0, -2.0}; // south of the building, 2 m up
+        const uint32_t id = w.add_vehicle(p);
+        for (int i = 0; i < 2400; ++i) { // 3 s: fall and settle on the ground
+            w.step();
+        }
+        const auto landed = w.get_state(id);
+        CHECK(landed.static_contacts > 0);    // it did touch something static
+        CHECK(landed.building_contacts == 0); // but it was the ground, not a building
+        w.remove_vehicle(id);
+    }
+    {
+        // Drop onto the building roof: both counters rise.
+        skysim::core::VehicleBodyParams p;
+        p.start_pos_ned = {50.0, 0.0, -33.0}; // just above the roof at z=-30
+        const uint32_t id = w.add_vehicle(p);
+        for (int i = 0; i < 2400; ++i) {
+            w.step();
+        }
+        const auto hit = w.get_state(id);
+        CHECK(hit.building_contacts > 0); // struck the tile mesh
+        CHECK(hit.static_contacts >= hit.building_contacts);
+        w.remove_vehicle(id);
+    }
+
     // --- (c) Rangefinder-style raycasts against the mesh. ---
     {
         // Down onto the roof from 10 m above it.

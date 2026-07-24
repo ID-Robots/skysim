@@ -527,6 +527,8 @@ struct App {
             info.frozen = v->frozen;
             info.held_ticks = static_cast<uint64_t>(v->hold_ticks);
             info.midair_collisions = v->state.midair_collisions;
+            info.static_contacts = v->state.static_contacts;
+            info.building_contacts = v->state.building_contacts;
             for (int k = 0; k < 3; ++k) {
                 info.pos_ned[k] = v->state.pos_ned[k];
             }

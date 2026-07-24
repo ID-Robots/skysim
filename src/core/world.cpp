@@ -28,6 +28,7 @@
 #include <random>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "core/world.h"
@@ -116,6 +117,7 @@ struct VehicleEntry {
     Vec3 prev_vel_ned{};            // for specific-force finite difference
     uint64_t midair_collisions = 0; // vehicle-vehicle contact manifolds
     uint64_t static_contacts = 0;   // ground/tile contact manifolds
+    uint64_t building_contacts = 0; // streamed-tile contact manifolds only
 };
 
 // CLAUDE.md "Jolt-specific rules": contact callbacks run on Jolt's job threads during
@@ -161,6 +163,9 @@ struct World::Impl {
     std::unordered_map<uint32_t, VehicleEntry> vehicles;
     std::vector<JPH::BodyID> static_bodies;
     std::unordered_map<uint32_t, JPH::BodyID> static_tiles; // streamed (M5)
+    // Body indices of resident tiles, so contact attribution can distinguish a
+    // building strike from an ordinary ground touch without a linear scan.
+    std::unordered_set<uint32_t> tile_body_indices;
     // BodyID (index+sequence) -> vehicle id, so contact-event attribution is O(1) per contact
     // instead of an O(vehicles) linear scan (matters when many contacts fire in one step).
     std::unordered_map<uint32_t, uint32_t> body_to_vehicle;
@@ -266,6 +271,10 @@ size_t World::load_tiles(const std::filesystem::path &dir) {
         const JPH::BodyID body = create_tile_body(impl_->bodies(), entry.path());
         if (!body.IsInvalid()) {
             impl_->static_bodies.push_back(body);
+            // Register here as well as in add_static_tile(): bulk-loaded tiles are just
+            // as much "buildings" as streamed ones, and contact attribution must treat
+            // them the same or a strike on a preloaded tile looks like a ground touch.
+            impl_->tile_body_indices.insert(body.GetIndexAndSequenceNumber());
             ++loaded;
         }
     }
@@ -279,6 +288,7 @@ uint32_t World::add_static_tile(const std::filesystem::path &jshape) {
     }
     const uint32_t id = impl_->next_id++;
     impl_->static_tiles.emplace(id, body);
+    impl_->tile_body_indices.insert(body.GetIndexAndSequenceNumber());
     return id;
 }
 
@@ -287,6 +297,7 @@ void World::remove_static_tile(uint32_t id) {
     if (it == impl_->static_tiles.end()) {
         return;
     }
+    impl_->tile_body_indices.erase(it->second.GetIndexAndSequenceNumber());
     impl_->bodies().RemoveBody(it->second);
     impl_->bodies().DestroyBody(it->second);
     impl_->static_tiles.erase(it);
@@ -425,8 +436,14 @@ void World::step() {
             ++vb->midair_collisions;
         } else if (va != nullptr) {
             ++va->static_contacts;
+            if (impl_->tile_body_indices.count(b.GetIndexAndSequenceNumber()) != 0) {
+                ++va->building_contacts;
+            }
         } else if (vb != nullptr) {
             ++vb->static_contacts;
+            if (impl_->tile_body_indices.count(a.GetIndexAndSequenceNumber()) != 0) {
+                ++vb->building_contacts;
+            }
         }
     });
 }
@@ -465,6 +482,7 @@ BodyState World::get_state(uint32_t id) const {
     }
     out.midair_collisions = v.midair_collisions;
     out.static_contacts = v.static_contacts;
+    out.building_contacts = v.building_contacts;
     return out;
 }
 
