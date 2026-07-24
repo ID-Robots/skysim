@@ -46,10 +46,13 @@ std::string vehicle_json(const VehicleInfo &v) {
     std::snprintf(buf, sizeof(buf),
                   "{\"id\":%u,\"instance\":%d,\"json_port\":%d,\"mavlink_tcp\":%d,"
                   "\"connected\":%s,\"frozen\":%s,\"held_ticks\":%llu,"
-                  "\"midair_collisions\":%llu,\"pos_ned\":[%.3f,%.3f,%.3f]}",
+                  "\"midair_collisions\":%llu,\"static_contacts\":%llu,"
+                  "\"building_contacts\":%llu,\"pos_ned\":[%.3f,%.3f,%.3f]}",
                   v.id, v.instance, v.json_port, v.mavlink_tcp_port, v.connected ? "true" : "false",
                   v.frozen ? "true" : "false", static_cast<unsigned long long>(v.held_ticks),
-                  static_cast<unsigned long long>(v.midair_collisions), v.pos_ned[0], v.pos_ned[1],
+                  static_cast<unsigned long long>(v.midair_collisions),
+                  static_cast<unsigned long long>(v.static_contacts),
+                  static_cast<unsigned long long>(v.building_contacts), v.pos_ned[0], v.pos_ned[1],
                   v.pos_ned[2]);
     return buf;
 }

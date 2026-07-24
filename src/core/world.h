@@ -42,8 +42,10 @@ struct BodyState {
     Vec3 gyro_frd{};       // body rates, rad/s
     Vec3 accel_body_frd{}; // specific force (accelerometer), clamped +/-16 g
     // Contact-event counters (new manifolds only, so resting contact counts once):
-    uint64_t midair_collisions = 0; // vehicle-vehicle impacts — the crash signal
-    uint64_t static_contacts = 0;   // ground/building touches (landings included)
+    uint64_t midair_collisions = 0;   // vehicle-vehicle impacts — the crash signal
+    uint64_t static_contacts = 0;     // any static touch: ground plane OR building tile
+    uint64_t building_contacts = 0;   // streamed-tile touches only — a real crash, unlike
+                                      // a landing, which only bumps static_contacts
 };
 
 class World {

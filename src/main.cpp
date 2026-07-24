@@ -56,7 +56,9 @@ struct Options {
     double grace_s = 30.0;              // interactive: frozen longer than this => auto-despawn
     double strict_timeout_s = 10.0;     // strict: barrier stalled longer => abort with report
     std::string spawn_binary;           // arducopter for POST /vehicles {"launch_process":true}
-    std::string spawn_home = "42.1354,24.7453,164,0";
+    // Hristo Botev Stadium, Plovdiv — matches the gateway SITL_HOME_LOCATION and
+    // the anchor used to cook the building world; the old default sat ~1.7 km away.
+    std::string spawn_home = "42.1403890,24.7645490,0,0";
     std::string spawn_defaults;
     double spacing_m = 5.0; // east spacing between spawn positions (fleet airspace layout)
 };
@@ -527,6 +529,8 @@ struct App {
             info.frozen = v->frozen;
             info.held_ticks = static_cast<uint64_t>(v->hold_ticks);
             info.midair_collisions = v->state.midair_collisions;
+            info.static_contacts = v->state.static_contacts;
+            info.building_contacts = v->state.building_contacts;
             for (int k = 0; k < 3; ++k) {
                 info.pos_ned[k] = v->state.pos_ned[k];
             }

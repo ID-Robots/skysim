@@ -23,7 +23,9 @@ struct VehicleInfo {
     bool connected = false; // has ever delivered a servo frame
     bool frozen = false;    // straggler policy engaged (kinematic hold)
     uint64_t held_ticks = 0;
-    uint64_t midair_collisions = 0; // vehicle-vehicle contact events (crash telemetry)
+    uint64_t midair_collisions = 0;  // vehicle-vehicle contact events (crash telemetry)
+    uint64_t static_contacts = 0;    // any static touch, landings included
+    uint64_t building_contacts = 0;  // building-tile strikes only — the "hit a building" signal
     double pos_ned[3] = {0.0, 0.0, 0.0};
 };
 

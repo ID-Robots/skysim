@@ -14,8 +14,12 @@ cmake --build build-cov -j
 find build-cov -name '*.gcda' -delete
 ctest --test-dir build-cov --output-on-failure
 
+# gcov intermittently emits negative branch counts for heavily-threaded code
+# ("branch 1 taken -5", GCC bug 68080), which aborts the whole report and fails CI
+# for a reason unrelated to the change under test. Warn once per file instead.
 gcovr --root . --filter 'src/' build-cov \
       --exclude-throw-branches \
+      --gcov-ignore-parse-errors negative_hits.warn_once_per_file \
       --print-summary \
       --html-details build-cov/coverage.html \
       --fail-under-line "$MIN"
