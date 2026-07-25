@@ -142,3 +142,22 @@ duplicates), and an upstream Copter-4.7.0 bug where rangefinder data only flows 
 `attitude` accompanies the quaternion.
 
 [Jolt Physics]: https://github.com/jrouwe/JoltPhysics
+
+## License
+
+skysim is free software released under the **GNU General Public License v3.0 or later**
+(GPL-3.0-or-later) — the same license as [ArduPilot], the autopilot it simulates.
+
+See [LICENSE](LICENSE) for the full text.
+
+You may use, study, modify and redistribute skysim. If you distribute a modified
+version, or a work derived from it, that work must also be released under the GPL.
+
+**Using skysim with proprietary software:** skysim runs as its own process and speaks
+to the outside world only over the network — a REST control plane and UDP servo/state
+packets (see `docs/PROTOCOL.md`). Software that merely talks to a skysim instance over
+those interfaces is a separate program, not a derivative work, and is unaffected by
+this license. Linking skysim's source or objects into another program is a different
+matter and does place that program under the GPL.
+
+[ArduPilot]: https://github.com/ArduPilot/ardupilot
