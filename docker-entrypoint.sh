@@ -24,6 +24,10 @@ if [[ -n "${SKYSIM_TILES:-}" ]]; then
     fi
 fi
 
+if [[ -n "${SKYSIM_DT:-}" ]]; then
+    args+=(--dt "${SKYSIM_DT}")
+fi
+
 if [[ -n "${SKYSIM_SPAWN_HOME:-}" ]]; then
     args+=(--spawn-home "${SKYSIM_SPAWN_HOME}")
 fi
