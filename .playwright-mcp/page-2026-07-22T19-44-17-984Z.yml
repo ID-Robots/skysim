@@ -1,5 +1,0 @@
-- generic [active] [ref=f4e1]:
-  - generic:
-    - generic:
-      - alertdialog
-    - progressbar [ref=f4e2]
