@@ -49,15 +49,19 @@ def api(port: int, method: str, path: str, body: bytes | None = None):
 def case_replay(tmp: str) -> None:
     rec = os.path.join(tmp, "servo.csv")
     out = os.path.join(tmp, "truth.csv")
+    # 0.5 s of servo frames at the sim's default rate. Tied to the rate on purpose:
+    # the assertion below is about how far the vehicle climbs in half a second, not in
+    # some number of ticks, so the count has to track the default dt (800 Hz).
+    ticks = 400
     with open(rec, "w") as f:
-        for tick in range(200):
+        for tick in range(ticks):
             f.write(f"{tick},0,800," + ",".join(["1700"] * 16) + "\n")
     rc = subprocess.run([SIM, "--vehicles", "1", "--replay-servo", rec, "--truth-log", out,
                          "--wind", "2,0,0", "--gust", "0.5,1", "--seed", "7"],
                         capture_output=True, text=True, timeout=60)
     check(rc.returncode == 0, f"replay exit ({rc.returncode}: {rc.stderr})")
     lines = open(out).readlines()
-    check(len(lines) == 201, f"replay truth lines ({len(lines)})")  # header + 200
+    check(len(lines) == ticks + 1, f"replay truth lines ({len(lines)})")  # header + ticks
     # 1700 pwm is well above hover: after 0.5 s the vehicle must have climbed clear.
     check(float(lines[-1].split(",")[4]) < -0.3, "replay vehicle climbed under 1700 pwm")
 

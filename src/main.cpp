@@ -31,7 +31,12 @@ namespace {
 struct Options {
     int vehicles = 1;
     int base_instance = 0;
-    double dt_s = 1.0 / 400.0;
+    // 800 Hz, matching the rate the README/DESIGN document and benchmark. It is also
+    // the lowest rate ArduPilot copter will arm at under --model json: pre-arm requires
+    // gyro rate >= SCHED_LOOP_RATE * 1.8, i.e. 720 Hz for the default 400 Hz loop, so a
+    // 400 Hz world fails with "PreArm: Gyro 0 rate 400Hz < loop rate*1.8 720Hz" and the
+    // vehicle can never take off.
+    double dt_s = 1.0 / 800.0;
     std::string time_mode = "strict";
     std::string tiles;
     std::string truth_log;

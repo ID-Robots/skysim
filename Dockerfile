@@ -63,6 +63,7 @@ COPY --from=build /src/tools/cooker/ /opt/skysim/cooker/
 # container, not the same process.
 ENV SKYSIM_API_BIND=0.0.0.0 \
     SKYSIM_API_PORT=8642 \
+    SKYSIM_DT="" \
     SKYSIM_TILES="" \
     SKYSIM_STREAM_RADIUS=1500 \
     SKYSIM_STREAM_MAX=128 \
