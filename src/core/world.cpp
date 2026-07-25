@@ -324,6 +324,61 @@ double World::raycast(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_di
     return -1.0;
 }
 
+std::vector<World::PathHit> World::sweep_path(const std::vector<Vec3> &waypoints_ned, double clearance_m) const {
+    std::vector<PathHit> hits;
+    if (waypoints_ned.size() < 2) {
+        return hits;
+    }
+
+    // Offsets perpendicular to each leg, so the sweep approximates the airframe's width
+    // rather than an infinitely thin line through a doorway.
+    const double r = std::max(0.0, clearance_m);
+
+    for (size_t leg = 0; leg + 1 < waypoints_ned.size(); ++leg) {
+        const Vec3 &a = waypoints_ned[leg];
+        const Vec3 &b = waypoints_ned[leg + 1];
+
+        const Vec3 delta{b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+        const double length = std::sqrt(delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]);
+        if (length < 1e-6) {
+            continue; // duplicate waypoint
+        }
+        const Vec3 dir{delta[0] / length, delta[1] / length, delta[2] / length};
+
+        // Any vector not parallel to dir works as a seed for the perpendicular basis.
+        const Vec3 seed = (std::fabs(dir[2]) < 0.9) ? Vec3{0.0, 0.0, 1.0} : Vec3{1.0, 0.0, 0.0};
+        Vec3 u{dir[1] * seed[2] - dir[2] * seed[1], dir[2] * seed[0] - dir[0] * seed[2],
+               dir[0] * seed[1] - dir[1] * seed[0]};
+        const double u_len = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+        if (u_len > 1e-9) {
+            u = Vec3{u[0] / u_len, u[1] / u_len, u[2] / u_len};
+        }
+        const Vec3 v{dir[1] * u[2] - dir[2] * u[1], dir[2] * u[0] - dir[0] * u[2], dir[0] * u[1] - dir[1] * u[0]};
+
+        const Vec3 offsets[5] = {
+            {0.0, 0.0, 0.0}, {u[0] * r, u[1] * r, u[2] * r},    {-u[0] * r, -u[1] * r, -u[2] * r},
+            {v[0] * r, v[1] * r, v[2] * r}, {-v[0] * r, -v[1] * r, -v[2] * r},
+        };
+
+        double nearest = -1.0;
+        for (const Vec3 &offset : offsets) {
+            const Vec3 origin{a[0] + offset[0], a[1] + offset[1], a[2] + offset[2]};
+            const double distance = raycast(origin, dir, length);
+            if (distance >= 0.0 && (nearest < 0.0 || distance < nearest)) {
+                nearest = distance;
+            }
+        }
+
+        if (nearest >= 0.0) {
+            hits.push_back(PathHit{leg,
+                                   Vec3{a[0] + dir[0] * nearest, a[1] + dir[1] * nearest, a[2] + dir[2] * nearest},
+                                   nearest});
+        }
+    }
+
+    return hits;
+}
+
 uint32_t World::add_vehicle(const VehicleBodyParams &p) {
     // FRD half-extents/inertia to Jolt body local (x fwd, y up, z right): swap y/z, negate none
     // (extents are magnitudes).

@@ -516,6 +516,41 @@ struct App {
                     }
                 }
                 despawn_cmd->done.set_value(found);
+            } else if (auto *path = std::get_if<skysim::api::PathCheckCommand>(&cmd)) {
+                // A read of world geometry, so it belongs on the tick thread like the
+                // mutations above — Jolt queries must not race PhysicsSystem::Update.
+                skysim::api::PathCheckResult result;
+
+                // Tile residency follows the vehicles, so a mission the fleet is not
+                // near yet has no geometry loaded and would sweep clean through a city.
+                // Stream the path's own tiles in first, passing the fleet positions too
+                // so nothing a flying vehicle needs gets evicted.
+                if (streamer) {
+                    std::vector<skysim::core::Vec3> interest = path->waypoints_ned;
+                    for (const auto &v : fleet) {
+                        interest.push_back(v->state.pos_ned);
+                    }
+                    const auto plan = streamer->update(interest);
+                    for (size_t idx : plan.remove) {
+                        auto it = tile_world_ids.find(idx);
+                        if (it != tile_world_ids.end()) {
+                            world->remove_static_tile(it->second);
+                            tile_world_ids.erase(it);
+                        }
+                    }
+                    for (size_t idx : plan.add) {
+                        const uint32_t id = world->add_static_tile(streamer->tile_path(idx));
+                        if (id != 0) {
+                            tile_world_ids.emplace(idx, id);
+                        }
+                    }
+                    result.geometry_available = streamer->resident_count() > 0;
+                }
+
+                if (world) {
+                    result.hits = world->sweep_path(path->waypoints_ned, path->clearance_m);
+                }
+                path->done.set_value(std::move(result));
             }
         }
         manager->reap();

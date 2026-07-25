@@ -11,6 +11,7 @@
 #include <variant>
 #include <vector>
 
+#include "core/world.h"
 #include "vehicle/manager.h"
 
 namespace skysim::api {
@@ -50,7 +51,25 @@ struct DespawnCommand {
     std::promise<bool> done;
 };
 
-using Command = std::variant<SpawnCommand, DespawnCommand>;
+// A planned mission path swept through the world's building geometry. Runs on the tick
+// thread like any other world access, and answers in microseconds — the pre-flight
+// question is "would this mission hit a building?", which a real flight, even sped up,
+// is far too slow to answer while an operator waits.
+struct PathCheckResult {
+    std::vector<core::World::PathHit> hits;
+    // False when there is no building geometry to sweep against. Reported rather than
+    // folded into an empty hit list, because "nothing loaded" must never be presented
+    // to an operator as "the path is clear".
+    bool geometry_available = false;
+};
+
+struct PathCheckCommand {
+    std::vector<core::Vec3> waypoints_ned;
+    double clearance_m = 1.0;
+    std::promise<PathCheckResult> done;
+};
+
+using Command = std::variant<SpawnCommand, DespawnCommand, PathCheckCommand>;
 
 // Mutex-protected handoff HTTP thread -> tick thread; drained at tick boundaries only.
 class CommandQueue {

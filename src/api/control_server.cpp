@@ -6,6 +6,8 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -39,6 +41,67 @@ int parse_instance(const std::string &body) {
         ++p;
     }
     return std::atoi(p);
+}
+
+// {"clearance_m":1.5} — absent means a conservative default airframe half-width.
+double parse_clearance(const std::string &body) {
+    const char *p = std::strstr(body.c_str(), "\"clearance_m\"");
+    if (p == nullptr) {
+        return 1.0;
+    }
+    p += std::strlen("\"clearance_m\"");
+    while (*p == ':' || *p == ' ' || *p == '\t') {
+        ++p;
+    }
+    const double value = std::atof(p);
+    return value > 0.0 ? value : 1.0;
+}
+
+// {"waypoints_ned":[[n,e,d],[n,e,d],...]} — flat scan for numbers in triples, matching the
+// deliberately dependency-free parsing style of this file.
+std::vector<core::Vec3> parse_waypoints(const std::string &body) {
+    std::vector<core::Vec3> out;
+    const char *p = std::strstr(body.c_str(), "\"waypoints_ned\"");
+    if (p == nullptr) {
+        return out;
+    }
+    p = std::strchr(p, '[');
+    if (p == nullptr) {
+        return out;
+    }
+    const char *end = body.c_str() + body.size();
+
+    while (p < end) {
+        p = std::strchr(p + 1, '[');
+        if (p == nullptr) {
+            break;
+        }
+        core::Vec3 wp{};
+        bool ok = true;
+        const char *cursor = p + 1;
+        for (int axis = 0; axis < 3; ++axis) {
+            while (cursor < end && (*cursor == ' ' || *cursor == ',' || *cursor == '\t')) {
+                ++cursor;
+            }
+            if (cursor >= end || (*cursor != '-' && *cursor != '+' && *cursor != '.' && std::isdigit(static_cast<unsigned char>(*cursor)) == 0)) {
+                ok = false;
+                break;
+            }
+            char *next = nullptr;
+            wp[static_cast<size_t>(axis)] = std::strtod(cursor, &next);
+            if (next == cursor) {
+                ok = false;
+                break;
+            }
+            cursor = next;
+        }
+        if (!ok) {
+            break;
+        }
+        out.push_back(wp);
+        p = cursor;
+    }
+    return out;
 }
 
 std::string vehicle_json(const VehicleInfo &v) {
@@ -89,6 +152,45 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
         std::snprintf(buf, sizeof(buf), "{\"id\":%u,\"instance\":%d,\"json_port\":%d,\"mavlink_tcp\":%d}",
                       result->id, result->instance, result->json_port, result->mavlink_tcp_port);
         res.set_content(buf, "application/json");
+    });
+
+    // Sweep a planned mission path through the building geometry. Answers the pre-flight
+    // question directly, without flying anything.
+    s.Post("/mission/check", [&queue](const httplib::Request &req, httplib::Response &res) {
+        PathCheckCommand cmd;
+        cmd.waypoints_ned = parse_waypoints(req.body);
+        cmd.clearance_m = parse_clearance(req.body);
+
+        if (cmd.waypoints_ned.size() < 2) {
+            res.status = 400;
+            res.set_content(R"({"error":"at least two waypoints are required"})", "application/json");
+            return;
+        }
+
+        auto future = cmd.done.get_future();
+        queue.push(Command{std::move(cmd)});
+        if (future.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+            res.status = 504;
+            res.set_content("{\"error\":\"tick thread did not answer\"}", "application/json");
+            return;
+        }
+
+        const auto result = future.get();
+        const auto &hits = result.hits;
+        // 'checked' distinguishes "swept and found nothing" from "had nothing to sweep".
+        std::string body = std::string("{\"checked\":") + (result.geometry_available ? "true" : "false") +
+                           ",\"clear\":" + (result.geometry_available && hits.empty() ? "true" : "false") +
+                           ",\"hits\":[";
+        for (size_t i = 0; i < hits.size(); ++i) {
+            char entry[256];
+            std::snprintf(entry, sizeof(entry),
+                          "%s{\"leg\":%zu,\"distance_m\":%.2f,\"position_ned\":[%.2f,%.2f,%.2f]}",
+                          i ? "," : "", hits[i].leg, hits[i].distance_m, hits[i].position_ned[0],
+                          hits[i].position_ned[1], hits[i].position_ned[2]);
+            body += entry;
+        }
+        body += "]}";
+        res.set_content(body, "application/json");
     });
 
     s.Delete(R"(/vehicles/(\d+))", [&queue](const httplib::Request &req, httplib::Response &res) {
