@@ -1,6 +1,12 @@
 <h1 align="center">skysim</h1>
 
 <p align="center">
+  <a href="https://skyhub.ai"><img src=".github/assets/skysim-skyhub.jpg" alt="SkyHub collision report for a simulated copter mission that struck a building, with vehicle, mission, position, altitude, and impact details" width="880" /></a>
+</p>
+
+<p align="center"><sub><em>SkyHub turns a skysim building strike into a vehicle- and mission-specific safety report before the route reaches a real aircraft.</em></sub></p>
+
+<p align="center">
   <strong>Fly hundreds of drones in one shared physics world — on a single CPU core.</strong><br/>
   A headless multi-vehicle flight simulator for <a href="https://ardupilot.org/">ArduPilot</a> SITL, built on
   <a href="https://github.com/jrouwe/JoltPhysics">Jolt Physics</a>. Gazebo's job, minus Gazebo.
@@ -19,12 +25,6 @@
   <img alt="ArduPilot" src="https://img.shields.io/badge/ArduPilot-Copter_4.7.0-brightgreen?style=flat-square" />
   <img alt="Platform" src="https://img.shields.io/badge/Linux-Ubuntu_22.04_%7C_24.04-E95420?style=flat-square&logo=ubuntu&logoColor=white" />
 </p>
-
-<p align="center">
-  <img src=".github/assets/skyhub-collision.png" alt="Two simulated drones collide over a 3D city model in the SkyHub dashboard — skysim detects the impact and the collision alert surfaces live in the operator UI" width="920" />
-</p>
-
-<p align="center"><sub><em>A real mid-air collision in a shared skysim world, surfaced live in <a href="https://skyhub.ai">SkyHub</a>.</em></sub></p>
 
 ---
 
@@ -164,10 +164,11 @@ docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
 
 | Endpoint | Effect |
 |----------|--------|
-| `POST /vehicles` `{"launch_process":true?}` | spawn at next free instance (optionally forks arducopter) → `{id, instance, json_port, mavlink_tcp}` |
+| `POST /vehicles` `{"instance":N, "launch_process":true}` (both fields optional) | reserve a requested or next-free ArduPilot instance (optionally forks arducopter) → `{id, instance, json_port, mavlink_tcp}` |
 | `DELETE /vehicles/{id}` | despawn, release instance, kill managed process |
 | `GET /vehicles` | per-vehicle: connected, frozen, held_ticks, pos_ned, `midair_collisions`, `building_contacts` |
 | `GET /metrics` | tick p50/p99 µs, straggler_events, freezes, resident_tiles |
+| `POST /mission/check` `{"waypoints_ned":[[n,e,d],...], "clearance_m":1.0}` | sweep a planned route through loaded building geometry → `{checked, clear, hits}` |
 
 All mutations execute at tick boundaries; reads come from per-tick snapshots. The SkyHub
 gateway polls `GET /vehicles` and, on a collision-counter increase, emits a crash alert to
@@ -244,10 +245,36 @@ only flows when euler `attitude` accompanies the quaternion.
 
 ## Built for SkyHub
 
-skysim is the simulation backend for **[SkyHub](https://skyhub.ai)** — a cloud fleet control
-system for autonomous drone operations. SkyHub spawns simulated vehicles into one shared
-skysim world, and collisions surface live on the operator's map alongside real aircraft
-telemetry. See [`docs/SKYHUB_INTEGRATION.md`](docs/SKYHUB_INTEGRATION.md).
+skysim gives **[SkyHub](https://skyhub.ai)** a shared digital-twin environment for
+autonomous-drone operations. In the tested local integration, SkyHub-created SITL vehicles
+keep the normal ArduPilot/MAVLink mission and telemetry path while outsourcing physics to
+skysim. The gateway reserves each ArduPilot instance through the REST control plane, and
+every vehicle joins the same georeferenced Jolt world.
+
+That integration provides:
+
+- **One fleet, one physical world.** Simulated vehicles can collide with one another and
+  with streamed building geometry instead of running as isolated SITL sessions.
+- **Live operator feedback.** `GET /vehicles` reports connection and freeze state,
+  ground-truth position, and separate mid-air and building-collision counters. The SkyHub
+  gateway turns counter increases into collision alerts in the dashboard.
+- **Runtime fleet lifecycle.** SkyHub can reserve a specific instance with
+  `POST /vehicles {"instance":N}` and remove it without stopping the shared world, keeping
+  its allocator aligned with ArduPilot's port mapping.
+- **Pre-flight geometry checks.** `POST /mission/check` can sweep planned NED mission legs
+  with a configurable approximate clearance envelope through building geometry. It reports
+  `checked:false` rather than incorrectly calling a route clear when geometry is unavailable.
+
+The local path has been exercised end to end with two SkyHub-created drones, a physical
+mid-air collision, and live dashboard alerts. The
+[SkyHub integration notes](docs/SKYHUB_INTEGRATION.md) cover the architecture, test
+evidence, and the remaining work to package the GCS heartbeat helper for deployment.
+
+<p align="center">
+  <img src=".github/assets/skyhub-collision.png" alt="Two simulated drones collide over a 3D city model in the SkyHub dashboard — skysim detects the impact and the collision alert surfaces live in the operator UI" width="920" />
+</p>
+
+<p align="center"><sub><em>A real mid-air collision in a shared skysim world, surfaced live in <a href="https://skyhub.ai">SkyHub</a>.</em></sub></p>
 
 Made by **[ID Robots](https://idrobots.com)** — the team behind the Observer drone and the
 NexusBox docking station.
