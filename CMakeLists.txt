@@ -166,10 +166,39 @@ target_link_libraries(test_streamer PRIVATE skysim_terrain skysim_core)
 target_compile_options(test_streamer PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME streamer COMMAND test_streamer)
 
+set_tests_properties(
+    packets json frames quad world collision endpoint manager api thread_pool streamer
+    PROPERTIES LABELS "unit"
+)
+
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_FOUND)
     add_test(NAME app_smoke
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/app_smoke.py
                      $<TARGET_FILE:skysim>)
-    set_tests_properties(app_smoke PROPERTIES TIMEOUT 180)
+    add_test(NAME app_churn
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/harness/churn.py
+                     --sim $<TARGET_FILE:skysim>
+                     --cycles 100
+                     --api-port 18645
+                     --base-instance 96)
+    set_tests_properties(app_smoke app_churn PROPERTIES
+        LABELS "happy-path"
+        TIMEOUT 180
+        RUN_SERIAL TRUE
+    )
 endif()
+
+add_test(NAME performance_world
+         COMMAND world_bench 200 2000 --max-p99-us 1250)
+add_test(NAME performance_protocol
+         COMMAND proto_bench 2000000 --max-combined-ns 2000)
+add_test(NAME performance_reply
+         COMMAND reply_bench 100 1000 3 --max-pooled-p99-us 1250)
+set_tests_properties(
+    performance_world performance_protocol performance_reply
+    PROPERTIES
+        LABELS "performance"
+        TIMEOUT 120
+        RUN_SERIAL TRUE
+)
