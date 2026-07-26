@@ -1,5 +1,0 @@
-[     291ms] [LOG] Angular is running in development mode. @ http://localhost:4200/@fs/home/skycore/Projects/skyhub_dashboard/.angular/cache/22.0.7/dashboard/vite/deps/chunk-V3ATLCAC.js?v=e01552d9:11614
-[     306ms] [WARNING] <meta name="apple-mobile-web-app-capable" content="yes"> is deprecated. Please include <meta name="mobile-web-app-capable" content="yes"> @ http://localhost:4200/portal/vehicles:0
-[   19798ms] [INFO] Autofocus processing was blocked because a document already has a focused element. @ http://localhost:4200/portal/vehicles?dialog=app-create-drone-dialog:0
-[   30510ms] [ERROR] Failed to load resource: the server responded with a status of 401 (UNAUTHORIZED) @ http://localhost:5000/api/v1/drones/status:0
-[  312533ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_RESET @ http://localhost:5000/api/v1/drone:0

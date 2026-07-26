@@ -14,3 +14,5 @@ logs/
 determinism_servo.csv
 demo_map*/
 build-cov/
+# browser-automation artifacts from local UI checks
+.playwright-mcp/

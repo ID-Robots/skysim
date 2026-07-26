@@ -3,6 +3,7 @@
 // speaks NED (see CLAUDE.md invariant 2). Init order rules: CLAUDE.md "Jolt-specific".
 #include <cstdint>
 #include <filesystem>
+#include <vector>
 #include <memory>
 
 #include "core/frames.h"
@@ -63,6 +64,21 @@ class World {
     // Returns 0 on load failure.
     uint32_t add_static_tile(const std::filesystem::path &jshape);
     void remove_static_tile(uint32_t id);
+    // One obstruction found while sweeping a planned mission path.
+    struct PathHit {
+        size_t leg = 0;        // index of the leg (waypoint i -> i+1) that is blocked
+        Vec3 position_ned{};   // where along the leg the obstruction sits
+        double distance_m = 0; // distance from the start of that leg
+    };
+
+    // Fly a planned path through the world without a vehicle, as fast as the geometry
+    // can be queried — the pre-flight question is "would this mission hit a building?",
+    // and a real flight (even sped up) is far too slow to answer it while an operator
+    // waits. Each leg is swept as a bundle of parallel rays offset by `clearance_m`, so
+    // an airframe clipping a corner is caught, not just the centreline.
+    // Returns every blocked leg, in order.
+    std::vector<PathHit> sweep_path(const std::vector<Vec3> &waypoints_ned, double clearance_m) const;
+
     // Ray from origin_ned along dir_ned (unit); returns hit distance or a negative value.
     // ignore_vehicle_id: skip that vehicle's own body (rangefinders ray from the body center,
     // which would otherwise hit the vehicle's own collision box at distance 0).
