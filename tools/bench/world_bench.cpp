@@ -1,6 +1,6 @@
 // skysim world-step microbenchmark: create N hovering quads, run the full tick pipeline
 // (compute_wrench -> apply -> step -> get_state) and report per-stage timing.
-// Usage: world_bench [N=100] [ticks=2000] [--collide]
+// Usage: world_bench [N=100] [ticks=2000] [--collide] [--max-p99-us N]
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -26,11 +26,13 @@ double pct(std::vector<double> &v, double p) {
 } // namespace
 
 int main(int argc, char **argv) {
-    int n = argc > 1 ? std::atoi(argv[1]) : 100;
-    int ticks = argc > 2 ? std::atoi(argv[2]) : 2000;
+    int n = 100;
+    int ticks = 2000;
     bool collide = false;
     int threads = -1;
     double spacing_override = -1.0; // meters between vehicles; overrides --collide's 0.3
+    double max_p99_us = -1.0;
+    int positional = 0;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--collide") == 0) {
             collide = true;
@@ -38,7 +40,23 @@ int main(int argc, char **argv) {
             threads = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--spacing") == 0 && i + 1 < argc) {
             spacing_override = std::atof(argv[++i]);
+        } else if (std::strcmp(argv[i], "--max-p99-us") == 0 && i + 1 < argc) {
+            max_p99_us = std::atof(argv[++i]);
+        } else if (argv[i][0] == '-') {
+            std::fprintf(stderr, "unknown or incomplete option: %s\n", argv[i]);
+            return 2;
+        } else if (positional++ == 0) {
+            n = std::atoi(argv[i]);
+        } else if (positional == 2) {
+            ticks = std::atoi(argv[i]);
+        } else {
+            std::fprintf(stderr, "unexpected argument: %s\n", argv[i]);
+            return 2;
         }
+    }
+    if (n <= 0 || ticks <= 0 || max_p99_us == 0.0) {
+        std::fprintf(stderr, "N, ticks, and --max-p99-us (when set) must be positive\n");
+        return 2;
     }
 
     skysim::core::WorldConfig cfg;
@@ -115,5 +133,11 @@ int main(int argc, char **argv) {
     const double p99 = pct(t_total, 0.99);
     std::printf("  realtime headroom @ %d veh: tick p99 %.1f us vs dt %.1f us => %.2fx %s\n", n, p99, dt_us,
                 dt_us / p99, p99 < dt_us ? "OK" : "OVER BUDGET");
+    if (max_p99_us > 0.0) {
+        const bool pass = p99 <= max_p99_us;
+        std::printf("  performance gate: p99 %.1f us <= %.1f us => %s\n", p99, max_p99_us,
+                    pass ? "PASS" : "FAIL");
+        return pass ? 0 : 1;
+    }
     return 0;
 }

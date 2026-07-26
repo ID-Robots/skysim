@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <thread>
@@ -45,8 +46,13 @@ int main() {
     std::atomic<bool> stop{false};
     std::atomic<bool> saw_launch_process{false};
     std::atomic<int> last_instance{-2};
+    std::atomic<size_t> path_checks{0};
+    std::atomic<size_t> last_waypoint_count{0};
+    std::atomic<double> last_clearance{-1.0};
 
     // Fake tick thread: drain + answer. Spawn -> fixed result; despawn -> ok iff id == 1.
+    // Path checks return a hit, a clear result, or unavailable geometry based on the first
+    // waypoint's north coordinate so the HTTP response cases stay deterministic.
     std::thread consumer([&] {
         while (!stop.load()) {
             for (auto &cmd : queue.drain()) {
@@ -56,6 +62,19 @@ int main() {
                     s->done.set_value(skysim::vehicle::SpawnResult{1, 30, 9302, 6060});
                 } else if (auto *d = std::get_if<DespawnCommand>(&cmd)) {
                     d->done.set_value(d->id == 1);
+                } else if (auto *p = std::get_if<PathCheckCommand>(&cmd)) {
+                    ++path_checks;
+                    last_waypoint_count = p->waypoints_ned.size();
+                    last_clearance = p->clearance_m;
+
+                    PathCheckResult result;
+                    if (!p->waypoints_ned.empty() && p->waypoints_ned.front()[0] == 1.0) {
+                        result.geometry_available = true;
+                        result.hits.push_back({1, {12.0, -3.5, -20.0}, 7.25});
+                    } else if (!p->waypoints_ned.empty() && p->waypoints_ned.front()[0] == 9.0) {
+                        result.geometry_available = true;
+                    }
+                    p->done.set_value(std::move(result));
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -104,6 +123,47 @@ int main() {
         auto spawn3 = client.Post("/vehicles", "{\"instance\":7}", "application/json");
         CHECK(spawn3 && spawn3->status == 200);
         CHECK(last_instance.load() == 7); // gateway-chosen instance passes through
+
+        // Mission checks validate input before reaching the tick thread.
+        auto mission_bad =
+            client.Post("/mission/check", R"({"waypoints_ned":[[0,0,-10]]})", "application/json");
+        CHECK(mission_bad && mission_bad->status == 400);
+        CHECK(mission_bad && mission_bad->body.find("at least two waypoints") != std::string::npos);
+        CHECK(path_checks.load() == 0);
+
+        // A valid blocked path is parsed, queued, and serialized with the hit details.
+        auto mission_hit =
+            client.Post("/mission/check", R"({"clearance_m":2.5,"waypoints_ned":[[1,2,-3],[4.5,-6,-7]]})",
+                        "application/json");
+        CHECK(mission_hit && mission_hit->status == 200);
+        CHECK(mission_hit && mission_hit->body.find("\"checked\":true") != std::string::npos);
+        CHECK(mission_hit && mission_hit->body.find("\"clear\":false") != std::string::npos);
+        CHECK(mission_hit && mission_hit->body.find("\"leg\":1") != std::string::npos);
+        CHECK(mission_hit && mission_hit->body.find("\"distance_m\":7.25") != std::string::npos);
+        CHECK(mission_hit &&
+              mission_hit->body.find("\"position_ned\":[12.00,-3.50,-20.00]") != std::string::npos);
+        CHECK(path_checks.load() == 1);
+        CHECK(last_waypoint_count.load() == 2);
+        CHECK(std::abs(last_clearance.load() - 2.5) < 1e-12);
+
+        // Missing clearance uses the conservative default; an empty hit list is clear only
+        // when the tick thread confirms that geometry was available.
+        auto mission_clear =
+            client.Post("/mission/check", R"({"waypoints_ned":[[9,0,-10],[20,0,-10]]})", "application/json");
+        CHECK(mission_clear && mission_clear->status == 200);
+        CHECK(mission_clear && mission_clear->body.find("\"checked\":true") != std::string::npos);
+        CHECK(mission_clear && mission_clear->body.find("\"clear\":true") != std::string::npos);
+        CHECK(mission_clear && mission_clear->body.find("\"hits\":[]") != std::string::npos);
+        CHECK(path_checks.load() == 2);
+        CHECK(std::abs(last_clearance.load() - 1.0) < 1e-12);
+
+        auto mission_unavailable =
+            client.Post("/mission/check", R"({"waypoints_ned":[[8,0,-10],[20,0,-10]]})", "application/json");
+        CHECK(mission_unavailable && mission_unavailable->status == 200);
+        CHECK(mission_unavailable &&
+              mission_unavailable->body.find("\"checked\":false") != std::string::npos);
+        CHECK(mission_unavailable && mission_unavailable->body.find("\"clear\":false") != std::string::npos);
+        CHECK(path_checks.load() == 3);
 
         auto del = client.Delete("/vehicles/1");
         CHECK(del && del->status == 200 && del->body.find("\"ok\":true") != std::string::npos);

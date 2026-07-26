@@ -188,6 +188,38 @@ int main() {
         CHECK(miss < 0.0);
     }
 
+    // --- Mission path sweep: reject short paths, distinguish clear and blocked legs. ---
+    {
+        World w(test_cfg());
+        w.add_ground_plane();
+
+        CHECK(w.sweep_path({{0.0, 0.0, -10.0}}, 1.0).empty());
+
+        // Horizontal flight ten metres above the ground is clear, including the four
+        // clearance-offset rays around the path centreline.
+        const auto clear = w.sweep_path({{0.0, 0.0, -10.0}, {20.0, 0.0, -10.0}}, 1.0);
+        CHECK(clear.empty());
+
+        // A vertical leg through the ground reports where that leg first intersects it.
+        const auto blocked = w.sweep_path({{0.0, 0.0, -10.0}, {0.0, 0.0, 10.0}}, 0.5);
+        CHECK(blocked.size() == 1);
+        if (blocked.size() == 1) {
+            CHECK(blocked[0].leg == 0);
+            CHECK(std::abs(blocked[0].distance_m - 10.0) < 0.01);
+            CHECK(std::abs(blocked[0].position_ned[0]) < 0.01);
+            CHECK(std::abs(blocked[0].position_ned[1]) < 0.01);
+            CHECK(std::abs(blocked[0].position_ned[2]) < 0.01);
+        }
+
+        // Duplicate waypoints are skipped without changing the following leg index.
+        const auto duplicate = w.sweep_path({{2.0, 3.0, -10.0}, {2.0, 3.0, -10.0}, {2.0, 3.0, 10.0}}, 0.0);
+        CHECK(duplicate.size() == 1);
+        if (duplicate.size() == 1) {
+            CHECK(duplicate[0].leg == 1);
+            CHECK(std::abs(duplicate[0].distance_m - 10.0) < 0.01);
+        }
+    }
+
     if (g_failures == 0) {
         std::printf("test_world: all checks OK\n");
         return 0;

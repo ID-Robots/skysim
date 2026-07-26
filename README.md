@@ -10,7 +10,7 @@
   <a href="https://skyhub.ai"><img alt="SkyHub" src="https://img.shields.io/badge/🚁_Built_for-SkyHub-2563eb?style=flat-square" /></a>
   <a href="https://idrobots.com"><img alt="ID Robots" src="https://img.shields.io/badge/By-ID_Robots-0f172a?style=flat-square" /></a>
   <a href="https://github.com/ID-Robots/skysim/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/ID-Robots/skysim/ci.yml?branch=main&style=flat-square&label=CI" /></a>
-  <img alt="Coverage" src="https://img.shields.io/badge/coverage-~87%25_lines-success?style=flat-square" />
+  <img alt="Coverage" src="https://img.shields.io/badge/coverage-85%25%2B_lines-success?style=flat-square" />
 </p>
 
 <p align="center">
@@ -103,9 +103,16 @@ Also: `pip install pymavlink` (harnesses), `gcovr` (coverage), `trimesh` (real-m
 ```bash
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j
-ctest --test-dir build --output-on-failure   # 12 suites
-tools/coverage.sh                            # gcovr report, fails under 60% lines
+ctest --test-dir build --output-on-failure   # all unit, happy-path, and performance suites
+ctest --test-dir build -L unit               # fast C++ correctness tests
+ctest --test-dir build -L happy-path         # real binary + lifecycle smoke tests
+ctest --test-dir build -L performance        # 800 Hz and reply-path performance budgets
+tools/coverage.sh                            # HTML/XML/JSON; gates lines, branches, functions
 ```
+
+Pull requests into `main` must pass GCC and Clang unit tests, simulator happy paths,
+performance budgets, and full `src/` coverage. The stable `CI required` check combines
+those jobs so branch protection can block a merge if any one fails.
 
 **Fly two drones over a city:**
 
@@ -197,12 +204,18 @@ below ~1000 bodies), an integer fixed-precision JSON formatter (6.3× faster tha
 `snprintf`), O(1) contact attribution, and a reply path that fans across `--io-threads`
 cores above 48 vehicles. Measured tick breakdown in [`docs/DESIGN.md`](docs/DESIGN.md).
 
+The performance suite fails if a 200-vehicle world misses its 1,250 µs tick budget, if the
+protocol hot path exceeds 2,000 ns per vehicle, or if the pooled 100-vehicle reply path
+misses the same 1,250 µs budget.
+
 ## Project status
 
 Milestones M0–M6 are complete: protocol layer, single-quad flight conformance, wind /
 rangefinders / determinism, multi-vehicle lifecycle, city tiles & streaming, and scale +
-SkyHub integration. Unit coverage is **~87% of lines** in `src/` (CI gates at 60%). History
-and acceptance evidence live in [`docs/MILESTONES.md`](docs/MILESTONES.md).
+SkyHub integration. CI measures every first-party simulator source under `src/` and gates
+at **85% lines, 70% branches, and 95% functions**. Detailed HTML, Cobertura XML, JSON, and
+text reports are retained with each Actions run. History and acceptance evidence live in
+[`docs/MILESTONES.md`](docs/MILESTONES.md).
 
 Pending human sign-off on the flight model: `k_thrust=7.65e-6`, linear-only drag, and
 `SIM_RATE_HZ=800` + `--dt 1/800` for conformance (ArduPilot pre-arm requires a gyro rate
@@ -217,9 +230,9 @@ src/vehicle/    motor lag + X-quad mixer + instance allocator / process manager
 src/terrain/    OBJ -> MeshShape cooker + proximity tile streamer
 src/api/        REST control plane (cpp-httplib)
 tools/cooker/   pretile.py (demo city) + osm_buildings.py (real city) + tile_cooker CLI
-tools/bench/    world_bench (tick breakdown), proto_bench (JSON/parse hot path)
+tools/bench/    gated world, protocol, and UDP reply-path performance benchmarks
 tools/harness/  conformance / determinism / straggler / churn / collision / corridor
-tests/          12 ctest suites incl. app_smoke.py driving the real binary
+tests/          unit tests + app_smoke.py driving the real binary
 ```
 
 Notable interop findings baked into [`docs/PROTOCOL.md`](docs/PROTOCOL.md): ArduPilot's

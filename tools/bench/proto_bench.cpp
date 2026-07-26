@@ -1,6 +1,6 @@
 // Protocol hot-path microbenchmark: build_state_json + parse_servo_datagram throughput.
 // These run once per vehicle per tick on the tick thread, so at 200 veh * 800 Hz that is
-// 160k calls/s each. Usage: proto_bench [iterations=2000000]
+// 160k calls/s each. Usage: proto_bench [iterations=2000000] [--max-combined-ns N]
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -13,7 +13,27 @@
 using Clock = std::chrono::steady_clock;
 
 int main(int argc, char **argv) {
-    const long iters = argc > 1 ? std::atol(argv[1]) : 2'000'000;
+    long iters = 2'000'000;
+    double max_combined_ns = -1.0;
+    bool have_iters = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--max-combined-ns") == 0 && i + 1 < argc) {
+            max_combined_ns = std::atof(argv[++i]);
+        } else if (argv[i][0] == '-') {
+            std::fprintf(stderr, "unknown or incomplete option: %s\n", argv[i]);
+            return 2;
+        } else if (!have_iters) {
+            iters = std::atol(argv[i]);
+            have_iters = true;
+        } else {
+            std::fprintf(stderr, "unexpected argument: %s\n", argv[i]);
+            return 2;
+        }
+    }
+    if (iters <= 0 || max_combined_ns == 0.0) {
+        std::fprintf(stderr, "iterations and --max-combined-ns (when set) must be positive\n");
+        return 2;
+    }
 
     // --- build_state_json ---
     skysim::protocol::VehicleTruth t{};
@@ -63,9 +83,16 @@ int main(int argc, char **argv) {
     std::printf("proto_bench (%ld iters):\n", iters);
     std::printf("  build_state_json:     %6.1f ns/call  (%.2f M/s)\n", build_ns, 1000.0 / build_ns);
     std::printf("  parse_servo_datagram: %6.1f ns/call  (%.2f M/s)\n", parse_ns, 1000.0 / parse_ns);
+    const double combined_ns = build_ns + parse_ns;
     std::printf("  per-vehicle reply cost ~ %.1f ns; at 200 veh*800Hz = %.1f%% of one core\n",
-                build_ns + parse_ns, (build_ns + parse_ns) * 200 * 800 / 1e9 * 100);
+                combined_ns, combined_ns * 200 * 800 / 1e9 * 100);
     (void)sink;
     (void)psink;
+    if (max_combined_ns > 0.0) {
+        const bool pass = combined_ns <= max_combined_ns;
+        std::printf("  performance gate: combined %.1f ns <= %.1f ns => %s\n", combined_ns,
+                    max_combined_ns, pass ? "PASS" : "FAIL");
+        return pass ? 0 : 1;
+    }
     return 0;
 }

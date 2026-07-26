@@ -1,30 +1,130 @@
-name: ci
-on: [push, pull_request]
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 2
+
 jobs:
-  build-test:
+  unit-tests:
+    name: Unit tests (${{ matrix.name }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: gcc, cc: gcc, cxx: g++ }
-          - { name: clang, cc: clang, cxx: clang++ }
+          - name: GCC
+            cc: gcc
+            cxx: g++
+          - name: Clang
+            cc: clang
+            cxx: clang++
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
     steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y ninja-build
-      - run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
-      - run: cmake --build build -j
-      - run: ctest --test-dir build --output-on-failure
-  coverage:
+      - uses: actions/checkout@v6
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Build unit tests
+        run: >-
+          cmake --build build --parallel --target
+          test_packets test_json test_frames test_quad test_world test_collision
+          test_endpoint test_manager test_api test_thread_pool test_streamer
+      - name: Run unit tests
+        run: ctest --test-dir build --label-regex '^unit$' --output-on-failure
+
+  happy-path:
+    name: Simulator happy paths
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y ninja-build gcovr
-      - run: bash tools/coverage.sh --min 60
-      - uses: actions/upload-artifact@v4
+      - uses: actions/checkout@v6
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Build simulator
+        run: cmake --build build --parallel --target skysim
+      - name: Run binary and lifecycle happy paths
+        run: ctest --test-dir build --label-regex '^happy-path$' --output-on-failure
+
+  performance:
+    name: Performance budgets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure release build
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build benchmarks
+        run: cmake --build build --parallel --target world_bench proto_bench reply_bench
+      - name: Enforce performance budgets
+        run: ctest --test-dir build --label-regex '^performance$' --output-on-failure --verbose
+
+  coverage:
+    name: Full simulator coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install coverage tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build gcovr
+      - name: Run coverage gates
+        run: tools/coverage.sh --min-line 85 --min-branch 70 --min-function 95
+      - name: Add coverage summary
+        if: ${{ always() && hashFiles('build-cov/coverage.txt') != '' }}
+        run: |
+          echo "### Full simulator source coverage" >> "$GITHUB_STEP_SUMMARY"
+          sed 's/^/    /' build-cov/coverage.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v6
         with:
-          name: coverage-html
-          path: build-cov/coverage*.html
+          name: coverage-report
+          path: build-cov/coverage*
+          if-no-files-found: warn
+          retention-days: 14
+
+  ci-required:
+    name: CI required
+    if: always()
+    needs: [unit-tests, happy-path, performance, coverage]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      UNIT_RESULT: ${{ needs.unit-tests.result }}
+      HAPPY_PATH_RESULT: ${{ needs.happy-path.result }}
+      PERFORMANCE_RESULT: ${{ needs.performance.result }}
+      COVERAGE_RESULT: ${{ needs.coverage.result }}
+    steps:
+      - name: Require every PR gate
+        run: |
+          echo "unit-tests=$UNIT_RESULT"
+          echo "happy-path=$HAPPY_PATH_RESULT"
+          echo "performance=$PERFORMANCE_RESULT"
+          echo "coverage=$COVERAGE_RESULT"
+          for result in "$UNIT_RESULT" "$HAPPY_PATH_RESULT" "$PERFORMANCE_RESULT" "$COVERAGE_RESULT"; do
+            if [[ "$result" != "success" ]]; then
+              echo "One or more required CI jobs did not pass." >&2
+              exit 1
+            fi
+          done
