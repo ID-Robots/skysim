@@ -82,6 +82,23 @@ int main() {
     CHECK(s2b.find("\"rng_1\":") != std::string::npos);
     CHECK(s2b.find("\"rng_2\":") == std::string::npos);
 
+    // Battery is optional and withheld unless valid: ArduPilot reads the block only when
+    // both fields are present, and falls back to a throttle-derived voltage otherwise.
+    // Emitting a half-filled or guessed pack would be worse than emitting none.
+    CHECK(std::string(buf, n).find("battery") == std::string::npos);
+
+    skysim::protocol::VehicleTruth batt = t;
+    batt.battery_valid = true;
+    batt.battery_voltage_v = 11.4321;
+    batt.battery_current_a = 27.5;
+    const size_t nb = skysim::protocol::build_state_json(batt, buf, sizeof(buf));
+    CHECK(nb > 0);
+    const std::string sb(buf, nb);
+    CHECK(sb.find("\"battery\":{\"voltage\":11.4321,\"current\":27.5000}") != std::string::npos);
+    // Still one compact line with no spaces, or ArduPilot's strstr parser desyncs.
+    CHECK(sb.find(", ") == std::string::npos);
+    CHECK(sb.back() == '\n');
+
     // Overflow contract: returns 0 when the buffer is too small.
     char tiny[32];
     CHECK(skysim::protocol::build_state_json(t, tiny, sizeof(tiny)) == 0);

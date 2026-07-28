@@ -220,6 +220,27 @@ int main() {
         }
     }
 
+    // --- Mission path sweep: other aircraft are not obstructions. ---
+    {
+        World w(test_cfg());
+        w.add_ground_plane();
+
+        VehicleBodyParams p;
+        p.start_pos_ned = {10.0, 0.0, -10.0}; // parked squarely on the path below
+        w.add_vehicle(p);
+
+        // A relay hands over by launching a relief while the incumbent still holds over
+        // the pad. If that incumbent read as a wall, the relief could never be launched
+        // and the rotation would stop for good — so the sweep sees buildings only.
+        const auto through_traffic = w.sweep_path({{0.0, 0.0, -10.0}, {20.0, 0.0, -10.0}}, 1.0);
+        CHECK(through_traffic.empty());
+
+        // A raycast, unlike the sweep, still sees it — that is what rangefinders need.
+        const double ranged = w.raycast({0.0, 0.0, -10.0}, {1.0, 0.0, 0.0}, 20.0);
+        CHECK(ranged > 0.0);
+        CHECK(ranged < 20.0);
+    }
+
     if (g_failures == 0) {
         std::printf("test_world: all checks OK\n");
         return 0;

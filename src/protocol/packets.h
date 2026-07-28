@@ -67,6 +67,13 @@ struct VehicleTruth {
     // (SIM_JSON.cpp:309-319). Needed for a loaded, dynamically-managed SITL fleet where
     // tight per-frame lockstep isn't achievable; trades determinism for robustness.
     bool no_lockstep = false;
+    // Optional battery block, emitted iff battery_valid. Without it ArduPilot falls back
+    // to synthesising voltage from instantaneous throttle, which never sags with
+    // discharge — so a SITL flies forever, BATT_LOW_VOLT can never fire, and anything
+    // that plans around endurance (a relay, an RTL margin) cannot be tested at all.
+    bool battery_valid = false;
+    double battery_voltage_v = 0.0;
+    double battery_current_a = 0.0;
 };
 
 // Serialize one reply datagram: single JSON object, '\n'-terminated, snprintf into buf,

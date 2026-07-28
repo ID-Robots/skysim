@@ -210,6 +210,23 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
         res.set_content("{\"ok\":true}", "application/json");
     });
 
+    s.Post(R"(/vehicles/(\d+)/battery/reset)", [&queue](const httplib::Request &req, httplib::Response &res) {
+        BatteryResetCommand cmd;
+        cmd.id = static_cast<uint32_t>(std::strtoul(req.matches[1].str().c_str(), nullptr, 10));
+        auto future = cmd.done.get_future();
+        queue.push(Command{std::move(cmd)});
+        if (future.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+            res.status = 504;
+            return;
+        }
+        if (!future.get()) {
+            res.status = 404;
+            res.set_content("{\"error\":\"no such vehicle\"}", "application/json");
+            return;
+        }
+        res.set_content("{\"ok\":true}", "application/json");
+    });
+
     s.Get("/vehicles", [snapshots](const httplib::Request &, httplib::Response &res) {
         std::string out = "[";
         bool first = true;

@@ -176,6 +176,15 @@ struct VehicleSlot {
     uint64_t frozen_at_tick = 0;
     uint64_t gaps = 0, reboots = 0, bad = 0, ticks = 0;
 
+    // --- battery -------------------------------------------------------------------
+    // A coarse but honest pack model: current scales with total motor demand, and
+    // voltage sags as charge is used. It exists so endurance is a real constraint —
+    // without it a SITL hovers indefinitely and nothing that plans around battery
+    // (an RTL margin, a relay handover) can be exercised at all.
+    double battery_consumed_mah = 0.0;
+    double battery_voltage_v = 0.0;
+    double battery_current_a = 0.0;
+
     VehicleSlot() = default;
     explicit VehicleSlot(int inst)
         : endpoint(std::make_unique<skysim::protocol::UdpEndpoint>(inst)), instance(inst) {}
@@ -196,6 +205,42 @@ skysim::protocol::VehicleTruth truth_from_state(const skysim::core::BodyState &s
         out.quat_wxyz[k] = s.quat_ned_frd[k];
     }
     return out;
+}
+
+// Battery constants for a 4S pack of roughly the size these quads carry. Deliberately
+// simple: the point is that flying costs charge and the pack eventually runs out, not
+// that the chemistry is right. Override per airframe when that matters.
+constexpr double kBatteryCapacityMah = 3300.0;
+constexpr double kBatteryFullV = 12.6;
+constexpr double kBatteryEmptyV = 10.2;
+constexpr double kBatteryIdleA = 0.7;   // avionics, receivers, companion board
+constexpr double kBatteryHoverA = 42.0; // roughly a hover for this class at mid throttle
+
+// Integrate one tick of discharge from the commanded motor demand.
+//
+// ArduPilot only reads the battery block when both voltage and current are present; with
+// neither it synthesises voltage from instantaneous throttle, which never sags and so can
+// never trip a failsafe. Current is the half that matters most: ArduPilot integrates it
+// into consumed_mah, and capacity_remaining_pct — the number every planner reads — is
+// derived from that.
+void step_battery(VehicleSlot &v, const std::array<uint16_t, 16> &pwm, double dt_s) {
+    // Mean normalised throttle across the four motors, from standard 1100-1900 PWM.
+    double demand = 0.0;
+    for (int k = 0; k < 4; ++k) {
+        const double norm = (static_cast<double>(pwm[k]) - 1100.0) / 800.0;
+        demand += std::clamp(norm, 0.0, 1.0);
+    }
+    demand /= 4.0;
+
+    // Quadratic in throttle: drawing twice the thrust costs appreciably more than twice
+    // the current, which is why an aggressive climb eats a pack so much faster than a hover.
+    v.battery_current_a = kBatteryIdleA + kBatteryHoverA * demand * demand;
+    v.battery_consumed_mah += v.battery_current_a * (dt_s / 3600.0) * 1000.0;
+
+    const double used = std::clamp(v.battery_consumed_mah / kBatteryCapacityMah, 0.0, 1.0);
+    // Linear sag is not the real curve, but it is monotonic and ordered, which is all a
+    // voltage failsafe needs. Consumed charge is the signal that should be trusted.
+    v.battery_voltage_v = kBatteryFullV - (kBatteryFullV - kBatteryEmptyV) * used;
 }
 
 // Apply wrenches for every active vehicle and advance the world one tick.
@@ -222,6 +267,7 @@ void step_world(skysim::core::World &world, Fleet &fleet, double dt_s, FILE *tru
         std::copy_n(v.pending.pwm.begin(), 16, pwm.begin());
         const double vel_air_frd[3] = {vel_frd[0], vel_frd[1], vel_frd[2]};
         const auto wrench = skysim::vehicle::compute_wrench(v.params, v.motors, pwm, vel_air_frd, dt_s);
+        step_battery(v, pwm, dt_s);
         world.apply_body_wrench(v.body_id, {wrench.force_frd[0], wrench.force_frd[1], wrench.force_frd[2]},
                                 {wrench.torque_frd[0], wrench.torque_frd[1], wrench.torque_frd[2]});
     }
@@ -297,6 +343,12 @@ bool reply_one(VehicleSlot &v, skysim::core::World *world, const Options &opt, d
             truth.rangefinder_count = static_cast<uint8_t>(n);
         }
         truth.no_lockstep = opt.no_lockstep;
+        // Only once a frame has actually been stepped: reporting a full pack before the
+        // vehicle has drawn anything would be a guess, and the block is optional
+        // precisely so it can be withheld.
+        truth.battery_valid = v.battery_voltage_v > 0.0;
+        truth.battery_voltage_v = v.battery_voltage_v;
+        truth.battery_current_a = v.battery_current_a;
     } else {
         truth = {};
         truth.timestamp_s = now_s;
@@ -516,6 +568,20 @@ struct App {
                     }
                 }
                 despawn_cmd->done.set_value(found);
+            } else if (auto *batt = std::get_if<skysim::api::BatteryResetCommand>(&cmd)) {
+                // A swapped pack, not a recharge: the discharge counter starts again from
+                // zero, which is what the aircraft's own coulomb count will do once the
+                // ground crew tells it a new battery is fitted.
+                bool found = false;
+                for (auto &slot : fleet) {
+                    if (slot->vehicle_id == batt->id) {
+                        slot->battery_consumed_mah = 0.0;
+                        slot->battery_voltage_v = kBatteryFullV;
+                        found = true;
+                        break;
+                    }
+                }
+                batt->done.set_value(found);
             } else if (auto *path = std::get_if<skysim::api::PathCheckCommand>(&cmd)) {
                 // A read of world geometry, so it belongs on the tick thread like the
                 // mutations above — Jolt queries must not race PhysicsSystem::Update.

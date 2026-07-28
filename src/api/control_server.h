@@ -51,6 +51,14 @@ struct DespawnCommand {
     std::promise<bool> done;
 };
 
+// A fresh pack on an existing vehicle. Docked operations swap batteries rather than
+// recharging in place, so without this a simulated fleet can only ever fly one sortie —
+// and the second sortie is where handover and turnaround bugs actually live.
+struct BatteryResetCommand {
+    uint32_t id = 0;
+    std::promise<bool> done;
+};
+
 // A planned mission path swept through the world's building geometry. Runs on the tick
 // thread like any other world access, and answers in microseconds — the pre-flight
 // question is "would this mission hit a building?", which a real flight, even sped up,
@@ -69,7 +77,7 @@ struct PathCheckCommand {
     std::promise<PathCheckResult> done;
 };
 
-using Command = std::variant<SpawnCommand, DespawnCommand, PathCheckCommand>;
+using Command = std::variant<SpawnCommand, DespawnCommand, PathCheckCommand, BatteryResetCommand>;
 
 // Mutex-protected handoff HTTP thread -> tick thread; drained at tick boundaries only.
 class CommandQueue {
