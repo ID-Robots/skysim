@@ -1,0 +1,14 @@
+# skysim as it is deployed: the binary plus the world it flies in.
+#
+# The plain Dockerfile deliberately ships no tiles — worlds are cooked separately so a
+# new city does not mean a new image, and locally they are mounted. The deployed ECS
+# services have no volume mounts, though, so the world has to travel with the image:
+# without it skysim starts flat, every route sweep answers "no building data", and the
+# overwatch coordinator refuses to launch anything at all.
+#
+# The buildspec fetches the cooked world into world-tiles/ before this runs. It creates
+# the directory either way, so a build with no world still produces a working simulator
+# rather than failing on a missing COPY.
+FROM skyhub-skysim:build
+
+COPY world-tiles/ /opt/skysim/tiles/

@@ -1,0 +1,45 @@
+# Build skysim and deploy it to the ECS service for this environment.
+#
+# Two things differ from the other services in this account, both deliberate:
+#
+#   * x86_64, not ARM. The skysim task definitions are X86_64 on both dev and prod, and
+#     an image built for the wrong architecture fails at task start rather than at build.
+#   * The world is fetched from S3 and baked in. See Dockerfile.ecr.
+#
+# WORLD_S3_URI and IMAGE_NAME come from the CodeBuild project's environment, so the same
+# buildspec serves dev and prod.
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - nohup /usr/local/bin/dockerd --host=unix:///var/run/docker.sock --host=tcp://127.0.0.1:2375 &
+      - timeout 15 sh -c "until docker info; do echo .; sleep 1; done"
+      - echo Logging in to Amazon ECR...
+      - export ECR_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_URI
+  pre_build:
+    commands:
+      # Always present, possibly empty: a missing directory would fail the COPY, and a
+      # simulator with no buildings is still a working simulator.
+      - mkdir -p world-tiles
+      - |
+        if [ -n "$WORLD_S3_URI" ]; then
+          echo "Fetching cooked world from $WORLD_S3_URI"
+          aws s3 cp "$WORLD_S3_URI" /tmp/world.tgz
+          tar -xzf /tmp/world.tgz -C world-tiles
+          echo "world: $(ls world-tiles | wc -l) file(s)"
+        else
+          echo "WORLD_S3_URI is unset — building with no buildings"
+        fi
+  build:
+    commands:
+      - echo "Building skysim"
+      - docker build --cache-from $IMAGE_NAME:latest -t skyhub-skysim:build .
+      - docker build -f Dockerfile.ecr -t $IMAGE_NAME:latest .
+      - docker tag $IMAGE_NAME:latest $IMAGE_NAME:$CODEBUILD_RESOLVED_SOURCE_VERSION
+  post_build:
+    commands:
+      # Both tags, so a deployment can be traced back to the commit that produced it.
+      - docker push -a $IMAGE_NAME
+      - aws ecs update-service --service $ECS_SERVICE --force-new-deployment --cluster $ECS_CLUSTER --region $AWS_DEFAULT_REGION

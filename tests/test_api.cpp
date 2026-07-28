@@ -47,10 +47,13 @@ int main() {
     std::atomic<bool> saw_launch_process{false};
     std::atomic<int> last_instance{-2};
     std::atomic<size_t> path_checks{0};
+    std::atomic<size_t> battery_resets{0};
+    std::atomic<uint32_t> last_battery_id{0};
     std::atomic<size_t> last_waypoint_count{0};
     std::atomic<double> last_clearance{-1.0};
 
-    // Fake tick thread: drain + answer. Spawn -> fixed result; despawn -> ok iff id == 1.
+    // Fake tick thread: drain + answer. Spawn -> fixed result; despawn and battery reset
+    // -> ok iff id == 1.
     // Path checks return a hit, a clear result, or unavailable geometry based on the first
     // waypoint's north coordinate so the HTTP response cases stay deterministic.
     std::thread consumer([&] {
@@ -62,6 +65,10 @@ int main() {
                     s->done.set_value(skysim::vehicle::SpawnResult{1, 30, 9302, 6060});
                 } else if (auto *d = std::get_if<DespawnCommand>(&cmd)) {
                     d->done.set_value(d->id == 1);
+                } else if (auto *b = std::get_if<BatteryResetCommand>(&cmd)) {
+                    ++battery_resets;
+                    last_battery_id = b->id;
+                    b->done.set_value(b->id == 1);
                 } else if (auto *p = std::get_if<PathCheckCommand>(&cmd)) {
                     ++path_checks;
                     last_waypoint_count = p->waypoints_ned.size();
@@ -164,6 +171,22 @@ int main() {
               mission_unavailable->body.find("\"checked\":false") != std::string::npos);
         CHECK(mission_unavailable && mission_unavailable->body.find("\"clear\":false") != std::string::npos);
         CHECK(path_checks.load() == 3);
+
+        // Fitting a fresh pack. The gateway calls this after every landing, because
+        // resetting only the autopilot's counter leaves skysim discharging the old pack
+        // and the vehicle is retired after one sortie.
+        auto battery = client.Post("/vehicles/1/battery/reset", "", "application/json");
+        CHECK(battery && battery->status == 200);
+        CHECK(battery && battery->body.find("\"ok\":true") != std::string::npos);
+        CHECK(battery_resets.load() == 1);
+        CHECK(last_battery_id.load() == 1);
+
+        // A vehicle that is not there says so, rather than reporting a pack it did not fit.
+        auto battery404 = client.Post("/vehicles/99/battery/reset", "", "application/json");
+        CHECK(battery404 && battery404->status == 404);
+        CHECK(battery404 && battery404->body.find("no such vehicle") != std::string::npos);
+        CHECK(battery_resets.load() == 2);
+        CHECK(last_battery_id.load() == 99);
 
         auto del = client.Delete("/vehicles/1");
         CHECK(del && del->status == 200 && del->body.find("\"ok\":true") != std::string::npos);
