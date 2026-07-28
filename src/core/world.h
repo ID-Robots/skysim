@@ -76,14 +76,21 @@ class World {
     // and a real flight (even sped up) is far too slow to answer it while an operator
     // waits. Each leg is swept as a bundle of parallel rays offset by `clearance_m`, so
     // an airframe clipping a corner is caught, not just the centreline.
+    //
+    // Buildings only: other aircraft are deliberately not swept. Where traffic happens to
+    // be at this instant says nothing about where it will be when the mission flies it,
+    // and treating it as an obstruction deadlocks a relay — the aircraft holding over the
+    // pad reads as a permanent wall to the one waiting to relieve it. Separation between
+    // vehicles is a scheduling problem, solved by altitude offsets and the dock mutex.
     // Returns every blocked leg, in order.
     std::vector<PathHit> sweep_path(const std::vector<Vec3> &waypoints_ned, double clearance_m) const;
 
     // Ray from origin_ned along dir_ned (unit); returns hit distance or a negative value.
     // ignore_vehicle_id: skip that vehicle's own body (rangefinders ray from the body center,
     // which would otherwise hit the vehicle's own collision box at distance 0).
+    // static_only: ignore every vehicle, not just one — see sweep_path.
     double raycast(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_dist_m,
-                   uint32_t ignore_vehicle_id = 0) const;
+                   uint32_t ignore_vehicle_id = 0, bool static_only = false) const;
 
     // Vehicles (tick boundaries only). Returns body id used by the calls below.
     uint32_t add_vehicle(const VehicleBodyParams &p);

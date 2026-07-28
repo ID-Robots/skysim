@@ -187,6 +187,15 @@ size_t build_state_json(const VehicleTruth &t, char *buf, size_t buf_size) {
         ok = append_lit(buf, cap, off, ",\"rng_", 6) && append_lit(buf, cap, off, &"123456"[i], 1) &&
              append_lit(buf, cap, off, "\":", 2) && append_fixed(buf, cap, off, t.rangefinder_m[i], 4);
     }
+    if (ok && t.battery_valid) {
+        // ArduPilot reads these only when both bits are present (SIM_JSON.cpp), and
+        // integrates current into consumed_mah — which is what makes capacity_remaining_pct
+        // fall, and therefore what makes BATT_LOW_MAH / BATT_CRT_MAH able to fire.
+        ok = append_lit(buf, cap, off, ",\"battery\":{\"voltage\":") &&
+             append_fixed(buf, cap, off, t.battery_voltage_v, 4) &&
+             append_lit(buf, cap, off, ",\"current\":") && append_fixed(buf, cap, off, t.battery_current_a, 4) &&
+             append_lit(buf, cap, off, "}");
+    }
     if (ok && t.no_lockstep) {
         // Compact boolean (no space): ArduPilot's parser reads "true" only without a leading
         // space, else strtoull (docs/PROTOCOL.md parser rules).

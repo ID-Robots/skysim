@@ -303,8 +303,8 @@ void World::remove_static_tile(uint32_t id) {
     impl_->static_tiles.erase(it);
 }
 
-double World::raycast(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_dist_m,
-                      uint32_t ignore_vehicle_id) const {
+double World::raycast(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_dist_m, uint32_t ignore_vehicle_id,
+                      bool static_only) const {
     const JPH::RVec3 origin(to_jolt(origin_ned));
     const JPH::Vec3 dir = to_jolt(dir_ned) * static_cast<float>(max_dist_m);
     JPH::RRayCast ray{origin, dir};
@@ -317,8 +317,13 @@ double World::raycast(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_di
         }
     }
     const JPH::IgnoreSingleBodyFilter body_filter(ignore);
-    if (impl_->physics->GetNarrowPhaseQuery().CastRay(ray, hit, JPH::BroadPhaseLayerFilter{},
-                                                      JPH::ObjectLayerFilter{}, body_filter)) {
+    const JPH::SpecifiedBroadPhaseLayerFilter static_bp(bp_layers::kStatic);
+    const JPH::SpecifiedObjectLayerFilter static_objects(object_layers::kStatic);
+    const JPH::BroadPhaseLayerFilter any_bp;
+    const JPH::ObjectLayerFilter any_object;
+    const JPH::BroadPhaseLayerFilter &bp_filter = static_only ? static_bp : any_bp;
+    const JPH::ObjectLayerFilter &object_filter = static_only ? static_objects : any_object;
+    if (impl_->physics->GetNarrowPhaseQuery().CastRay(ray, hit, bp_filter, object_filter, body_filter)) {
         return hit.mFraction * max_dist_m;
     }
     return -1.0;
@@ -363,7 +368,7 @@ std::vector<World::PathHit> World::sweep_path(const std::vector<Vec3> &waypoints
         double nearest = -1.0;
         for (const Vec3 &offset : offsets) {
             const Vec3 origin{a[0] + offset[0], a[1] + offset[1], a[2] + offset[2]};
-            const double distance = raycast(origin, dir, length);
+            const double distance = raycast(origin, dir, length, 0, /*static_only=*/true);
             if (distance >= 0.0 && (nearest < 0.0 || distance < nearest)) {
                 nearest = distance;
             }
