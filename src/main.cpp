@@ -11,6 +11,7 @@
 #include <csignal>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -461,17 +462,11 @@ struct App {
     std::unique_ptr<skysim::core::ThreadPool> io_pool;
     uint32_t next_vehicle_id = 1;
 
-    // Re-evaluate tile residency every ~0.125 s of sim time (tick boundaries only).
-    void stream_tiles() {
-        if (!streamer || world->tick_index() % 100 != 0) {
-            return;
-        }
-        std::vector<skysim::core::Vec3> positions;
-        positions.reserve(fleet.size());
-        for (const auto &v : fleet) {
-            positions.push_back(v->state.pos_ned);
-        }
-        const auto plan = streamer->update(positions);
+    // Apply one streaming plan to the world. Returns true if anything actually changed.
+    //
+    // Both callers must go through this: the broadphase bookkeeping below is not optional,
+    // and having it in one place is what stops the next caller from forgetting it.
+    bool apply_tile_plan(const skysim::terrain::TileStreamer::Update &plan) {
         for (size_t idx : plan.remove) {
             auto it = tile_world_ids.find(idx);
             if (it != tile_world_ids.end()) {
@@ -485,7 +480,55 @@ struct App {
                 tile_world_ids.emplace(idx, id);
             }
         }
-        if (!plan.add.empty() || !plan.remove.empty()) {
+        if (plan.add.empty() && plan.remove.empty()) {
+            return false;
+        }
+        // Reclaim the broadphase nodes those removals freed. Normally PhysicsSystem::Update
+        // does this, but a world with no vehicles never steps (the strict barrier is never
+        // satisfied), so nothing would ever reclaim them and the node pool would run dry —
+        // "QuadTree: Out of nodes!" then std::abort(). See World::optimize_broadphase.
+        world->optimize_broadphase();
+        return true;
+    }
+
+    // Which tick stream_tiles() last acted on, so a stalled loop cannot rescan
+    // repeatedly on the same tick. Empty until the first evaluation.
+    std::optional<uint64_t> last_stream_tick;
+
+    // Re-evaluate tile residency every ~0.125 s of sim time (tick boundaries only).
+    void stream_tiles() {
+        if (!streamer) {
+            return;
+        }
+        // With no vehicles there is nothing to stream around. Recomputing the desired set
+        // here would find it empty and evict every tile a path check had just loaded — and
+        // the next path check would load them straight back. That churn is what exhausted
+        // the broadphase; leaving residency alone is both cheaper and correct, since the
+        // resident set is already bounded by max_resident.
+        if (fleet.empty()) {
+            return;
+        }
+        // Throttle on the tick actually evaluated, not on the tick number alone.
+        //
+        // `tick_index() % 100` looks like "every 100 ticks" but only advances when the
+        // world steps, and the strict loop calls this every ~50 us whether it stepped or
+        // not. Any stall that parks tick_index on a multiple of 100 — a fleet whose
+        // barrier is waiting on a vehicle that has not sent a frame yet, which is the
+        // normal state between spawn and SITL connect — turns the throttle off entirely
+        // and rescans at ~20 kHz. Remembering which tick was last evaluated is what makes
+        // it a throttle rather than a coincidence.
+        const uint64_t tick = world->tick_index();
+        if (tick % 100 != 0 || (last_stream_tick && *last_stream_tick == tick)) {
+            return;
+        }
+        last_stream_tick = tick;
+        std::vector<skysim::core::Vec3> positions;
+        positions.reserve(fleet.size());
+        for (const auto &v : fleet) {
+            positions.push_back(v->state.pos_ned);
+        }
+        const auto plan = streamer->update(positions);
+        if (apply_tile_plan(plan)) {
             std::printf("skysim: tiles +%zu -%zu (resident %zu)\n", plan.add.size(), plan.remove.size(),
                         streamer->resident_count());
         }
@@ -596,20 +639,7 @@ struct App {
                     for (const auto &v : fleet) {
                         interest.push_back(v->state.pos_ned);
                     }
-                    const auto plan = streamer->update(interest);
-                    for (size_t idx : plan.remove) {
-                        auto it = tile_world_ids.find(idx);
-                        if (it != tile_world_ids.end()) {
-                            world->remove_static_tile(it->second);
-                            tile_world_ids.erase(it);
-                        }
-                    }
-                    for (size_t idx : plan.add) {
-                        const uint32_t id = world->add_static_tile(streamer->tile_path(idx));
-                        if (id != 0) {
-                            tile_world_ids.emplace(idx, id);
-                        }
-                    }
+                    apply_tile_plan(streamer->update(interest));
                     result.geometry_available = streamer->resident_count() > 0;
                 }
 

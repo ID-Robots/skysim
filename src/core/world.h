@@ -64,6 +64,19 @@ class World {
     // Returns 0 on load failure.
     uint32_t add_static_tile(const std::filesystem::path &jshape);
     void remove_static_tile(uint32_t id);
+
+    // Rebuild the broadphase and reclaim its freed nodes. Call after a batch of tile
+    // add/removes when the world is NOT being stepped.
+    //
+    // Jolt's broadphase quadtree allocates nodes from a fixed pool sized off max_bodies,
+    // and removing a body does not return its nodes — they are reclaimed only when the
+    // tree is rebuilt, which normally happens inside PhysicsSystem::Update. A world that
+    // answers geometry queries without stepping (0 vehicles, strict barrier never
+    // satisfied) therefore leaks nodes on every add until the pool is exhausted, at which
+    // point Jolt prints "QuadTree: Out of nodes!" and calls std::abort(). That is not a
+    // hypothetical: it killed prod skysim every ~12 minutes, reproducibly on the 187th
+    // mission path check.
+    void optimize_broadphase();
     // One obstruction found while sweeping a planned mission path.
     struct PathHit {
         size_t leg = 0;        // index of the leg (waypoint i -> i+1) that is blocked

@@ -303,6 +303,8 @@ void World::remove_static_tile(uint32_t id) {
     impl_->static_tiles.erase(it);
 }
 
+void World::optimize_broadphase() { impl_->physics->OptimizeBroadPhase(); }
+
 double World::raycast(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_dist_m, uint32_t ignore_vehicle_id,
                       bool static_only) const {
     const JPH::RVec3 origin(to_jolt(origin_ned));

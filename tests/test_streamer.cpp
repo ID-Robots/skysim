@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include "core/world.h"
 #include "terrain/cook.h"
@@ -130,6 +131,65 @@ int main() {
         CHECK(w.raycast({0.0, 0.0, -100.0}, {0.0, 0.0, 1.0}, 200.0) < 0.0); // gone again
         CHECK(w.add_static_tile(dir / "missing.jshape") == 0);              // load failure -> 0
         w.remove_static_tile(9999);                                         // unknown id: no-op
+    }
+
+    // --- Streaming without stepping must not exhaust the broadphase. ---
+    //
+    // A skysim answering mission path checks with no vehicles never steps: the strict
+    // barrier is never satisfied, so PhysicsSystem::Update never runs. Jolt reclaims
+    // broadphase quadtree nodes only when the tree is rebuilt, which normally happens
+    // inside that update — so every tile added leaks nodes that removal does not return.
+    // Prod died on this every ~12 minutes, reproducibly on the 187th path check:
+    // "QuadTree: Out of nodes!" followed by std::abort().
+    //
+    // 4000 rounds is ~32 000 adds, past the ~22 500 that exhaust the default pool. Sized by
+    // measurement, not guesswork: with optimize_broadphase() this takes 0.26 s and passes;
+    // without it, it aborts after 1.5 s. Note it *aborts* rather than reporting a failure —
+    // Jolt calls std::abort() directly — which is exactly how it presented in production,
+    // so a red run here looks like a crashed test, not a failed assertion.
+    {
+        const auto obj = dir / "cycle.obj";
+        {
+            std::ofstream f(obj);
+            f << "v -10 -10 0\nv 10 -10 0\nv 10 10 0\nv -10 10 0\n"
+              << "v -10 -10 20\nv 10 -10 20\nv 10 10 20\nv -10 10 20\n";
+            const int quads[6][4] = {{1, 2, 6, 5}, {2, 3, 7, 6}, {3, 4, 8, 7},
+                                     {4, 1, 5, 8}, {5, 6, 7, 8}, {4, 3, 2, 1}};
+            for (const auto &q : quads) {
+                f << "f " << q[0] << " " << q[1] << " " << q[2] << "\n"
+                  << "f " << q[0] << " " << q[2] << " " << q[3] << "\n";
+            }
+        }
+        std::string err;
+        CHECK(skysim::terrain::cook_obj_tile(obj, dir / "cycle.jshape", nullptr, &err));
+
+        skysim::core::WorldConfig cfg;
+        cfg.dt_s = 1.0 / 800.0;
+        cfg.worker_threads = 0;
+        skysim::core::World w(cfg); // deliberately never stepped
+
+        // A rolling resident set, the way streaming actually behaves: some tiles come, some
+        // go, the set is never empty. That distinction matters — optimizing a tree that has
+        // just been emptied does not reclaim anything, so a drain-to-zero loop exhausts the
+        // pool whether or not this call is made, and would test nothing.
+        std::vector<uint32_t> resident;
+        bool all_added = true;
+        for (int round = 0; round < 4000; ++round) {
+            for (int i = 0; i < 8; ++i) {
+                const uint32_t id = w.add_static_tile(dir / "cycle.jshape");
+                all_added = all_added && id != 0;
+                resident.push_back(id);
+            }
+            // A path check queries geometry immediately after loading, so query here too.
+            CHECK(w.raycast({0.0, 0.0, -100.0}, {0.0, 0.0, 1.0}, 200.0) > 0.0);
+            while (resident.size() > 24) { // keep a floor of resident tiles
+                w.remove_static_tile(resident.front());
+                resident.erase(resident.begin());
+            }
+            w.optimize_broadphase();
+        }
+        CHECK(all_added);
+        CHECK(w.add_static_tile(dir / "cycle.jshape") != 0); // pool still has room
     }
 
     if (g_failures == 0) {
