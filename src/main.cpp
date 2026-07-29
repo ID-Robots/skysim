@@ -11,6 +11,7 @@
 #include <csignal>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -490,6 +491,10 @@ struct App {
         return true;
     }
 
+    // Which tick stream_tiles() last acted on, so a stalled loop cannot rescan
+    // repeatedly on the same tick. Empty until the first evaluation.
+    std::optional<uint64_t> last_stream_tick;
+
     // Re-evaluate tile residency every ~0.125 s of sim time (tick boundaries only).
     void stream_tiles() {
         if (!streamer) {
@@ -503,12 +508,20 @@ struct App {
         if (fleet.empty()) {
             return;
         }
-        // tick_index() only advances when the world steps, so this throttle silently
-        // becomes "every call" in a world that is not stepping — checking the fleet first
-        // is what makes it meaningful.
-        if (world->tick_index() % 100 != 0) {
+        // Throttle on the tick actually evaluated, not on the tick number alone.
+        //
+        // `tick_index() % 100` looks like "every 100 ticks" but only advances when the
+        // world steps, and the strict loop calls this every ~50 us whether it stepped or
+        // not. Any stall that parks tick_index on a multiple of 100 — a fleet whose
+        // barrier is waiting on a vehicle that has not sent a frame yet, which is the
+        // normal state between spawn and SITL connect — turns the throttle off entirely
+        // and rescans at ~20 kHz. Remembering which tick was last evaluated is what makes
+        // it a throttle rather than a coincidence.
+        const uint64_t tick = world->tick_index();
+        if (tick % 100 != 0 || (last_stream_tick && *last_stream_tick == tick)) {
             return;
         }
+        last_stream_tick = tick;
         std::vector<skysim::core::Vec3> positions;
         positions.reserve(fleet.size());
         for (const auto &v : fleet) {
