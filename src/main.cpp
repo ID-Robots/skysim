@@ -461,17 +461,11 @@ struct App {
     std::unique_ptr<skysim::core::ThreadPool> io_pool;
     uint32_t next_vehicle_id = 1;
 
-    // Re-evaluate tile residency every ~0.125 s of sim time (tick boundaries only).
-    void stream_tiles() {
-        if (!streamer || world->tick_index() % 100 != 0) {
-            return;
-        }
-        std::vector<skysim::core::Vec3> positions;
-        positions.reserve(fleet.size());
-        for (const auto &v : fleet) {
-            positions.push_back(v->state.pos_ned);
-        }
-        const auto plan = streamer->update(positions);
+    // Apply one streaming plan to the world. Returns true if anything actually changed.
+    //
+    // Both callers must go through this: the broadphase bookkeeping below is not optional,
+    // and having it in one place is what stops the next caller from forgetting it.
+    bool apply_tile_plan(const skysim::terrain::TileStreamer::Update &plan) {
         for (size_t idx : plan.remove) {
             auto it = tile_world_ids.find(idx);
             if (it != tile_world_ids.end()) {
@@ -485,7 +479,43 @@ struct App {
                 tile_world_ids.emplace(idx, id);
             }
         }
-        if (!plan.add.empty() || !plan.remove.empty()) {
+        if (plan.add.empty() && plan.remove.empty()) {
+            return false;
+        }
+        // Reclaim the broadphase nodes those removals freed. Normally PhysicsSystem::Update
+        // does this, but a world with no vehicles never steps (the strict barrier is never
+        // satisfied), so nothing would ever reclaim them and the node pool would run dry —
+        // "QuadTree: Out of nodes!" then std::abort(). See World::optimize_broadphase.
+        world->optimize_broadphase();
+        return true;
+    }
+
+    // Re-evaluate tile residency every ~0.125 s of sim time (tick boundaries only).
+    void stream_tiles() {
+        if (!streamer) {
+            return;
+        }
+        // With no vehicles there is nothing to stream around. Recomputing the desired set
+        // here would find it empty and evict every tile a path check had just loaded — and
+        // the next path check would load them straight back. That churn is what exhausted
+        // the broadphase; leaving residency alone is both cheaper and correct, since the
+        // resident set is already bounded by max_resident.
+        if (fleet.empty()) {
+            return;
+        }
+        // tick_index() only advances when the world steps, so this throttle silently
+        // becomes "every call" in a world that is not stepping — checking the fleet first
+        // is what makes it meaningful.
+        if (world->tick_index() % 100 != 0) {
+            return;
+        }
+        std::vector<skysim::core::Vec3> positions;
+        positions.reserve(fleet.size());
+        for (const auto &v : fleet) {
+            positions.push_back(v->state.pos_ned);
+        }
+        const auto plan = streamer->update(positions);
+        if (apply_tile_plan(plan)) {
             std::printf("skysim: tiles +%zu -%zu (resident %zu)\n", plan.add.size(), plan.remove.size(),
                         streamer->resident_count());
         }
@@ -596,20 +626,7 @@ struct App {
                     for (const auto &v : fleet) {
                         interest.push_back(v->state.pos_ned);
                     }
-                    const auto plan = streamer->update(interest);
-                    for (size_t idx : plan.remove) {
-                        auto it = tile_world_ids.find(idx);
-                        if (it != tile_world_ids.end()) {
-                            world->remove_static_tile(it->second);
-                            tile_world_ids.erase(it);
-                        }
-                    }
-                    for (size_t idx : plan.add) {
-                        const uint32_t id = world->add_static_tile(streamer->tile_path(idx));
-                        if (id != 0) {
-                            tile_world_ids.emplace(idx, id);
-                        }
-                    }
+                    apply_tile_plan(streamer->update(interest));
                     result.geometry_available = streamer->resident_count() > 0;
                 }
 
