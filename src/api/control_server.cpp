@@ -43,6 +43,43 @@ int parse_instance(const std::string &body) {
     return std::atoi(p);
 }
 
+// One numeric field out of a flat JSON body, or `fallback` when it is absent.
+//
+// Same hand-rolled shape as the parsers around it: the control plane takes small, known
+// bodies from one caller, so a JSON dependency has never been worth it here. A missing
+// field must fall back rather than read as zero — a pack of zero capacity is empty from
+// the first tick, which would ground a fleet rather than misconfigure it.
+double parse_double_field(const std::string &body, const char *field, double fallback) {
+    const std::string key = std::string("\"") + field + "\"";
+    const char *p = std::strstr(body.c_str(), key.c_str());
+    if (p == nullptr) {
+        return fallback;
+    }
+    p += key.size();
+    while (*p == ':' || *p == ' ' || *p == '\t') {
+        ++p;
+    }
+    const double value = std::atof(p);
+    return value > 0.0 ? value : fallback;
+}
+
+// The pack block of a spawn request. Every field is independently optional, so a caller
+// that only knows its capacity gets a sane voltage curve for free.
+skysim::vehicle::BatteryPack parse_battery(const std::string &body) {
+    skysim::vehicle::BatteryPack pack{};
+    pack.capacity_mah = parse_double_field(body, "battery_capacity_mah", pack.capacity_mah);
+    pack.full_v = parse_double_field(body, "battery_full_v", pack.full_v);
+    pack.empty_v = parse_double_field(body, "battery_empty_v", pack.empty_v);
+    pack.idle_a = parse_double_field(body, "battery_idle_a", pack.idle_a);
+    pack.hover_a = parse_double_field(body, "battery_hover_a", pack.hover_a);
+    // An empty voltage at or above full would invert the sag and make a draining pack
+    // report a rising charge. Cheaper to reject here than to debug in flight.
+    if (pack.empty_v >= pack.full_v) {
+        pack.empty_v = pack.full_v * 0.8;
+    }
+    return pack;
+}
+
 // {"clearance_m":1.5} — absent means a conservative default airframe half-width.
 double parse_clearance(const std::string &body) {
     const char *p = std::strstr(body.c_str(), "\"clearance_m\"");
@@ -135,6 +172,7 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
         SpawnCommand cmd;
         cmd.request.launch_process = parse_launch_process(req.body);
         cmd.request.instance = parse_instance(req.body);
+        cmd.request.battery = parse_battery(req.body);
         auto future = cmd.done.get_future();
         queue.push(Command{std::move(cmd)});
         if (future.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {

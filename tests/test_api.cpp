@@ -46,6 +46,10 @@ int main() {
     std::atomic<bool> stop{false};
     std::atomic<bool> saw_launch_process{false};
     std::atomic<int> last_instance{-2};
+    std::atomic<double> last_capacity_mah{-1.0};
+    std::atomic<double> last_full_v{-1.0};
+    std::atomic<double> last_empty_v{-1.0};
+    std::atomic<double> last_hover_a{-1.0};
     std::atomic<size_t> path_checks{0};
     std::atomic<size_t> battery_resets{0};
     std::atomic<uint32_t> last_battery_id{0};
@@ -62,6 +66,10 @@ int main() {
                 if (auto *s = std::get_if<SpawnCommand>(&cmd)) {
                     saw_launch_process = s->request.launch_process;
                     last_instance = s->request.instance;
+                    last_capacity_mah = s->request.battery.capacity_mah;
+                    last_full_v = s->request.battery.full_v;
+                    last_empty_v = s->request.battery.empty_v;
+                    last_hover_a = s->request.battery.hover_a;
                     s->done.set_value(skysim::vehicle::SpawnResult{1, 30, 9302, 6060});
                 } else if (auto *d = std::get_if<DespawnCommand>(&cmd)) {
                     d->done.set_value(d->id == 1);
@@ -130,6 +138,31 @@ int main() {
         auto spawn3 = client.Post("/vehicles", "{\"instance\":7}", "application/json");
         CHECK(spawn3 && spawn3->status == 200);
         CHECK(last_instance.load() == 7); // gateway-chosen instance passes through
+
+        // A spawn that says nothing about its pack gets the compiled-in 3S hobby default,
+        // which is what every caller written before the pack was configurable sends.
+        CHECK(std::fabs(last_capacity_mah.load() - 3300.0) < 1e-6);
+        CHECK(std::fabs(last_full_v.load() - 12.6) < 1e-6);
+
+        // The pack a caller asks for reaches the tick thread. This is the whole point of
+        // the field: SIM_BATT_* on the autopilot does nothing for a --model json vehicle,
+        // so a fleet standing in for 6S 27 Ah aircraft can only get there through here.
+        auto spawn4 = client.Post("/vehicles",
+                                  "{\"instance\":8,\"battery_capacity_mah\":27000,\"battery_full_v\":25.2,"
+                                  "\"battery_empty_v\":19.8,\"battery_hover_a\":48.0}",
+                                  "application/json");
+        CHECK(spawn4 && spawn4->status == 200);
+        CHECK(std::fabs(last_capacity_mah.load() - 27000.0) < 1e-6);
+        CHECK(std::fabs(last_full_v.load() - 25.2) < 1e-6);
+        CHECK(std::fabs(last_empty_v.load() - 19.8) < 1e-6);
+        CHECK(std::fabs(last_hover_a.load() - 48.0) < 1e-6);
+
+        // An empty voltage at or above full would make a draining pack report a rising
+        // charge, so it is corrected rather than accepted.
+        auto spawn5 = client.Post("/vehicles", "{\"battery_full_v\":25.2,\"battery_empty_v\":30.0}",
+                                  "application/json");
+        CHECK(spawn5 && spawn5->status == 200);
+        CHECK(last_empty_v.load() < last_full_v.load());
 
         // Mission checks validate input before reaching the tick thread.
         auto mission_bad =
