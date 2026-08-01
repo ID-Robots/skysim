@@ -185,6 +185,11 @@ struct VehicleSlot {
     double battery_consumed_mah = 0.0;
     double battery_voltage_v = 0.0;
     double battery_current_a = 0.0;
+    // The pack this vehicle carries, chosen at spawn. Per-vehicle because a world can hold
+    // a mixed fleet, and because the pack is what sets endurance — the constant that used
+    // to be compiled in here quietly made every vehicle a 3S hobby quad regardless of what
+    // airframe it was standing in for.
+    skysim::vehicle::BatteryPack battery{};
 
     VehicleSlot() = default;
     explicit VehicleSlot(int inst)
@@ -208,16 +213,11 @@ skysim::protocol::VehicleTruth truth_from_state(const skysim::core::BodyState &s
     return out;
 }
 
-// Battery constants for a 4S pack of roughly the size these quads carry. Deliberately
-// simple: the point is that flying costs charge and the pack eventually runs out, not
-// that the chemistry is right. Override per airframe when that matters.
-constexpr double kBatteryCapacityMah = 3300.0;
-constexpr double kBatteryFullV = 12.6;
-constexpr double kBatteryEmptyV = 10.2;
-constexpr double kBatteryIdleA = 0.7;   // avionics, receivers, companion board
-constexpr double kBatteryHoverA = 42.0; // roughly a hover for this class at mid throttle
-
 // Integrate one tick of discharge from the commanded motor demand.
+//
+// The pack comes from the vehicle (see VehicleSlot::battery), not from a constant: the
+// same world routinely holds an Observer-class aircraft and a small quad, and their
+// endurance differs by the better part of an hour.
 //
 // ArduPilot only reads the battery block when both voltage and current are present; with
 // neither it synthesises voltage from instantaneous throttle, which never sags and so can
@@ -235,13 +235,13 @@ void step_battery(VehicleSlot &v, const std::array<uint16_t, 16> &pwm, double dt
 
     // Quadratic in throttle: drawing twice the thrust costs appreciably more than twice
     // the current, which is why an aggressive climb eats a pack so much faster than a hover.
-    v.battery_current_a = kBatteryIdleA + kBatteryHoverA * demand * demand;
+    v.battery_current_a = v.battery.idle_a + v.battery.hover_a * demand * demand;
     v.battery_consumed_mah += v.battery_current_a * (dt_s / 3600.0) * 1000.0;
 
-    const double used = std::clamp(v.battery_consumed_mah / kBatteryCapacityMah, 0.0, 1.0);
+    const double used = std::clamp(v.battery_consumed_mah / v.battery.capacity_mah, 0.0, 1.0);
     // Linear sag is not the real curve, but it is monotonic and ordered, which is all a
     // voltage failsafe needs. Consumed charge is the signal that should be trusted.
-    v.battery_voltage_v = kBatteryFullV - (kBatteryFullV - kBatteryEmptyV) * used;
+    v.battery_voltage_v = v.battery.full_v - (v.battery.full_v - v.battery.empty_v) * used;
 }
 
 // Apply wrenches for every active vehicle and advance the world one tick.
@@ -585,6 +585,7 @@ struct App {
                 }
                 try {
                     auto slot = make_slot(instance);
+                    slot->battery = spawn->request.battery;
                     if (spawn->request.launch_process) {
                         slot->pid = manager->launch_sitl(instance);
                         if (!slot->pid.has_value()) {
@@ -619,7 +620,9 @@ struct App {
                 for (auto &slot : fleet) {
                     if (slot->vehicle_id == batt->id) {
                         slot->battery_consumed_mah = 0.0;
-                        slot->battery_voltage_v = kBatteryFullV;
+                        // This vehicle's own full voltage: a swapped pack is the same pack
+                        // type it was flying, not whatever a compiled-in constant says.
+                        slot->battery_voltage_v = slot->battery.full_v;
                         found = true;
                         break;
                     }

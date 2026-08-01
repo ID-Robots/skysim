@@ -10,11 +10,36 @@
 
 namespace skysim::vehicle {
 
+// The pack a vehicle carries, as the discharge model sees it.
+//
+// This lives here rather than as a file-scope constant because the pack is the single
+// biggest determinant of how a simulated fleet behaves: endurance sets sortie length,
+// sortie length sets how often relief happens, and relief is the whole point of a rotating
+// survey. A fleet standing in for 6S 27 Ah Observers cannot be studied on the 3S 3.3 Ah
+// hobby pack that used to be compiled in.
+//
+// Worth being explicit about why this is skysim's business at all: ArduPilot's own
+// SIM_BATT_* parameters do nothing for a `--model json` vehicle. The JSON backend takes
+// voltage and current from the simulator, so whatever the autopilot has been told about
+// its pack is ignored in favour of these numbers. Setting SIM_BATT_CAP_AH on a
+// skysim-backed SITL reads back correctly and changes nothing at all.
+struct BatteryPack {
+    double capacity_mah = 3300.0;
+    double full_v = 12.6;
+    double empty_v = 10.2;
+    double idle_a = 0.7;   // avionics, receivers, companion board
+    double hover_a = 42.0; // draw at a mid-throttle hover for this airframe
+
+    // Defaults describe a 3S hobby pack, kept so an unconfigured spawn behaves exactly as
+    // it did before the pack became a per-vehicle property.
+};
+
 struct SpawnRequest {
     std::string frame = "quad_x"; // only frame supported until per-frame TOML lands (M5+)
     bool launch_process = false;  // true => manager spawns an arducopter for this slot
     int instance = -1;            // >=0: caller-chosen instance (SkyHub gateway numbering);
                                   // -1: lowest free (skysim allocates)
+    BatteryPack battery{};        // omitted in the request => the defaults above
 };
 
 struct SpawnResult {
