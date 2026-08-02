@@ -81,18 +81,7 @@ skysim::vehicle::BatteryPack parse_battery(const std::string &body) {
 }
 
 // {"clearance_m":1.5} — absent means a conservative default airframe half-width.
-double parse_clearance(const std::string &body) {
-    const char *p = std::strstr(body.c_str(), "\"clearance_m\"");
-    if (p == nullptr) {
-        return 1.0;
-    }
-    p += std::strlen("\"clearance_m\"");
-    while (*p == ':' || *p == ' ' || *p == '\t') {
-        ++p;
-    }
-    const double value = std::atof(p);
-    return value > 0.0 ? value : 1.0;
-}
+double parse_clearance(const std::string &body) { return parse_double_field(body, "clearance_m", 1.0); }
 
 // {"waypoints_ned":[[n,e,d],[n,e,d],...]} — flat scan for numbers in triples, matching the
 // deliberately dependency-free parsing style of this file.
