@@ -250,19 +250,24 @@ int main() {
         auto off = client.Get("/vehicles/1/camera.jpg");
         CHECK(off && off->status == 404);
         CHECK(off && off->body.find("camera disabled") != std::string::npos);
-        CHECK(client.Get("/vehicles/1/camera.mjpg")->status == 404);
-        CHECK(client.Get("/instances/30/camera.jpg")->status == 404);
-        CHECK(client.Get("/instances/30/camera.mjpg")->status == 404);
+        // Held and checked rather than dereferenced inline: a request that never
+        // reached the server yields no response at all, and reading through that
+        // crashes the test instead of failing it.
+        for (const char *path : {"/vehicles/1/camera.mjpg", "/instances/30/camera.jpg",
+                                 "/instances/30/camera.mjpg"}) {
+            auto res = client.Get(path);
+            CHECK(res && res->status == 404);
+        }
     }
 
     // --- Camera endpoints, camera on. ---
     {
         // Not a real JPEG: these routes move bytes and pick status codes, and
         // whether those bytes decode is test_render's business.
-        const std::vector<uint8_t> canned{0xFF, 0xD8, 'p', 'i', 'x', 0xFF, 0xD9};
+        const std::vector<uint8_t> kCanned{0xFF, 0xD8, 'p', 'i', 'x', 0xFF, 0xD9};
         ControlServer::Snapshots with_camera = snaps;
-        with_camera.camera_frame = [canned](uint32_t id) {
-            return id == 1 ? canned : std::vector<uint8_t>{};
+        with_camera.camera_frame = [kCanned](uint32_t id) {
+            return id == 1 ? kCanned : std::vector<uint8_t>{};
         };
 
         ControlServer server("127.0.0.1", kCameraPort, queue, with_camera);
@@ -272,7 +277,7 @@ int main() {
         auto shot = client.Get("/vehicles/1/camera.jpg");
         CHECK(shot && shot->status == 200);
         CHECK(shot && shot->get_header_value("Content-Type") == "image/jpeg");
-        CHECK(shot && shot->body.size() == canned.size());
+        CHECK(shot && shot->body.size() == kCanned.size());
 
         // A vehicle that exists but has not been drawn yet is not an error the
         // caller can fix, but it is not a frame either.
@@ -284,7 +289,7 @@ int main() {
         // instance 30 is vehicle id 1 above.
         auto by_instance = client.Get("/instances/30/camera.jpg");
         CHECK(by_instance && by_instance->status == 200);
-        CHECK(by_instance && by_instance->body.size() == canned.size());
+        CHECK(by_instance && by_instance->body.size() == kCanned.size());
 
         auto unknown = client.Get("/instances/99/camera.jpg");
         CHECK(unknown && unknown->status == 404);
@@ -292,14 +297,19 @@ int main() {
 
         // The MJPEG stream never ends, so take the first frame and hang up. What
         // matters is that it is multipart and that a frame arrives inside it.
+        const std::string payload(reinterpret_cast<const char *>(kCanned.data()), kCanned.size());
         for (const char *path : {"/vehicles/1/camera.mjpg", "/instances/30/camera.mjpg"}) {
+            // Read until the frame's bytes actually arrive, not just its header:
+            // stopping at the blank line would pass on a stream that announces a
+            // JPEG and then sends nothing.
             std::string got;
-            client.Get(path, [&got](const char *data, size_t len) {
+            client.Get(path, [&got, &payload](const char *data, size_t len) {
                 got.append(data, len);
-                return got.find("\r\n\r\n") == std::string::npos; // stop after one frame's header
+                return got.find(payload) == std::string::npos;
             });
             CHECK(got.find("--skysimframe") != std::string::npos);
             CHECK(got.find("Content-Type: image/jpeg") != std::string::npos);
+            CHECK(got.find(payload) != std::string::npos);
         }
     }
 
