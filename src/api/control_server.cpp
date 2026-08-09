@@ -16,6 +16,13 @@
 namespace skysim::api {
 
 namespace {
+// Two long-lived camera streams per vehicle, plus headroom for the control
+// plane, which must stay answerable while they run.
+constexpr size_t kWorkerThreads = 64;
+} // namespace
+
+
+namespace {
 
 // {"launch_process":true} — absent key means false.
 bool parse_launch_process(const std::string &body) {
@@ -157,6 +164,16 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
     : impl_(std::make_unique<Impl>()) {
     auto &s = impl_->server;
 
+    // Camera streams hold a worker for their whole life.
+    //
+    // Each MJPEG response sits in its chunked provider until the client goes
+    // away, so it occupies one thread the entire time — and every simulated
+    // vehicle opens two (the core container's encoder and the recorder). At
+    // httplib's default pool of max(8, ncpu-1), four vehicles on a 2-vCPU task
+    // would consume every worker and /vehicles, /metrics and spawn would simply
+    // stop answering. Sized for streams rather than for cores.
+    s.new_task_queue = [] { return new httplib::ThreadPool(kWorkerThreads); };
+
     s.Post("/vehicles", [&queue](const httplib::Request &req, httplib::Response &res) {
         SpawnCommand cmd;
         cmd.request.launch_process = parse_launch_process(req.body);
@@ -263,6 +280,121 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
         }
         out += "]";
         res.set_content(out, "application/json");
+    });
+
+    // The same two feeds addressed by ArduPilot instance.
+    //
+    // skysim's own vehicle ids are allocated internally and change when it
+    // restarts; the instance is what the gateway assigns and everything else
+    // already agrees on. A consumer that can only bake a URL into a config —
+    // an ffmpeg command line, say — needs one that stays true.
+    auto resolve_instance = [snapshots](const std::string &instance) -> uint32_t {
+        if (!snapshots.vehicles) {
+            return 0;
+        }
+        for (const auto &v : snapshots.vehicles()) {
+            if (std::to_string(v.instance) == instance) {
+                return v.id;
+            }
+        }
+        return 0;
+    };
+
+    s.Get(R"(/instances/(\d+)/camera.jpg)", [snapshots, resolve_instance](const httplib::Request &req,
+                                                                           httplib::Response &res) {
+        const uint32_t id = resolve_instance(req.matches[1].str());
+        if (id == 0 || !snapshots.camera_frame) {
+            res.status = 404;
+            res.set_content("{\"error\":\"no such instance\"}", "application/json");
+            return;
+        }
+        std::vector<uint8_t> jpeg = snapshots.camera_frame(id);
+        if (jpeg.empty()) {
+            res.status = 404;
+            res.set_content("{\"error\":\"no frame\"}", "application/json");
+            return;
+        }
+        res.set_content(reinterpret_cast<const char *>(jpeg.data()), jpeg.size(), "image/jpeg");
+    });
+
+    s.Get(R"(/instances/(\d+)/camera.mjpg)", [snapshots, resolve_instance](const httplib::Request &req,
+                                                                            httplib::Response &res) {
+        const std::string instance = req.matches[1].str();
+        if (!snapshots.camera_frame) {
+            res.status = 404;
+            res.set_content("{\"error\":\"camera disabled\"}", "application/json");
+            return;
+        }
+        res.set_chunked_content_provider(
+            "multipart/x-mixed-replace; boundary=skysimframe",
+            [snapshots, resolve_instance, instance](size_t, httplib::DataSink &sink) {
+                // Re-resolved per frame, so a skysim restart mid-recording picks
+                // the vehicle back up instead of streaming nothing forever.
+                const uint32_t id = resolve_instance(instance);
+                std::vector<uint8_t> jpeg = id != 0 ? snapshots.camera_frame(id) : std::vector<uint8_t>{};
+                if (!jpeg.empty()) {
+                    char head[128];
+                    const int n = std::snprintf(head, sizeof(head),
+                                                "--skysimframe\r\nContent-Type: image/jpeg\r\n"
+                                                "Content-Length: %zu\r\n\r\n",
+                                                jpeg.size());
+                    sink.write(head, static_cast<size_t>(n));
+                    sink.write(reinterpret_cast<const char *>(jpeg.data()), jpeg.size());
+                    sink.write("\r\n", 2);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(40));
+                return true;
+            });
+    });
+
+    // One frame, for a poll-based viewer or a quick look with curl.
+    s.Get(R"(/vehicles/(\d+)/camera.jpg)", [snapshots](const httplib::Request &req, httplib::Response &res) {
+        if (!snapshots.camera_frame) {
+            res.status = 404;
+            res.set_content("{\"error\":\"camera disabled\"}", "application/json");
+            return;
+        }
+        std::vector<uint8_t> jpeg = snapshots.camera_frame(
+            static_cast<uint32_t>(std::stoul(req.matches[1].str())));
+        if (jpeg.empty()) {
+            res.status = 404;
+            res.set_content("{\"error\":\"no frame\"}", "application/json");
+            return;
+        }
+        res.set_content(reinterpret_cast<const char *>(jpeg.data()), jpeg.size(), "image/jpeg");
+    });
+
+    // MJPEG, which is what the video pipeline consumes.
+    //
+    // A chunked multipart stream rather than a socket of raw frames because it
+    // crosses a container boundary and GStreamer, ffmpeg and a plain browser tab
+    // can all open it without agreeing on anything first.
+    s.Get(R"(/vehicles/(\d+)/camera.mjpg)", [snapshots](const httplib::Request &req, httplib::Response &res) {
+        if (!snapshots.camera_frame) {
+            res.status = 404;
+            res.set_content("{\"error\":\"camera disabled\"}", "application/json");
+            return;
+        }
+        const auto id = static_cast<uint32_t>(std::stoul(req.matches[1].str()));
+        res.set_chunked_content_provider(
+            "multipart/x-mixed-replace; boundary=skysimframe",
+            [snapshots, id](size_t /*offset*/, httplib::DataSink &sink) {
+                std::vector<uint8_t> jpeg = snapshots.camera_frame(id);
+                if (!jpeg.empty()) {
+                    char head[128];
+                    const int n = std::snprintf(head, sizeof(head),
+                                                "--skysimframe\r\nContent-Type: image/jpeg\r\n"
+                                                "Content-Length: %zu\r\n\r\n",
+                                                jpeg.size());
+                    sink.write(head, static_cast<size_t>(n));
+                    sink.write(reinterpret_cast<const char *>(jpeg.data()), jpeg.size());
+                    sink.write("\r\n", 2);
+                }
+                // Poll a little faster than frames are produced, so the stream
+                // tracks the render rate instead of setting its own.
+                std::this_thread::sleep_for(std::chrono::milliseconds(40));
+                return true;
+            });
     });
 
     s.Get("/metrics", [snapshots](const httplib::Request &, httplib::Response &res) {

@@ -84,6 +84,30 @@ Read in depth: [`docs/PROTOCOL.md`](docs/PROTOCOL.md) → [`docs/DESIGN.md`](doc
 
 ---
 
+## Getting started
+
+One command, and the only prerequisites are the build tools. It builds skysim, cooks a
+1.2 km demo city, and renders it from four camera poses — the same rasteriser that feeds
+a vehicle's camera stream in flight, so what you get is what a drone would see:
+
+```bash
+tools/getting_started.sh
+```
+
+![Four views of the demo city rendered by skysim](.github/assets/skysim-getting-started.jpg)
+
+Images land in `build/getting_started/`. Nothing above needs ArduPilot, a network or a
+running simulator — it is there so you can see the thing work before committing to the
+half hour the autopilot build takes.
+
+Once you do have ArduPilot (see below), the same script will fly a vehicle through that
+city and serve its camera live:
+
+```bash
+ARDUPILOT_ROOT=~/ardupilot tools/getting_started.sh --fly
+# then open http://127.0.0.1:8642/instances/0/camera.mjpg
+```
+
 ## Quick start
 
 **Prerequisites** — Ubuntu 22.04/24.04, CMake ≥ 3.24, Ninja, GCC 12+ or Clang 16+, and an
@@ -230,9 +254,12 @@ src/core/       frames.h (NED/FRD <-> Jolt), world.cpp (the ONLY Jolt-aware TU),
 src/vehicle/    motor lag + X-quad mixer + instance allocator / process manager
 src/terrain/    OBJ -> MeshShape cooker + proximity tile streamer
 src/api/        REST control plane (cpp-httplib)
+src/render/     threaded software rasteriser + JPEG/MJPEG camera feed per vehicle
 tools/cooker/   pretile.py (demo city) + osm_buildings.py (real city) + tile_cooker CLI
 tools/bench/    gated world, protocol, and UDP reply-path performance benchmarks
 tools/harness/  conformance / determinism / straggler / churn / collision / corridor
+tools/render_probe/  render one frame from a given camera pose, to a JPEG
+tools/getting_started.sh  build + cook + render the demo city (see "Getting started")
 tests/          unit tests + app_smoke.py driving the real binary
 ```
 

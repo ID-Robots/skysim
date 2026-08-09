@@ -105,6 +105,38 @@ class World {
     double raycast(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_dist_m,
                    uint32_t ignore_vehicle_id = 0, bool static_only = false) const;
 
+    // What a ray hit, with enough to shade it. The plain raycast above answers
+    // "how far", which is all a rangefinder needs; drawing the world needs to
+    // know which way the surface faces.
+    struct RayHit {
+        bool hit{false};
+        double distance{-1.0};
+        Vec3 normal_ned{0.0, 0.0, -1.0}; // unit, points back towards the ray
+        bool is_ground{false};           // the ground slab, as opposed to a building
+    };
+
+    RayHit raycast_surface(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_dist_m,
+                           uint32_t ignore_vehicle_id = 0) const;
+
+    // One triangle of static geometry, in NED, wound so the normal points out.
+    struct Triangle {
+        Vec3 a{};
+        Vec3 b{};
+        Vec3 c{};
+        // Which body it came from, not which way it faces. A renderer cannot tell
+        // a flat roof from a field by its normal — both point straight up — and
+        // guessing paints lawns on every rooftop in the city.
+        bool is_ground{false};
+    };
+
+    // Every triangle of every resident building tile.
+    //
+    // For drawing, not for physics: a rasteriser needs the geometry itself,
+    // where a raycast only ever needed the answer. Pulled through here rather
+    // than read from the tile files so what gets drawn is exactly what is
+    // loaded — including streaming, which adds and drops tiles as vehicles move.
+    std::vector<Triangle> collect_static_triangles() const;
+
     // Vehicles (tick boundaries only). Returns body id used by the calls below.
     uint32_t add_vehicle(const VehicleBodyParams &p);
     void remove_vehicle(uint32_t id);
