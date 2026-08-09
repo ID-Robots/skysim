@@ -33,6 +33,17 @@ FetchContent_Declare(httplib
 )
 FetchContent_MakeAvailable(httplib)
 
+# --- stb (single-header JPEG writer for the camera feed) --------------------------------------
+# Header-only and dependency-free, which is the point: the render path must not
+# drag an image library into a physics server that runs on Fargate.
+FetchContent_Declare(stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG        f0569113c93ad095470c54bf34a17b36646bbbb5
+)
+FetchContent_MakeAvailable(stb)
+add_library(stb_image_write INTERFACE)
+target_include_directories(stb_image_write SYSTEM INTERFACE ${stb_SOURCE_DIR})
+
 # --- coverage instrumentation (our targets only; third-party stays clean) --------------------
 # Everything declared after this point picks up --coverage; Jolt/httplib are declared above.
 option(SKYSIM_COVERAGE "Instrument skysim targets for gcov/gcovr" OFF)
@@ -73,6 +84,15 @@ target_link_libraries(skysim_core PRIVATE Jolt)
 target_compile_options(skysim_core PRIVATE -Wall -Wextra -Wshadow)
 
 # --- terrain: OBJ -> MeshShape cooker + tile streamer ----------------------------------------
+add_library(skysim_render STATIC
+    src/render/renderer.cpp
+    src/render/raster.cpp
+    src/render/render_service.cpp
+    src/render/jpeg.cpp
+)
+target_include_directories(skysim_render PUBLIC src)
+target_link_libraries(skysim_render PUBLIC skysim_core PRIVATE stb_image_write)
+
 add_library(skysim_terrain STATIC
     src/terrain/cook.cpp
     src/terrain/tile_streamer.cpp
@@ -84,7 +104,7 @@ target_compile_options(skysim_terrain PRIVATE -Wall -Wextra -Wshadow)
 # --- skysim server --------------------------------------------------------------------------
 add_executable(skysim src/main.cpp)
 target_include_directories(skysim PRIVATE src)
-target_link_libraries(skysim PRIVATE skysim_protocol skysim_core skysim_vehicle skysim_api skysim_terrain)
+target_link_libraries(skysim PRIVATE skysim_protocol skysim_core skysim_vehicle skysim_api skysim_terrain skysim_render)
 target_compile_options(skysim PRIVATE -Wall -Wextra -Wshadow)
 
 # --- world-step benchmark (performance) ------------------------------------------------------
@@ -101,6 +121,10 @@ target_link_libraries(reply_bench PRIVATE skysim_protocol Threads::Threads)
 target_compile_options(reply_bench PRIVATE -Wall -Wextra -Wshadow)
 
 # --- tile cooker ------------------------------------------------------------------------------
+add_executable(render_probe tools/render_probe/main.cpp)
+target_include_directories(render_probe PRIVATE src)
+target_link_libraries(render_probe PRIVATE skysim_render skysim_core)
+
 add_executable(tile_cooker tools/cooker/main.cpp)
 target_include_directories(tile_cooker PRIVATE src)
 target_link_libraries(tile_cooker PRIVATE skysim_terrain)
@@ -138,6 +162,11 @@ add_executable(test_collision tests/test_collision.cpp)
 target_link_libraries(test_collision PRIVATE skysim_core skysim_terrain)
 target_compile_options(test_collision PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME collision COMMAND test_collision)
+
+add_executable(test_render tests/test_render.cpp)
+target_link_libraries(test_render PRIVATE skysim_render skysim_core skysim_terrain)
+target_compile_options(test_render PRIVATE -Wall -Wextra -Wshadow)
+add_test(NAME render COMMAND test_render)
 
 add_executable(test_endpoint tests/test_endpoint.cpp)
 target_link_libraries(test_endpoint PRIVATE skysim_protocol)

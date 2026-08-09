@@ -22,6 +22,7 @@
 #include "core/thread_pool.h"
 #include "core/world.h"
 #include "protocol/packets.h"
+#include "render/render_service.h"
 #include "protocol/udp_endpoint.h"
 #include "terrain/tile_streamer.h"
 #include "vehicle/manager.h"
@@ -59,6 +60,21 @@ struct Options {
     int api_port = 0;                   // 0 = control plane disabled
     std::string api_bind = "127.0.0.1"; // 0.0.0.0 when the gateway calls from a bridge net
     int hold_ticks = 3;                 // interactive: reuse last PWM for up to k missed deadlines
+    // Fraction of a tick a frame may be late before it counts as a straggler.
+    double frame_grace = 0.7;
+
+    // Camera feed. Off unless asked for: rendering costs rays per pixel, and a
+    // headless fleet run has nobody watching.
+    double camera_fps = 0.0;  // 0 = no camera
+    int camera_width = 256;
+    int camera_height = 144;
+    double camera_fov_deg = 78.0;
+    double camera_pitch_deg = -15.0;
+    double camera_range_m = 350.0;
+    int camera_quality = 70;
+    // Worker threads for the render pass. They are outside the physics tick, so
+    // this trades cores for frame rate and nothing else.
+    int camera_threads = 4;
     double grace_s = 30.0;              // interactive: frozen longer than this => auto-despawn
     double strict_timeout_s = 10.0;     // strict: barrier stalled longer => abort with report
     std::string spawn_binary;           // arducopter for POST /vehicles {"launch_process":true}
@@ -128,6 +144,26 @@ Options parse_args(int argc, char **argv) {
             o.api_port = std::atoi(need_value("--api-port"));
         } else if (std::strcmp(argv[i], "--api-bind") == 0) {
             o.api_bind = need_value("--api-bind");
+        } else if (std::strcmp(argv[i], "--camera-fps") == 0) {
+            o.camera_fps = std::atof(need_value("--camera-fps"));
+        } else if (std::strcmp(argv[i], "--camera-size") == 0) {
+            // WxH, e.g. 256x144
+            const char *v = need_value("--camera-size");
+            const char *x = std::strchr(v, 'x');
+            o.camera_width = std::atoi(v);
+            o.camera_height = (x != nullptr) ? std::atoi(x + 1) : 0;
+        } else if (std::strcmp(argv[i], "--camera-fov") == 0) {
+            o.camera_fov_deg = std::atof(need_value("--camera-fov"));
+        } else if (std::strcmp(argv[i], "--camera-pitch") == 0) {
+            o.camera_pitch_deg = std::atof(need_value("--camera-pitch"));
+        } else if (std::strcmp(argv[i], "--camera-range") == 0) {
+            o.camera_range_m = std::atof(need_value("--camera-range"));
+        } else if (std::strcmp(argv[i], "--camera-quality") == 0) {
+            o.camera_quality = std::atoi(need_value("--camera-quality"));
+        } else if (std::strcmp(argv[i], "--camera-threads") == 0) {
+            o.camera_threads = std::atoi(need_value("--camera-threads"));
+        } else if (std::strcmp(argv[i], "--frame-grace") == 0) {
+            o.frame_grace = std::atof(need_value("--frame-grace"));
         } else if (std::strcmp(argv[i], "--hold-ticks") == 0) {
             o.hold_ticks = std::atoi(need_value("--hold-ticks"));
         } else if (std::strcmp(argv[i], "--grace") == 0) {
@@ -149,6 +185,22 @@ Options parse_args(int argc, char **argv) {
     }
     if (o.vehicles < 0 || o.dt_s <= 0.0 || (o.time_mode != "strict" && o.time_mode != "interactive")) {
         std::fprintf(stderr, "skysim: invalid options (--time-mode strict|interactive)\n");
+        std::exit(2);
+    }
+    // These three change timing or thread counts rather than failing outright, so
+    // an out-of-range value does not announce itself: a negative thread count is
+    // an undefined pool size, a grace above 1 stretches every tick past its
+    // period, and stb quietly reads quality 0 as 90.
+    if (o.camera_threads < 1) {
+        std::fprintf(stderr, "skysim: --camera-threads must be at least 1\n");
+        std::exit(2);
+    }
+    if (o.camera_quality < 1 || o.camera_quality > 100) {
+        std::fprintf(stderr, "skysim: --camera-quality must be 1-100\n");
+        std::exit(2);
+    }
+    if (o.frame_grace < 0.0 || o.frame_grace > 1.0) {
+        std::fprintf(stderr, "skysim: --frame-grace must be 0.0-1.0 (a fraction of the tick period)\n");
         std::exit(2);
     }
     return o;
@@ -538,6 +590,10 @@ struct App {
     std::vector<skysim::api::VehicleInfo> vehicle_snapshot;
     skysim::api::MetricsInfo metrics_snapshot;
 
+    // Camera feed. Rendered on this thread because raycasting a stepping world
+    // is not safe; published for the HTTP thread exactly like the snapshots above.
+    std::unique_ptr<skysim::render::RenderService> render_service;
+
     std::unique_ptr<VehicleSlot> make_slot(int instance) {
         auto slot = std::make_unique<VehicleSlot>(instance);
         slot->vehicle_id = next_vehicle_id++;
@@ -655,6 +711,25 @@ struct App {
         manager->reap();
     }
 
+    // Hand the render thread the poses it should draw from.
+    //
+    // Deliberately all this tick does for the camera: a few doubles under a
+    // mutex. Rendering itself happens on RenderService's own thread against its
+    // own copy of the static world, because a single row of raycasting costs
+    // about as much as the entire tick budget.
+    void publish_frames() {
+        if (!render_service) {
+            return;
+        }
+        const double now = world ? world->now() : 0.0;
+        std::vector<skysim::render::RenderService::Pose> poses;
+        poses.reserve(fleet.size());
+        for (const auto &v : fleet) {
+            poses.push_back({v->vehicle_id, v->state.pos_ned, v->state.quat_ned_frd, now});
+        }
+        render_service->publish_poses(std::move(poses));
+    }
+
     void publish_snapshot() {
         std::vector<skysim::api::VehicleInfo> infos;
         infos.reserve(fleet.size());
@@ -743,8 +818,28 @@ int run_strict(App &app, FILE *truth_log, FILE *record_log) {
             return rc;
         }
         app.publish_snapshot();
+        app.publish_frames();
     }
     return 0;
+}
+
+// Poll every connected vehicle until all have a frame staged or the deadline passes.
+//
+// Frames are staged into the slot by poll_endpoint, so a vehicle that answers
+// early is not polled again and the loop exits as soon as the slowest one lands.
+void wait_for_frames(Fleet &fleet, std::chrono::steady_clock::time_point deadline) {
+    for (;;) {
+        bool all_ready = true;
+        for (auto &v : fleet) {
+            if (v->connected && !poll_endpoint(*v)) {
+                all_ready = false;
+            }
+        }
+        if (all_ready || std::chrono::steady_clock::now() >= deadline) {
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
 }
 
 // Interactive: tick on schedule; a vehicle missing its deadline gets its last PWM held for
@@ -754,6 +849,11 @@ int run_interactive(App &app, FILE *truth_log, FILE *record_log) {
     const auto dt = std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(app.opt.dt_s));
     auto next_tick = clock::now() + dt;
     const uint64_t grace_ticks = static_cast<uint64_t>(app.opt.grace_s / app.opt.dt_s);
+    // How much of a tick a late frame may use before it counts as late. Kept
+    // under the period so a persistently slow vehicle still shows up as one
+    // rather than silently stretching every tick.
+    const auto frame_grace =
+        std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(app.opt.dt_s * app.opt.frame_grace));
 
     while (!g_stop.load(std::memory_order_relaxed)) {
         std::this_thread::sleep_until(next_tick);
@@ -764,6 +864,20 @@ int run_interactive(App &app, FILE *truth_log, FILE *record_log) {
 
         app.drain_commands();
         app.stream_tiles();
+
+        // Give a late frame a bounded moment to land before calling it late.
+        //
+        // take_latest() is non-blocking, so polling it once at the wall-clock
+        // instant asks "has the frame arrived YET", when lockstep only cares
+        // whether it arrives WITHIN the tick. A round trip a hair longer than
+        // the period then reads as a straggler even though the frame lands
+        // microseconds later — measured at 19% of ticks on an idle 16-core box,
+        // with the vehicle holding stale PWM for every one of them.
+        //
+        // Waiting a fraction of the period costs nothing when frames are early
+        // (the loop breaks out immediately) and converts most of those false
+        // stragglers into ordinary on-time ticks.
+        wait_for_frames(app.fleet, clock::now() + frame_grace);
 
         for (auto &v : app.fleet) {
             const bool fresh = poll_endpoint(*v);
@@ -806,6 +920,7 @@ int run_interactive(App &app, FILE *truth_log, FILE *record_log) {
             }
         }
         app.publish_snapshot();
+        app.publish_frames();
     }
     return 0;
 }
@@ -888,6 +1003,28 @@ int main(int argc, char **argv) {
         app.io_pool = std::make_unique<skysim::core::ThreadPool>(opt.io_threads);
     }
 
+    if (opt.camera_fps > 0.0) {
+        if (opt.camera_width <= 0 || opt.camera_height <= 0) {
+            std::fprintf(stderr, "skysim: --camera-size must be WxH with both > 0\n");
+            return 1;
+        }
+        skysim::render::RenderService::Config rcfg;
+        rcfg.camera.width = opt.camera_width;
+        rcfg.camera.height = opt.camera_height;
+        rcfg.camera.fov_deg = opt.camera_fov_deg;
+        rcfg.camera.pitch_deg = opt.camera_pitch_deg;
+        rcfg.camera.max_range_m = opt.camera_range_m;
+        rcfg.tiles_dir = opt.tiles;
+        rcfg.fps = opt.camera_fps;
+        rcfg.quality = opt.camera_quality;
+        rcfg.threads = opt.camera_threads;
+        app.render_service = std::make_unique<skysim::render::RenderService>(rcfg);
+        std::printf("skysim: camera world has %zu tile(s), %zu triangle(s)\n", app.render_service->tiles_loaded(),
+                    app.render_service->triangle_count());
+        std::printf("skysim: camera %dx%d @ %.1f fps on %d render thread(s)\n", opt.camera_width,
+                    opt.camera_height, opt.camera_fps, opt.camera_threads);
+    }
+
     if (replaying && (!app.world || opt.time_mode != "strict")) {
         std::fprintf(stderr, "skysim: --replay-servo requires strict mode + jolt physics\n");
         return 1;
@@ -951,6 +1088,9 @@ int main(int argc, char **argv) {
         snaps.metrics = [&app] {
             std::lock_guard<std::mutex> lock(app.snapshot_mutex);
             return app.metrics_snapshot;
+        };
+        snaps.camera_frame = [&app](uint32_t id) {
+            return app.render_service ? app.render_service->frame(id) : std::vector<uint8_t>{};
         };
         api = std::make_unique<skysim::api::ControlServer>(opt.api_bind, opt.api_port, app.queue,
                                                            std::move(snaps));

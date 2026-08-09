@@ -103,6 +103,10 @@ class ControlServer {
     struct Snapshots {
         std::function<std::vector<VehicleInfo>()> vehicles;
         std::function<MetricsInfo()> metrics;
+        // Latest camera frame for a vehicle as encoded JPEG; empty when the
+        // camera is off or that vehicle has not been rendered yet. Published by
+        // the tick thread like everything else here.
+        std::function<std::vector<uint8_t>(uint32_t)> camera_frame;
     };
 
     // Binds bind_addr:port and serves on its own thread. Throws on bind failure (startup

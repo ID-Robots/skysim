@@ -162,6 +162,7 @@ struct World::Impl {
     uint32_t next_id = 1;
     std::unordered_map<uint32_t, VehicleEntry> vehicles;
     std::vector<JPH::BodyID> static_bodies;
+    JPH::BodyID ground_body; // also in static_bodies; kept apart so drawing can name it
     std::unordered_map<uint32_t, JPH::BodyID> static_tiles; // streamed (M5)
     // Body indices of resident tiles, so contact attribution can distinguish a
     // building strike from an ordinary ground touch without a linear scan.
@@ -233,6 +234,7 @@ void World::add_ground_plane() {
     s.mRestitution = 0.0f;
     const JPH::BodyID id = impl_->bodies().CreateAndAddBody(s, JPH::EActivation::DontActivate);
     impl_->static_bodies.push_back(id);
+    impl_->ground_body = id;
 }
 
 namespace {
@@ -303,6 +305,47 @@ void World::remove_static_tile(uint32_t id) {
     impl_->static_tiles.erase(it);
 }
 
+std::vector<World::Triangle> World::collect_static_triangles() const {
+    std::vector<Triangle> out;
+    const JPH::BodyInterface &bodies = impl_->bodies();
+
+    // Both routes into the world: bulk-loaded tiles (and the ground slab) live in
+    // static_bodies, streamed ones in static_tiles. Missing either draws a world
+    // with holes in it exactly where the geometry came from the other path.
+    std::vector<JPH::BodyID> all;
+    all.reserve(impl_->static_bodies.size() + impl_->static_tiles.size());
+    all.insert(all.end(), impl_->static_bodies.begin(), impl_->static_bodies.end());
+    for (const auto &[id, body] : impl_->static_tiles) {
+        all.push_back(body);
+    }
+
+    for (const JPH::BodyID &body : all) {
+        const bool is_ground = body == impl_->ground_body;
+        const JPH::TransformedShape shape = bodies.GetTransformedShape(body);
+
+        // Jolt walks a shape's triangles in batches through this cursor; it is
+        // the same path the debug renderer uses.
+        JPH::Shape::GetTrianglesContext ctx;
+        constexpr int kBatch = 256;
+        JPH::Float3 verts[kBatch * 3];
+        shape.GetTrianglesStart(ctx, JPH::AABox::sBiggest(), JPH::RVec3::sZero());
+        for (;;) {
+            const int count = shape.GetTrianglesNext(ctx, kBatch, verts);
+            if (count == 0) {
+                break;
+            }
+            for (int i = 0; i < count; ++i) {
+                const JPH::Float3 &a = verts[i * 3 + 0];
+                const JPH::Float3 &b = verts[i * 3 + 1];
+                const JPH::Float3 &c = verts[i * 3 + 2];
+                out.push_back({from_jolt(JPH::Vec3(a.x, a.y, a.z)), from_jolt(JPH::Vec3(b.x, b.y, b.z)),
+                               from_jolt(JPH::Vec3(c.x, c.y, c.z)), is_ground});
+            }
+        }
+    }
+    return out;
+}
+
 void World::optimize_broadphase() { impl_->physics->OptimizeBroadPhase(); }
 
 double World::raycast(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_dist_m, uint32_t ignore_vehicle_id,
@@ -329,6 +372,39 @@ double World::raycast(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_di
         return hit.mFraction * max_dist_m;
     }
     return -1.0;
+}
+
+World::RayHit World::raycast_surface(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_dist_m,
+                                     uint32_t ignore_vehicle_id) const {
+    RayHit out;
+    const JPH::RVec3 origin(to_jolt(origin_ned));
+    const JPH::Vec3 dir = to_jolt(dir_ned) * static_cast<float>(max_dist_m);
+    JPH::RRayCast ray{origin, dir};
+    JPH::RayCastResult hit;
+    JPH::BodyID ignore;
+    if (ignore_vehicle_id != 0) {
+        auto it = impl_->vehicles.find(ignore_vehicle_id);
+        if (it != impl_->vehicles.end()) {
+            ignore = it->second.body;
+        }
+    }
+    const JPH::IgnoreSingleBodyFilter body_filter(ignore);
+    const JPH::BroadPhaseLayerFilter any_bp;
+    const JPH::ObjectLayerFilter any_object;
+    if (!impl_->physics->GetNarrowPhaseQuery().CastRay(ray, hit, any_bp, any_object, body_filter)) {
+        return out;
+    }
+
+    out.hit = true;
+    out.distance = hit.mFraction * max_dist_m;
+
+    // Ask the body that was hit which way its surface faces at the hit point.
+    const JPH::RVec3 point = ray.GetPointOnRay(hit.mFraction);
+    const JPH::Vec3 normal =
+        impl_->bodies().GetTransformedShape(hit.mBodyID).GetWorldSpaceSurfaceNormal(hit.mSubShapeID2, point);
+    out.normal_ned = from_jolt(normal);
+    out.is_ground = hit.mBodyID == impl_->ground_body;
+    return out;
 }
 
 std::vector<World::PathHit> World::sweep_path(const std::vector<Vec3> &waypoints_ned, double clearance_m) const {
