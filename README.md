@@ -185,8 +185,15 @@ docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
 
 `docker-entrypoint.sh` turns `SKYSIM_*` variables into flags: `SKYSIM_API_BIND`,
 `SKYSIM_API_PORT`, `SKYSIM_VEHICLES`, `SKYSIM_TILES`, `SKYSIM_STREAM_RADIUS`,
-`SKYSIM_STREAM_MAX`, `SKYSIM_DT`, `SKYSIM_SPAWN_HOME`, and `SKYSIM_EXTRA_ARGS` for
-anything not listed.
+`SKYSIM_STREAM_MAX`, `SKYSIM_DT`, `SKYSIM_TIME_MODE`, `SKYSIM_SPAWN_HOME`, and
+`SKYSIM_EXTRA_ARGS` for anything not listed.
+
+**Set `SKYSIM_TIME_MODE=interactive` on a long-lived server.** The default is `strict`,
+which is what determinism and CI replays need — a barrier every tick, and an abort when
+a vehicle misses it. A server that vehicles join and leave wants the opposite, or one
+lagging aircraft takes the fleet down with it. Match `SKYSIM_DT` to the scheduler rate
+the vehicles are launched with, too: in lockstep, physics faster than the autopilot's
+loop means most ticks miss their deadline.
 
 **`SKYSIM_CAMERA_FPS` is the camera switch.** Without it no frames are rendered and
 the camera endpoints serve nothing, whatever else is set. With it, `SKYSIM_CAMERA_SIZE`

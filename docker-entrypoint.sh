@@ -28,6 +28,17 @@ if [[ -n "${SKYSIM_DT:-}" ]]; then
     args+=(--dt "${SKYSIM_DT}")
 fi
 
+# Time mode, which a deployment could not set at all before.
+#
+# skysim defaults to strict because that is what determinism and CI replays need:
+# a barrier every tick, and an abort when a vehicle misses it. A long-lived server
+# wants the opposite — vehicles join and leave, some of them lag, and none of that
+# should take the fleet down. Without this the only way to say so was
+# SKYSIM_EXTRA_ARGS, so every deployment quietly ran strict.
+if [[ -n "${SKYSIM_TIME_MODE:-}" ]]; then
+    args+=(--time-mode "${SKYSIM_TIME_MODE}")
+fi
+
 if [[ -n "${SKYSIM_SPAWN_HOME:-}" ]]; then
     args+=(--spawn-home "${SKYSIM_SPAWN_HOME}")
 fi
