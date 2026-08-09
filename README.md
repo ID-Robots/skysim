@@ -183,6 +183,23 @@ docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
   -v $(pwd)/build/city/tiles:/world:ro -e SKYSIM_TILES=/world skysim
 ```
 
+`docker-entrypoint.sh` turns `SKYSIM_*` variables into flags: `SKYSIM_API_BIND`,
+`SKYSIM_API_PORT`, `SKYSIM_VEHICLES`, `SKYSIM_TILES`, `SKYSIM_STREAM_RADIUS`,
+`SKYSIM_STREAM_MAX`, `SKYSIM_DT`, `SKYSIM_SPAWN_HOME`, and `SKYSIM_EXTRA_ARGS` for
+anything not listed.
+
+**`SKYSIM_CAMERA_FPS` is the camera switch.** Without it no frames are rendered and
+the camera endpoints serve nothing, whatever else is set. With it, `SKYSIM_CAMERA_SIZE`
+(default `256x144`), `SKYSIM_CAMERA_QUALITY`, `SKYSIM_CAMERA_THREADS`,
+`SKYSIM_CAMERA_FOV`, `SKYSIM_CAMERA_PITCH` and `SKYSIM_CAMERA_RANGE` apply:
+
+```bash
+docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
+  -v $(pwd)/build/city/tiles:/world:ro -e SKYSIM_TILES=/world \
+  -e SKYSIM_CAMERA_FPS=10 -e SKYSIM_CAMERA_SIZE=256x144 skysim
+# http://localhost:8642/instances/0/camera.mjpg
+```
+
 ---
 
 ## Control plane (`--api-port`)

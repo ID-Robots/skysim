@@ -32,6 +32,27 @@ if [[ -n "${SKYSIM_SPAWN_HOME:-}" ]]; then
     args+=(--spawn-home "${SKYSIM_SPAWN_HOME}")
 fi
 
+# Camera. SKYSIM_CAMERA_FPS is the switch — without --camera-fps the render
+# service is never built and every other camera setting is inert, which is
+# exactly how a deployment ends up serving a control plane with no pictures on
+# it. The rest only apply once it is on.
+add_if_set() { # env-var-name flag
+    local value="${!1:-}"
+    if [[ -n "$value" ]]; then
+        args+=("$2" "$value")
+    fi
+}
+
+if [[ -n "${SKYSIM_CAMERA_FPS:-}" ]]; then
+    args+=(--camera-fps "${SKYSIM_CAMERA_FPS}")
+    args+=(--camera-size "${SKYSIM_CAMERA_SIZE:-256x144}")
+    add_if_set SKYSIM_CAMERA_QUALITY --camera-quality
+    add_if_set SKYSIM_CAMERA_THREADS --camera-threads
+    add_if_set SKYSIM_CAMERA_FOV --camera-fov
+    add_if_set SKYSIM_CAMERA_PITCH --camera-pitch
+    add_if_set SKYSIM_CAMERA_RANGE --camera-range
+fi
+
 if [[ -n "${SKYSIM_EXTRA_ARGS:-}" ]]; then
     # shellcheck disable=SC2206 # deliberate word splitting: caller supplies flags
     extra=(${SKYSIM_EXTRA_ARGS})
