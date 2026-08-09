@@ -10,10 +10,13 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 
 #include "core/world.h"
+#include "render/frame_store.h"
 #include "render/jpeg.h"
 #include "render/raster.h"
+#include "render/render_service.h"
 #include "render/renderer.h"
 #include "terrain/cook.h"
 
@@ -202,6 +205,67 @@ int main() {
             raster.render(scene, skysim::render::Camera(cam, pos, level), &pool);
         CHECK(threaded.rgb == r.rgb);
     }
+
+    // --- FrameStore hands one frame per vehicle across threads. ---
+    {
+        skysim::render::FrameStore store;
+        CHECK(store.get(1).jpeg.empty()); // never rendered
+        CHECK(store.get(1).sim_time_s == 0.0);
+
+        store.publish(1, {1, 2, 3}, 4.5);
+        CHECK(store.get(1).jpeg.size() == 3);
+        CHECK(store.get(1).sim_time_s == 4.5);
+        CHECK(store.get(2).jpeg.empty()); // one vehicle's frame is not another's
+
+        // Replaced whole, not appended to: a viewer wants the newest picture.
+        store.publish(1, {9}, 5.0);
+        CHECK(store.get(1).jpeg.size() == 1);
+        CHECK(store.get(1).jpeg[0] == 9);
+
+        store.erase(1);
+        CHECK(store.get(1).jpeg.empty());
+        store.erase(404); // erasing a vehicle that was never there is not an error
+    }
+
+    // --- RenderService draws on its own thread, off its own world. ---
+    //
+    // The service is what actually runs in flight, and its two failure modes are
+    // both silent: a world that loaded no geometry, and a thread that never
+    // produces a frame. Both look like a working server serving nothing.
+    {
+        const auto tiles = std::filesystem::temp_directory_path() / "skysim_service_tiles";
+        std::filesystem::create_directories(tiles);
+        write_test_obj(tiles / "building.obj");
+        CHECK(skysim::terrain::cook_obj_tile(tiles / "building.obj", tiles / "building.jshape", nullptr, &err));
+
+        skysim::render::RenderService::Config scfg;
+        scfg.camera = cam;
+        scfg.tiles_dir = tiles.string();
+        scfg.fps = 60.0; // fast, so the test is not mostly sleeping
+        scfg.threads = 2;
+
+        skysim::render::RenderService service(scfg);
+        CHECK(service.tiles_loaded() == 1);
+        CHECK(service.triangle_count() > 0);
+        CHECK(service.frame(1).empty()); // nothing published yet, so nothing to draw
+
+        skysim::render::RenderService::Pose pose;
+        pose.vehicle_id = 1;
+        pose.position_ned = pos;
+        pose.quat_ned_frd = level;
+        service.publish_poses({pose});
+
+        std::vector<uint8_t> frame;
+        for (int i = 0; i < 200 && frame.empty(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            frame = service.frame(1);
+        }
+        CHECK(!frame.empty());
+        CHECK(frame.size() > 2 && frame[0] == 0xFF && frame[1] == 0xD8); // a real JPEG
+        CHECK(service.frame(2).empty());                                 // only the posed vehicle
+
+        std::filesystem::remove_all(tiles);
+    } // ~RenderService must stop and join its thread rather than hang here
 
     std::filesystem::remove_all(dir);
     if (g_failures == 0) {

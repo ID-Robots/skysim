@@ -24,6 +24,7 @@ int g_failures = 0;
     } while (0)
 
 constexpr int kPort = 18642;
+constexpr int kCameraPort = 18643;
 
 } // namespace
 
@@ -236,6 +237,71 @@ int main() {
         CHECK(metrics && metrics->body.find("\"tick\":1234") != std::string::npos);
         CHECK(metrics && metrics->body.find("\"freezes\":1") != std::string::npos);
     } // ~ControlServer stops + joins the HTTP thread
+
+    // --- Camera endpoints, camera off. ---
+    //
+    // No camera_frame callback is the normal headless configuration, not an error
+    // state, so the endpoints have to exist and refuse politely rather than 500.
+    {
+        ControlServer server("127.0.0.1", kCameraPort, queue, snaps);
+        httplib::Client client("127.0.0.1", kCameraPort);
+        client.set_read_timeout(15, 0);
+
+        auto off = client.Get("/vehicles/1/camera.jpg");
+        CHECK(off && off->status == 404);
+        CHECK(off && off->body.find("camera disabled") != std::string::npos);
+        CHECK(client.Get("/vehicles/1/camera.mjpg")->status == 404);
+        CHECK(client.Get("/instances/30/camera.jpg")->status == 404);
+        CHECK(client.Get("/instances/30/camera.mjpg")->status == 404);
+    }
+
+    // --- Camera endpoints, camera on. ---
+    {
+        // Not a real JPEG: these routes move bytes and pick status codes, and
+        // whether those bytes decode is test_render's business.
+        const std::vector<uint8_t> canned{0xFF, 0xD8, 'p', 'i', 'x', 0xFF, 0xD9};
+        ControlServer::Snapshots with_camera = snaps;
+        with_camera.camera_frame = [canned](uint32_t id) {
+            return id == 1 ? canned : std::vector<uint8_t>{};
+        };
+
+        ControlServer server("127.0.0.1", kCameraPort, queue, with_camera);
+        httplib::Client client("127.0.0.1", kCameraPort);
+        client.set_read_timeout(15, 0);
+
+        auto shot = client.Get("/vehicles/1/camera.jpg");
+        CHECK(shot && shot->status == 200);
+        CHECK(shot && shot->get_header_value("Content-Type") == "image/jpeg");
+        CHECK(shot && shot->body.size() == canned.size());
+
+        // A vehicle that exists but has not been drawn yet is not an error the
+        // caller can fix, but it is not a frame either.
+        auto blank = client.Get("/vehicles/2/camera.jpg");
+        CHECK(blank && blank->status == 404);
+        CHECK(blank && blank->body.find("no frame") != std::string::npos);
+
+        // Addressed by ArduPilot instance, resolved through the vehicle list:
+        // instance 30 is vehicle id 1 above.
+        auto by_instance = client.Get("/instances/30/camera.jpg");
+        CHECK(by_instance && by_instance->status == 200);
+        CHECK(by_instance && by_instance->body.size() == canned.size());
+
+        auto unknown = client.Get("/instances/99/camera.jpg");
+        CHECK(unknown && unknown->status == 404);
+        CHECK(unknown && unknown->body.find("no such instance") != std::string::npos);
+
+        // The MJPEG stream never ends, so take the first frame and hang up. What
+        // matters is that it is multipart and that a frame arrives inside it.
+        for (const char *path : {"/vehicles/1/camera.mjpg", "/instances/30/camera.mjpg"}) {
+            std::string got;
+            client.Get(path, [&got](const char *data, size_t len) {
+                got.append(data, len);
+                return got.find("\r\n\r\n") == std::string::npos; // stop after one frame's header
+            });
+            CHECK(got.find("--skysimframe") != std::string::npos);
+            CHECK(got.find("Content-Type: image/jpeg") != std::string::npos);
+        }
+    }
 
     // Rebind after teardown must work (the port is released, not leaked). Note a LIVE
     // conflict cannot be tested here: httplib sets SO_REUSEPORT, so two servers on one

@@ -7,13 +7,11 @@
 
 namespace skysim::render {
 
-// Latest camera frame per vehicle, handed from the tick thread to the HTTP thread.
+// Latest camera frame per vehicle, handed from the render thread to the HTTP threads.
 //
-// Rendering happens on the tick thread because casting rays into the physics
-// world while it is stepping is not safe, and because the server's whole
-// threading contract is that the HTTP side only ever reads what a tick
-// published. This is that publication: one encoded JPEG per vehicle, replaced
-// whole, copied out under the lock.
+// The two sides run at unrelated rates — one draws when it can, the others serve
+// whoever is connected — so the handover is a slot rather than a channel: one
+// encoded JPEG per vehicle, replaced whole, copied out under the lock.
 //
 // Frames are dropped rather than queued. A viewer that falls behind wants the
 // newest picture, not a backlog of stale ones.
