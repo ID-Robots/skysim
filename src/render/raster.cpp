@@ -190,6 +190,19 @@ void Rasterizer::draw_background(const Camera &camera, Image &image, int y0, int
 
 void Rasterizer::fill_band(const std::vector<ScreenTriangle> &tris, Image &image, std::vector<float> &depth,
                            int y0, int y1) const {
+    // Per-axis tangent offsets, so a pixel's camera-space depth can be turned
+    // into its radial distance with two adds and a multiply. Squared, because
+    // the only consumer squares them again.
+    const double tan_x = std::tan((cfg_.fov_deg * M_PI / 180.0) * 0.5);
+    const double tan_y = tan_x * cfg_.height / cfg_.width;
+    const double max_range_sq = cfg_.max_range_m * cfg_.max_range_m;
+
+    std::vector<double> kx(static_cast<size_t>(cfg_.width));
+    for (int x = 0; x < cfg_.width; ++x) {
+        const double sx = ((x + 0.5) / cfg_.width) * 2.0 - 1.0;
+        kx[static_cast<size_t>(x)] = (sx * tan_x) * (sx * tan_x);
+    }
+
     for (const ScreenTriangle &t : tris) {
         if (t.max_y < y0 || t.min_y >= y1) {
             continue; // not in this band
@@ -208,6 +221,8 @@ void Rasterizer::fill_band(const std::vector<ScreenTriangle> &tris, Image &image
 
         for (int y = ys; y <= ye; ++y) {
             const float py = y + 0.5f;
+            const double sy = 1.0 - ((y + 0.5) / cfg_.height) * 2.0;
+            const double ky_row = (sy * tan_y) * (sy * tan_y);
             for (int x = xs; x <= xe; ++x) {
                 const float px = x + 0.5f;
 
@@ -236,7 +251,15 @@ void Rasterizer::fill_band(const std::vector<ScreenTriangle> &tris, Image &image
                 // Haze grows with distance but never fully erases a surface:
                 // capped, so the far edge of the draw distance reads as far away
                 // rather than as blank sky.
-                const double haze = haze_at(z, cfg_.max_range_m);
+                //
+                // Against radial distance, not z. z is depth along the camera's
+                // forward axis, and at the edge of a 78 degree frame that is
+                // ~25% short of how far the surface actually is — enough that the
+                // same wall hazed differently here than in the ray caster, which
+                // shading.h says must not happen. Squared throughout, so the
+                // conversion costs a multiply instead of a square root per pixel.
+                const double radial_sq = static_cast<double>(z) * z * (1.0 + kx[x] + ky_row);
+                const double haze = haze_at_sq(radial_sq, max_range_sq);
 
                 const size_t pi = (static_cast<size_t>(y) * cfg_.width + x) * 3;
                 for (int c = 0; c < 3; ++c) {

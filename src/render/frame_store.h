@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -42,6 +44,19 @@ class FrameStore {
     void erase(uint32_t vehicle_id) {
         std::lock_guard<std::mutex> lock(mutex_);
         frames_.erase(vehicle_id);
+    }
+
+    // Drop every vehicle not in `keep`.
+    //
+    // Without this a despawned vehicle's last frame outlives it: the camera route
+    // keeps serving a picture for an aircraft that no longer exists, instead of
+    // the 404 the caller needs to see, and the map grows for the life of the
+    // process as ids churn.
+    void retain(const std::vector<uint32_t> &keep) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = frames_.begin(); it != frames_.end();) {
+            it = std::find(keep.begin(), keep.end(), it->first) == keep.end() ? frames_.erase(it) : std::next(it);
+        }
     }
 
   private:

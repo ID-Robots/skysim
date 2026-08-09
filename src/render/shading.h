@@ -57,9 +57,21 @@ inline void sky_colour(const core::Vec3 &dir, double out[3]) {
 }
 
 //: How much haze sits between the camera and something this far away.
+//: Squared form, for callers that have a squared distance already. The rasteriser
+//: does: turning its camera-space depth into a true radial distance needs a square
+//: root per pixel, and haze only ever squares the ratio again.
+inline double haze_at_sq(double distance_sq, double max_range_sq) {
+    // A non-positive range would divide by zero, and the NaN survives clamp and
+    // min all the way to a cast that is undefined behaviour. Nothing is visible
+    // at zero range anyway, so everything is as hazy as it gets.
+    if (!(max_range_sq > 0.0)) {
+        return kMaxHaze;
+    }
+    return std::min(std::clamp(distance_sq / max_range_sq, 0.0, 1.0), kMaxHaze);
+}
+
 inline double haze_at(double distance_m, double max_range_m) {
-    const double fog = std::clamp(distance_m / max_range_m, 0.0, 1.0);
-    return std::min(fog * fog, kMaxHaze);
+    return haze_at_sq(distance_m * distance_m, max_range_m * max_range_m);
 }
 
 } // namespace skysim::render

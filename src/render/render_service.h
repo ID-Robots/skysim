@@ -47,6 +47,9 @@ class RenderService {
         uint32_t vehicle_id{0};
         core::Vec3 position_ned{};
         core::Quat quat_ned_frd{1.0, 0.0, 0.0, 0.0};
+        // When the tick that produced this pose happened, carried through to the
+        // frame so a consumer can tell a fresh picture from a stalled one.
+        double sim_time_s{0.0};
     };
 
     explicit RenderService(const Config &cfg);

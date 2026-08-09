@@ -86,9 +86,9 @@ Read in depth: [`docs/PROTOCOL.md`](docs/PROTOCOL.md) → [`docs/DESIGN.md`](doc
 
 ## Getting started
 
-One command, and the only prerequisites are the build tools. It builds skysim, cooks a
-1.2 km demo city, and renders it from four camera poses — the same rasteriser that feeds
-a vehicle's camera stream in flight, so what you get is what a drone would see:
+One command. It builds skysim, cooks a 1.2 km demo city, and renders it from four camera
+poses — the same rasteriser that feeds a vehicle's camera stream in flight, so what you
+get is what a drone would see:
 
 ```bash
 tools/getting_started.sh
@@ -96,9 +96,10 @@ tools/getting_started.sh
 
 ![Four views of the demo city rendered by skysim](.github/assets/skysim-getting-started.jpg)
 
-Images land in `build/getting_started/`. Nothing above needs ArduPilot, a network or a
-running simulator — it is there so you can see the thing work before committing to the
-half hour the autopilot build takes.
+Images land in `build/getting_started/`. Needs the build tools, Python 3, and — on a
+clean checkout — network access, because CMake fetches JoltPhysics, cpp-httplib and stb.
+It does **not** need ArduPilot or a running simulator, which is the point: you can see
+the thing work before committing to the half hour the autopilot build takes.
 
 Once you do have ArduPilot (see below), the same script will fly a vehicle through that
 city and serve its camera live:

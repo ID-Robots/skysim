@@ -64,6 +64,7 @@ void Renderer::render_rows(const core::World &world, const Camera &camera, uint3
                 hit.hit = true;
                 hit.distance = ground_dist;
                 hit.normal_ned = {0.0, 0.0, -1.0}; // ground faces up; NED up is -z
+                hit.is_ground = true;              // it is the ground, so say so, or it draws grey
             }
 
             double colour[3];

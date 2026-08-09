@@ -187,6 +187,22 @@ Options parse_args(int argc, char **argv) {
         std::fprintf(stderr, "skysim: invalid options (--time-mode strict|interactive)\n");
         std::exit(2);
     }
+    // These three change timing or thread counts rather than failing outright, so
+    // an out-of-range value does not announce itself: a negative thread count is
+    // an undefined pool size, a grace above 1 stretches every tick past its
+    // period, and stb quietly reads quality 0 as 90.
+    if (o.camera_threads < 1) {
+        std::fprintf(stderr, "skysim: --camera-threads must be at least 1\n");
+        std::exit(2);
+    }
+    if (o.camera_quality < 1 || o.camera_quality > 100) {
+        std::fprintf(stderr, "skysim: --camera-quality must be 1-100\n");
+        std::exit(2);
+    }
+    if (o.frame_grace < 0.0 || o.frame_grace > 1.0) {
+        std::fprintf(stderr, "skysim: --frame-grace must be 0.0-1.0 (a fraction of the tick period)\n");
+        std::exit(2);
+    }
     return o;
 }
 
@@ -705,10 +721,11 @@ struct App {
         if (!render_service) {
             return;
         }
+        const double now = world ? world->now() : 0.0;
         std::vector<skysim::render::RenderService::Pose> poses;
         poses.reserve(fleet.size());
         for (const auto &v : fleet) {
-            poses.push_back({v->vehicle_id, v->state.pos_ned, v->state.quat_ned_frd});
+            poses.push_back({v->vehicle_id, v->state.pos_ned, v->state.quat_ned_frd, now});
         }
         render_service->publish_poses(std::move(poses));
     }

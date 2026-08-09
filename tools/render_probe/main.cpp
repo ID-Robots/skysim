@@ -150,7 +150,16 @@ int main(int argc, char **argv) {
     }
 
     std::ofstream f(o.out, std::ios::binary);
+    if (!f) {
+        std::fprintf(stderr, "render_probe: cannot open %s\n", o.out.c_str());
+        return 1;
+    }
     f.write(reinterpret_cast<const char *>(jpeg.data()), static_cast<std::streamsize>(jpeg.size()));
+    f.close();
+    if (!f) {
+        std::fprintf(stderr, "render_probe: failed writing %s\n", o.out.c_str());
+        return 1;
+    }
     std::printf("render_probe: wrote %s (%zu bytes, %dx%d)\n", o.out.c_str(), jpeg.size(), image.width, image.height);
     return 0;
 }

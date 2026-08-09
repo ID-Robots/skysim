@@ -112,8 +112,12 @@ if [ "$FLY" = "1" ]; then
         exit 1
     }
 
-    api_up() { curl -sf "http://127.0.0.1:$API_PORT/vehicles" >/dev/null; }
-    vehicle_connected() { curl -sf "http://127.0.0.1:$API_PORT/vehicles" | grep -q '"connected":true'; }
+    # Deadlines on both: a server that accepts the connection and then says
+    # nothing would hang curl forever, and wait_for would never get to retry or
+    # to notice the process had died.
+    probe() { curl -sf --connect-timeout 1 --max-time 2 "http://127.0.0.1:$API_PORT/vehicles"; }
+    api_up() { probe >/dev/null; }
+    vehicle_connected() { probe | grep -q '"connected":true'; }
 
     wait_for 100 $SKYSIM_PID \
         "skysim never came up. If a port is taken: INSTANCE=1 API_PORT=8643 $0 --fly" api_up

@@ -111,8 +111,10 @@ class World {
     struct RayHit {
         bool hit{false};
         double distance{-1.0};
-        Vec3 normal_ned{0.0, 0.0, -1.0}; // unit, points back towards the ray
-        bool is_ground{false};           // the ground slab, as opposed to a building
+        // Unit outward surface normal of the body that was hit. Not oriented against
+        // the ray: a hit on a back face returns a normal pointing away from the eye.
+        Vec3 normal_ned{0.0, 0.0, -1.0};
+        bool is_ground{false}; // the ground slab, as opposed to a building
     };
 
     RayHit raycast_surface(const Vec3 &origin_ned, const Vec3 &dir_ned, double max_dist_m,

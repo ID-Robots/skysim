@@ -16,13 +16,10 @@
 namespace skysim::api {
 
 namespace {
+
 // Two long-lived camera streams per vehicle, plus headroom for the control
 // plane, which must stay answerable while they run.
 constexpr size_t kWorkerThreads = 64;
-} // namespace
-
-
-namespace {
 
 // {"launch_process":true} — absent key means false.
 bool parse_launch_process(const std::string &body) {
@@ -354,8 +351,11 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
             res.set_content("{\"error\":\"camera disabled\"}", "application/json");
             return;
         }
+        // strtoul, not stoul: the route regex accepts any number of digits, and
+        // stoul throws on a value too big for the type. Saturating is the same
+        // answer as "no such vehicle" without the exception.
         std::vector<uint8_t> jpeg = snapshots.camera_frame(
-            static_cast<uint32_t>(std::stoul(req.matches[1].str())));
+            static_cast<uint32_t>(std::strtoul(req.matches[1].str().c_str(), nullptr, 10)));
         if (jpeg.empty()) {
             res.status = 404;
             res.set_content("{\"error\":\"no frame\"}", "application/json");
@@ -375,7 +375,7 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
             res.set_content("{\"error\":\"camera disabled\"}", "application/json");
             return;
         }
-        const auto id = static_cast<uint32_t>(std::stoul(req.matches[1].str()));
+        const auto id = static_cast<uint32_t>(std::strtoul(req.matches[1].str().c_str(), nullptr, 10));
         res.set_chunked_content_provider(
             "multipart/x-mixed-replace; boundary=skysimframe",
             [snapshots, id](size_t /*offset*/, httplib::DataSink &sink) {

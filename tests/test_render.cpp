@@ -170,8 +170,12 @@ int main() {
     const std::vector<uint8_t> jpeg = skysim::render::encode_jpeg(img, 70);
     CHECK(jpeg.size() > 256);
     CHECK(jpeg.size() < img.rgb.size()); // compression actually happened
-    CHECK(jpeg[0] == 0xFF && jpeg[1] == 0xD8); // SOI
-    CHECK(jpeg[jpeg.size() - 2] == 0xFF && jpeg[jpeg.size() - 1] == 0xD9); // EOI
+    // Guarded: CHECK keeps going after a failure, and indexing an empty buffer
+    // would crash the run instead of reporting which assertion failed.
+    if (jpeg.size() >= 4) {
+        CHECK(jpeg[0] == 0xFF && jpeg[1] == 0xD8);                             // SOI
+        CHECK(jpeg[jpeg.size() - 2] == 0xFF && jpeg[jpeg.size() - 1] == 0xD9); // EOI
+    }
 
     // --- An empty image encodes to nothing rather than crashing. ---
     CHECK(skysim::render::encode_jpeg(skysim::render::Image{}, 70).empty());
@@ -225,6 +229,16 @@ int main() {
         store.erase(1);
         CHECK(store.get(1).jpeg.empty());
         store.erase(404); // erasing a vehicle that was never there is not an error
+
+        // A despawned vehicle's last frame must go with it, or the camera route
+        // serves a picture of an aircraft that no longer exists.
+        store.publish(1, {1}, 1.0);
+        store.publish(2, {2}, 1.0);
+        store.retain({2});
+        CHECK(store.get(1).jpeg.empty());
+        CHECK(!store.get(2).jpeg.empty());
+        store.retain({}); // whole fleet gone
+        CHECK(store.get(2).jpeg.empty());
     }
 
     // --- RenderService draws on its own thread, off its own world. ---
@@ -253,6 +267,7 @@ int main() {
         pose.vehicle_id = 1;
         pose.position_ned = pos;
         pose.quat_ned_frd = level;
+        pose.sim_time_s = 12.5;
         service.publish_poses({pose});
 
         std::vector<uint8_t> frame;
@@ -263,6 +278,16 @@ int main() {
         CHECK(!frame.empty());
         CHECK(frame.size() > 2 && frame[0] == 0xFF && frame[1] == 0xD8); // a real JPEG
         CHECK(service.frame(2).empty());                                 // only the posed vehicle
+
+        // Despawn it: the next pass must drop the frame rather than keep serving
+        // a picture of a vehicle that is gone.
+        service.publish_poses({});
+        bool cleared = false;
+        for (int i = 0; i < 200 && !cleared; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            cleared = service.frame(1).empty();
+        }
+        CHECK(cleared);
 
         std::filesystem::remove_all(tiles);
     } // ~RenderService must stop and join its thread rather than hang here

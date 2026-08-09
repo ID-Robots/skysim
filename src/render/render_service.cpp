@@ -60,6 +60,16 @@ void RenderService::run() {
             poses = poses_;
         }
 
+        // The pose list is the whole fleet, so anything not in it has despawned.
+        // Dropping their frames here rather than hooking despawn keeps one owner
+        // of the question "which vehicles exist" — this list, once a tick.
+        std::vector<uint32_t> live;
+        live.reserve(poses.size());
+        for (const Pose &pose : poses) {
+            live.push_back(pose.vehicle_id);
+        }
+        frames_.retain(live);
+
         for (const Pose &pose : poses) {
             if (stop_.load(std::memory_order_relaxed)) {
                 break;
@@ -68,7 +78,7 @@ void RenderService::run() {
             const Image image = rasterizer_->render(scene_, camera, pool_.get());
             auto jpeg = encode_jpeg(image, cfg_.quality);
             if (!jpeg.empty()) {
-                frames_.publish(pose.vehicle_id, std::move(jpeg), 0.0);
+                frames_.publish(pose.vehicle_id, std::move(jpeg), pose.sim_time_s);
             }
         }
 
