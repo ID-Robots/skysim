@@ -233,7 +233,7 @@ the dashboard.
 | `--truth-log out.csv` | Ground truth per tick — judge the physics with this, not the EKF |
 | `--record-servo` / `--replay-servo` | Deterministic input tapes for reproducible runs |
 | `--time-mode strict` | Lockstep barrier on every vehicle; aborts on a straggler (CI) |
-| `--straggler-timeout` | interactive: silence before a vehicle is frozen out of the barrier (2 s) |
+| `--straggler-timeout <seconds>` | interactive: silence before a vehicle is frozen out of the barrier (2 s) |
 | `--stream-radius` / `--stream-max` | City tile residency around each vehicle |
 | `--physics-threads` | Opt a single huge world into Jolt's thread pool (only worth it past ~1000 bodies) |
 | `--io-threads` | Fan the reply path across cores (helps past ~48 vehicles) |

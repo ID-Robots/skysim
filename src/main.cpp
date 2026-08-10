@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -171,7 +172,17 @@ Options parse_args(int argc, char **argv) {
         } else if (std::strcmp(argv[i], "--frame-grace") == 0) {
             o.frame_grace = std::atof(need_value("--frame-grace"));
         } else if (std::strcmp(argv[i], "--straggler-timeout") == 0) {
-            o.straggler_timeout_s = std::atof(need_value("--straggler-timeout"));
+            // Checked here rather than where it is used: run_interactive turns this into a
+            // tick count by dividing by dt, and atof happily returns nan or inf for "abc" or
+            // "1e400". Converting either to int is undefined behaviour, so the freeze
+            // threshold would be whatever that produced — silently, on a flag about how long
+            // to tolerate a silent vehicle.
+            const double v = std::atof(need_value("--straggler-timeout"));
+            if (!std::isfinite(v) || v < 0.0 || v > 86400.0) {
+                std::fprintf(stderr, "skysim: --straggler-timeout must be between 0 and 86400 seconds\n");
+                std::exit(2);
+            }
+            o.straggler_timeout_s = v;
         } else if (std::strcmp(argv[i], "--grace") == 0) {
             o.grace_s = std::atof(need_value("--grace"));
         } else if (std::strcmp(argv[i], "--strict-timeout") == 0) {
@@ -802,11 +813,15 @@ int run_strict(App &app, FILE *truth_log, FILE *record_log) {
 
         bool all_fresh = true;
         bool any_fresh = false;
+        bool any_connected = false;
         for (auto &v : app.fleet) {
             const bool fresh = poll_endpoint(*v);
             any_fresh = any_fresh || fresh;
-            if (v->connected && !fresh) {
-                all_fresh = false;
+            if (v->connected) {
+                any_connected = true;
+                if (!fresh) {
+                    all_fresh = false;
+                }
             }
         }
         const bool ready = all_fresh && any_fresh;
@@ -814,8 +829,12 @@ int run_strict(App &app, FILE *truth_log, FILE *record_log) {
             if (barrier_was_complete) {
                 barrier_was_complete = false;
                 barrier_stalled_since = clock::now();
-            } else if (app.opt.strict_timeout_s > 0.0 && any_fresh) {
-                // Someone is waiting on someone else: that's a genuine straggler stall.
+            } else if (app.opt.strict_timeout_s > 0.0 && any_connected) {
+                // Connected, not fresh: a genuine stall. Gated on anyone being connected
+                // rather than on anyone being fresh, so that the case this abort exists for —
+                // every SITL in the fleet going silent at once — is not the one case it sat
+                // through in silence. Waiting indefinitely is still right before the first
+                // vehicle arrives; a world with nothing in it is not stalled.
                 const double stalled =
                     std::chrono::duration<double>(clock::now() - barrier_stalled_since).count();
                 if (stalled > app.opt.strict_timeout_s) {
@@ -855,7 +874,11 @@ void wait_for_frames(Fleet &fleet, std::chrono::steady_clock::time_point deadlin
     for (;;) {
         bool all_ready = true;
         for (auto &v : fleet) {
-            if (v->connected && !poll_endpoint(*v)) {
+            // Frozen slots stay `connected` — they are still ours, and still polled below so
+            // they can thaw. But waiting on one here spends the whole grace period every
+            // single tick on a vehicle the barrier has already agreed to step without, which
+            // is the fleet-wide stall that freezing it was supposed to end.
+            if (v->connected && !v->frozen && !poll_endpoint(*v)) {
                 all_ready = false;
             }
         }
