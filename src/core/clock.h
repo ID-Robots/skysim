@@ -20,7 +20,9 @@ private:
     uint64_t tick_ = 0;
 };
 
-// TODO(M1/M4): TickGate — strict: barrier on all vehicles' next frame (with abort timeout);
-// interactive: deadline pacing + straggler policy (hold-k, freeze, grace despawn).
+// TODO(M1/M4): TickGate — one barrier on all vehicles' next frame, with the straggler policy
+// injected: strict aborts on timeout, interactive adds deadline pacing and evicts (freeze,
+// grace despawn). A late vehicle must never be stepped without its frame in either — see
+// run_interactive in main.cpp for why.
 
 }  // namespace skysim::core

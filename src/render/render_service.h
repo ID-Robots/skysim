@@ -61,8 +61,9 @@ class RenderService {
     // doubles under a mutex and returns.
     void publish_poses(std::vector<Pose> poses);
 
-    // Latest encoded frame for a vehicle; empty until one has been drawn.
-    std::vector<uint8_t> frame(uint32_t vehicle_id) const { return frames_.get(vehicle_id).jpeg; }
+    // Latest encoded frame for a vehicle, with the sim time it was drawn at so a consumer can
+    // tell a new picture from the one it already has. Empty until one has been drawn.
+    FrameStore::Frame frame(uint32_t vehicle_id) const { return frames_.get(vehicle_id); }
 
     size_t tiles_loaded() const { return tiles_loaded_; }
     size_t triangle_count() const { return scene_.triangle_count(); }

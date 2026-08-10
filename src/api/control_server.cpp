@@ -21,6 +21,30 @@ namespace {
 // plane, which must stay answerable while they run.
 constexpr size_t kWorkerThreads = 64;
 
+// How often an MJPEG stream looks for a newly drawn frame. Short relative to any render rate
+// worth watching, because it bounds how long a finished frame waits before it goes out; it does
+// not set the rate, since a frame is only written once (see write_mjpeg_part callers).
+constexpr auto kFramePoll = std::chrono::milliseconds(5);
+
+// One multipart part: headers plus the JPEG.
+//
+// Only ever called for a frame the caller has not sent before. Re-sending whatever is in the
+// slot on a fixed cadence — which is what this did — puts duplicates on the wire at the poll
+// rate rather than the render rate: measured at 24.7 frames/s carrying 10 frames/s of content,
+// 59% repeats and 37 KB/s of them. Worse than the waste, it feeds a consumer faster than the
+// content arrives, and the excess lands in socket and queue buffers as latency the viewer sees
+// as lag. FrameStore drops rather than queues for exactly this reason; this route was undoing it.
+void write_mjpeg_part(httplib::DataSink &sink, const std::vector<uint8_t> &jpeg) {
+    char head[128];
+    const int n = std::snprintf(head, sizeof(head),
+                                "--skysimframe\r\nContent-Type: image/jpeg\r\n"
+                                "Content-Length: %zu\r\n\r\n",
+                                jpeg.size());
+    sink.write(head, static_cast<size_t>(n));
+    sink.write(reinterpret_cast<const char *>(jpeg.data()), jpeg.size());
+    sink.write("\r\n", 2);
+}
+
 // {"launch_process":true} — absent key means false.
 bool parse_launch_process(const std::string &body) {
     const char *p = std::strstr(body.c_str(), "\"launch_process\"");
@@ -138,11 +162,11 @@ std::string vehicle_json(const VehicleInfo &v) {
     char buf[512];
     std::snprintf(buf, sizeof(buf),
                   "{\"id\":%u,\"instance\":%d,\"json_port\":%d,\"mavlink_tcp\":%d,"
-                  "\"connected\":%s,\"frozen\":%s,\"held_ticks\":%llu,"
+                  "\"connected\":%s,\"frozen\":%s,\"silent_ticks\":%llu,"
                   "\"midair_collisions\":%llu,\"static_contacts\":%llu,"
                   "\"building_contacts\":%llu,\"pos_ned\":[%.3f,%.3f,%.3f]}",
                   v.id, v.instance, v.json_port, v.mavlink_tcp_port, v.connected ? "true" : "false",
-                  v.frozen ? "true" : "false", static_cast<unsigned long long>(v.held_ticks),
+                  v.frozen ? "true" : "false", static_cast<unsigned long long>(v.silent_ticks),
                   static_cast<unsigned long long>(v.midair_collisions),
                   static_cast<unsigned long long>(v.static_contacts),
                   static_cast<unsigned long long>(v.building_contacts), v.pos_ned[0], v.pos_ned[1],
@@ -305,7 +329,7 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
             res.set_content("{\"error\":\"no such instance\"}", "application/json");
             return;
         }
-        std::vector<uint8_t> jpeg = snapshots.camera_frame(id);
+        std::vector<uint8_t> jpeg = snapshots.camera_frame(id).jpeg;
         if (jpeg.empty()) {
             res.status = 404;
             res.set_content("{\"error\":\"no frame\"}", "application/json");
@@ -324,22 +348,17 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
         }
         res.set_chunked_content_provider(
             "multipart/x-mixed-replace; boundary=skysimframe",
-            [snapshots, resolve_instance, instance](size_t, httplib::DataSink &sink) {
+            [snapshots, resolve_instance, instance, last_sent = -1.0](size_t,
+                                                                      httplib::DataSink &sink) mutable {
                 // Re-resolved per frame, so a skysim restart mid-recording picks
                 // the vehicle back up instead of streaming nothing forever.
                 const uint32_t id = resolve_instance(instance);
-                std::vector<uint8_t> jpeg = id != 0 ? snapshots.camera_frame(id) : std::vector<uint8_t>{};
-                if (!jpeg.empty()) {
-                    char head[128];
-                    const int n = std::snprintf(head, sizeof(head),
-                                                "--skysimframe\r\nContent-Type: image/jpeg\r\n"
-                                                "Content-Length: %zu\r\n\r\n",
-                                                jpeg.size());
-                    sink.write(head, static_cast<size_t>(n));
-                    sink.write(reinterpret_cast<const char *>(jpeg.data()), jpeg.size());
-                    sink.write("\r\n", 2);
+                auto frame = id != 0 ? snapshots.camera_frame(id) : skysim::render::FrameStore::Frame{};
+                if (!frame.jpeg.empty() && frame.sim_time_s != last_sent) {
+                    last_sent = frame.sim_time_s;
+                    write_mjpeg_part(sink, frame.jpeg);
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(40));
+                std::this_thread::sleep_for(kFramePoll);
                 return true;
             });
     });
@@ -354,8 +373,9 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
         // strtoul, not stoul: the route regex accepts any number of digits, and
         // stoul throws on a value too big for the type. Saturating is the same
         // answer as "no such vehicle" without the exception.
-        std::vector<uint8_t> jpeg = snapshots.camera_frame(
-            static_cast<uint32_t>(std::strtoul(req.matches[1].str().c_str(), nullptr, 10)));
+        std::vector<uint8_t> jpeg =
+            snapshots.camera_frame(static_cast<uint32_t>(std::strtoul(req.matches[1].str().c_str(), nullptr, 10)))
+                .jpeg;
         if (jpeg.empty()) {
             res.status = 404;
             res.set_content("{\"error\":\"no frame\"}", "application/json");
@@ -378,21 +398,13 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
         const auto id = static_cast<uint32_t>(std::strtoul(req.matches[1].str().c_str(), nullptr, 10));
         res.set_chunked_content_provider(
             "multipart/x-mixed-replace; boundary=skysimframe",
-            [snapshots, id](size_t /*offset*/, httplib::DataSink &sink) {
-                std::vector<uint8_t> jpeg = snapshots.camera_frame(id);
-                if (!jpeg.empty()) {
-                    char head[128];
-                    const int n = std::snprintf(head, sizeof(head),
-                                                "--skysimframe\r\nContent-Type: image/jpeg\r\n"
-                                                "Content-Length: %zu\r\n\r\n",
-                                                jpeg.size());
-                    sink.write(head, static_cast<size_t>(n));
-                    sink.write(reinterpret_cast<const char *>(jpeg.data()), jpeg.size());
-                    sink.write("\r\n", 2);
+            [snapshots, id, last_sent = -1.0](size_t /*offset*/, httplib::DataSink &sink) mutable {
+                auto frame = snapshots.camera_frame(id);
+                if (!frame.jpeg.empty() && frame.sim_time_s != last_sent) {
+                    last_sent = frame.sim_time_s;
+                    write_mjpeg_part(sink, frame.jpeg);
                 }
-                // Poll a little faster than frames are produced, so the stream
-                // tracks the render rate instead of setting its own.
-                std::this_thread::sleep_for(std::chrono::milliseconds(40));
+                std::this_thread::sleep_for(kFramePoll);
                 return true;
             });
     });

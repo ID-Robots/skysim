@@ -1,6 +1,6 @@
 // skysim entry point: config -> World -> UdpEndpoints/ControlServer -> tick loop.
-// Time policy (docs/DESIGN.md): strict = barrier on every vehicle's next frame (abort on
-// timeout); interactive = wall-clock paced, stragglers hold->freeze->grace-despawn.
+// Time policy (docs/DESIGN.md): both modes barrier on every connected vehicle's next frame;
+// strict aborts on a straggler, interactive is wall-clock paced and evicts one (freeze->despawn).
 // --canned keeps the M1 kinematic reply path; --replay-servo re-runs a recorded input tape.
 #include <algorithm>
 #include <atomic>
@@ -59,7 +59,13 @@ struct Options {
     // M4: control plane + straggler policy + managed SITL processes.
     int api_port = 0;                   // 0 = control plane disabled
     std::string api_bind = "127.0.0.1"; // 0.0.0.0 when the gateway calls from a bridge net
-    int hold_ticks = 3;                 // interactive: reuse last PWM for up to k missed deadlines
+    // interactive: how long a connected vehicle may go without sending a frame before it is
+    // declared gone and dropped out of the barrier. A liveness timeout, not a smoothing knob —
+    // a late vehicle stalls its own tick rather than flying on the last tick's PWM (see
+    // run_interactive). In seconds, not ticks, so its meaning does not quietly change with --dt:
+    // the tick-count knob this replaced defaulted to 3, which at 800 Hz wrote a vehicle off
+    // after 3.75 ms and froze SITLs that were merely busy booting.
+    double straggler_timeout_s = 2.0;
     // Fraction of a tick a frame may be late before it counts as a straggler.
     double frame_grace = 0.7;
 
@@ -164,8 +170,8 @@ Options parse_args(int argc, char **argv) {
             o.camera_threads = std::atoi(need_value("--camera-threads"));
         } else if (std::strcmp(argv[i], "--frame-grace") == 0) {
             o.frame_grace = std::atof(need_value("--frame-grace"));
-        } else if (std::strcmp(argv[i], "--hold-ticks") == 0) {
-            o.hold_ticks = std::atoi(need_value("--hold-ticks"));
+        } else if (std::strcmp(argv[i], "--straggler-timeout") == 0) {
+            o.straggler_timeout_s = std::atof(need_value("--straggler-timeout"));
         } else if (std::strcmp(argv[i], "--grace") == 0) {
             o.grace_s = std::atof(need_value("--grace"));
         } else if (std::strcmp(argv[i], "--strict-timeout") == 0) {
@@ -224,7 +230,7 @@ struct VehicleSlot {
     bool has_pending_input = false; // fresh frame consumed, reply owed after this tick
     skysim::protocol::ParsedServos pending{};
     bool connected = false; // ever received a frame
-    int hold_ticks = 0;     // consecutive deadline misses (interactive)
+    int silent_ticks = 0;     // consecutive deadline misses (interactive)
     bool frozen = false;
     uint64_t frozen_at_tick = 0;
     uint64_t gaps = 0, reboots = 0, bad = 0, ticks = 0;
@@ -297,7 +303,12 @@ void step_battery(VehicleSlot &v, const std::array<uint16_t, 16> &pwm, double dt
 }
 
 // Apply wrenches for every active vehicle and advance the world one tick.
-// A slot participates with its `pending` PWM whether fresh (has_pending_input) or held.
+//
+// Invariant, and both loops are built to hold it: a participating slot's `pending` PWM is
+// always a frame the vehicle actually sent for this tick. Slots that are frozen or have never
+// connected sit out (gravity + contacts only); nobody is ever stepped on a replay of last
+// tick's PWM. The autopilot reads its own loop rate off the timestamps we return, so a step it
+// did not contribute to is not an approximation — it desynchronises its controller.
 void step_world(skysim::core::World &world, Fleet &fleet, double dt_s, FILE *truth_log, FILE *record_log) {
     const auto wind = world.wind_ned();
     for (size_t i = 0; i < fleet.size(); ++i) {
@@ -741,7 +752,7 @@ struct App {
             info.mavlink_tcp_port = 5760 + 10 * v->instance;
             info.connected = v->connected;
             info.frozen = v->frozen;
-            info.held_ticks = static_cast<uint64_t>(v->hold_ticks);
+            info.silent_ticks = static_cast<uint64_t>(v->silent_ticks);
             info.midair_collisions = v->state.midair_collisions;
             info.static_contacts = v->state.static_contacts;
             info.building_contacts = v->state.building_contacts;
@@ -766,6 +777,20 @@ struct App {
     }
 };
 
+// Per-tick work that is neither physics nor waiting, timed so it can be charged to the tick.
+//
+// It spends the same budget the vehicle's round trip needs, and leaving it out of the metric is
+// how a box reporting a 73 us p99 could be missing a hundred deadlines a minute — the cost was
+// real, it was just all in tile streaming. Measured fresh per iteration rather than accumulated:
+// an iteration that does not go on to step is time spent waiting, and charging it to whichever
+// tick eventually lands would put a whole barrier stall into one sample.
+double timed_housekeeping(App &app) {
+    const auto t0 = std::chrono::steady_clock::now();
+    app.drain_commands();
+    app.stream_tiles();
+    return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+}
+
 // Strict: barrier on every CONNECTED vehicle's next frame; not-yet-connected vehicles don't
 // block (they sit on the ground until their SITL shows up). Abort on stalled barrier.
 int run_strict(App &app, FILE *truth_log, FILE *record_log) {
@@ -773,8 +798,7 @@ int run_strict(App &app, FILE *truth_log, FILE *record_log) {
     auto barrier_stalled_since = clock::now();
     bool barrier_was_complete = true;
     while (!g_stop.load(std::memory_order_relaxed)) {
-        app.drain_commands();
-        app.stream_tiles();
+        const double house_us = timed_housekeeping(app);
 
         bool all_fresh = true;
         bool any_fresh = false;
@@ -812,7 +836,7 @@ int run_strict(App &app, FILE *truth_log, FILE *record_log) {
 
         const auto t0 = clock::now();
         step_world(*app.world, app.fleet, app.opt.dt_s, truth_log, record_log);
-        app.metrics.record_us(std::chrono::duration<double, std::micro>(clock::now() - t0).count());
+        app.metrics.record_us(house_us + std::chrono::duration<double, std::micro>(clock::now() - t0).count());
         if (const int rc =
                 send_replies(app.world.get(), app.fleet, app.opt, app.world->now(), app.io_pool.get())) {
             return rc;
@@ -842,13 +866,34 @@ void wait_for_frames(Fleet &fleet, std::chrono::steady_clock::time_point deadlin
     }
 }
 
-// Interactive: tick on schedule; a vehicle missing its deadline gets its last PWM held for
-// up to k ticks, then freezes (kinematic hold, flagged), then despawns after the grace.
+// Interactive: pace to the wall clock, but never advance a vehicle without its frame.
+//
+// The tick is a barrier here exactly as it is in strict mode. What interactive adds is an
+// exit from that barrier: a vehicle that stops answering for a real length of time is
+// declared gone, frozen, and despawned after the grace, instead of stalling the fleet. That
+// is what a long-lived server needs, where aircraft join and leave and one that dies must
+// not take everybody else down with it.
+//
+// It used to add a second thing, and that second thing was the bug. A vehicle which missed its
+// deadline had its last PWM replayed for up to k ticks so the world could keep to the wall
+// clock. ArduPilot's JSON backend takes its entire scheduler rate from the timestamp we send it
+// — SIM_JSON.cpp runs `adjust_frame_time(1.0 / deltat)` on every frame — so a tick stepped
+// without the vehicle comes back as a doubled deltat and silently re-rates its control loop,
+// describing motion it never commanded. It crashed every takeoff. Freezing a vehicle that was
+// merely late is the same lie told louder.
+//
+// So a late vehicle now stalls its own tick. Lateness costs wall-clock pacing, which is
+// recoverable and shows up in the metrics; it must never cost flight fidelity.
 int run_interactive(App &app, FILE *truth_log, FILE *record_log) {
     using clock = std::chrono::steady_clock;
     const auto dt = std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(app.opt.dt_s));
     auto next_tick = clock::now() + dt;
     const uint64_t grace_ticks = static_cast<uint64_t>(app.opt.grace_s / app.opt.dt_s);
+    // Ticks of silence before a vehicle is written off as gone.
+    const int freeze_after = std::max(1, static_cast<int>(app.opt.straggler_timeout_s / app.opt.dt_s));
+    // How often the API snapshot is refreshed while the world is held waiting for a straggler.
+    constexpr auto kStallPublishPeriod = std::chrono::milliseconds(50);
+    auto last_stall_publish = clock::now();
     // How much of a tick a late frame may use before it counts as late. Kept
     // under the period so a persistently slow vehicle still shows up as one
     // rather than silently stretching every tick.
@@ -862,8 +907,7 @@ int run_interactive(App &app, FILE *truth_log, FILE *record_log) {
             next_tick = clock::now() + dt; // fell far behind (debugger, suspend): resync
         }
 
-        app.drain_commands();
-        app.stream_tiles();
+        const double house_us = timed_housekeeping(app);
 
         // Give a late frame a bounded moment to land before calling it late.
         //
@@ -879,32 +923,53 @@ int run_interactive(App &app, FILE *truth_log, FILE *record_log) {
         // stragglers into ordinary on-time ticks.
         wait_for_frames(app.fleet, clock::now() + frame_grace);
 
+        // A vehicle that has never connected, or that has already been written off, does not
+        // block the tick. Anyone else we are still waiting on does.
+        bool all_ready = true;
         for (auto &v : app.fleet) {
-            const bool fresh = poll_endpoint(*v);
-            if (fresh) {
+            if (poll_endpoint(*v)) {
                 if (v->frozen) {
                     std::printf("skysim: vehicle %u thawed (frames resumed)\n", v->vehicle_id);
                     v->frozen = false;
                     app.world->set_frozen(v->body_id, false);
                 }
-                v->hold_ticks = 0;
+                v->silent_ticks = 0;
             } else if (v->connected && !v->frozen) {
-                ++v->hold_ticks;
+                ++v->silent_ticks;
                 ++app.metrics.straggler_events;
-                if (v->hold_ticks > app.opt.hold_ticks) {
-                    std::printf("skysim: vehicle %u FROZEN after %d held ticks\n", v->vehicle_id,
-                                v->hold_ticks);
+                if (v->silent_ticks > freeze_after) {
+                    std::printf("skysim: vehicle %u FROZEN after %.2f s without a frame\n",
+                                v->vehicle_id, v->silent_ticks * app.opt.dt_s);
                     v->frozen = true;
                     v->frozen_at_tick = app.world->tick_index();
                     ++app.metrics.freezes;
                     app.world->set_frozen(v->body_id, true);
+                } else {
+                    all_ready = false; // still ours: wait for it rather than step without it
                 }
             }
         }
 
+        if (!all_ready) {
+            // Hold the entire world at this tick. Time is shared — one Jolt world, one clock —
+            // so there is no advancing the rest of the fleet without also advancing the vehicle
+            // we are waiting on, and advancing that one without its frame is the thing that
+            // crashes it.
+            //
+            // Keep publishing so /vehicles and /metrics stay live through the stall, but at a
+            // polling rate rather than a tick rate: publish_snapshot sorts the whole tick-time
+            // ring to get its quantiles, and nothing it reports moves while the world is held.
+            // At the default 2 s timeout and 800 Hz that would be 1600 identical sorts.
+            if (clock::now() - last_stall_publish > kStallPublishPeriod) {
+                last_stall_publish = clock::now();
+                app.publish_snapshot();
+            }
+            continue;
+        }
+
         const auto t0 = clock::now();
         step_world(*app.world, app.fleet, app.opt.dt_s, truth_log, record_log);
-        app.metrics.record_us(std::chrono::duration<double, std::micro>(clock::now() - t0).count());
+        app.metrics.record_us(house_us + std::chrono::duration<double, std::micro>(clock::now() - t0).count());
         if (const int rc =
                 send_replies(app.world.get(), app.fleet, app.opt, app.world->now(), app.io_pool.get())) {
             return rc;
@@ -1090,7 +1155,7 @@ int main(int argc, char **argv) {
             return app.metrics_snapshot;
         };
         snaps.camera_frame = [&app](uint32_t id) {
-            return app.render_service ? app.render_service->frame(id) : std::vector<uint8_t>{};
+            return app.render_service ? app.render_service->frame(id) : skysim::render::FrameStore::Frame{};
         };
         api = std::make_unique<skysim::api::ControlServer>(opt.api_bind, opt.api_port, app.queue,
                                                            std::move(snaps));
