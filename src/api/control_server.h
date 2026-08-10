@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "core/world.h"
+#include "render/frame_store.h"
 #include "vehicle/manager.h"
 
 namespace skysim::api {
@@ -23,7 +24,7 @@ struct VehicleInfo {
     int mavlink_tcp_port = 0;
     bool connected = false; // has ever delivered a servo frame
     bool frozen = false;    // straggler policy engaged (kinematic hold)
-    uint64_t held_ticks = 0;
+    uint64_t silent_ticks = 0;
     uint64_t midair_collisions = 0;  // vehicle-vehicle contact events (crash telemetry)
     uint64_t static_contacts = 0;    // any static touch, landings included
     uint64_t building_contacts = 0;  // building-tile strikes only — the "hit a building" signal
@@ -103,10 +104,11 @@ class ControlServer {
     struct Snapshots {
         std::function<std::vector<VehicleInfo>()> vehicles;
         std::function<MetricsInfo()> metrics;
-        // Latest camera frame for a vehicle as encoded JPEG; empty when the
-        // camera is off or that vehicle has not been rendered yet. Published by
-        // the tick thread like everything else here.
-        std::function<std::vector<uint8_t>(uint32_t)> camera_frame;
+        // Latest camera frame for a vehicle as encoded JPEG, with the sim time it was drawn
+        // at; empty when the camera is off or that vehicle has not been rendered yet. The
+        // timestamp is what lets the MJPEG routes send a frame once instead of re-sending
+        // whatever is in the slot. Published by the tick thread like everything else here.
+        std::function<skysim::render::FrameStore::Frame(uint32_t)> camera_frame;
     };
 
     // Binds bind_addr:port and serves on its own thread. Throws on bind failure (startup

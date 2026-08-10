@@ -38,7 +38,7 @@ def interactive_case(args) -> bool:
     print("=== interactive: SIGSTOP -> freeze+flag, SIGCONT -> thaw ===")
     sim = subprocess.Popen([args.sim, "--vehicles", "2", "--base-instance", str(args.base_instance),
                             "--time-mode", "interactive", "--dt", "0.00125",
-                            "--api-port", str(args.api_port), "--hold-ticks", "3",
+                            "--api-port", str(args.api_port), "--straggler-timeout", "0.01",
                             "--grace", "120", "--spacing", "30"])
     time.sleep(0.5)
     vehicles = [Vehicle(args.base_instance + i,

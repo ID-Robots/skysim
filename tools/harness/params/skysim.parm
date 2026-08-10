@@ -3,3 +3,9 @@
 # check requires >= 1.8x SCHED_LOOP_RATE (400 Hz on copter), so 400 Hz sim rate trips
 # "PreArm: Gyro 0 rate ... < loop rate*1.8" while 800 Hz clears it (observed at M1).
 SIM_RATE_HZ 800
+
+# X quad, matching src/vehicle/quad.cpp. copter.parm defaults to PLUS, which points the mixer
+# 45 degrees away from our props and crashes the aircraft seconds after takeoff. Every harness
+# here inherits copter.parm, so without this line they all flew the wrong airframe and could
+# never have caught it. Same reasoning, at length, in skyhub_core sitl/scripts/sitl.sh.
+FRAME_TYPE 1

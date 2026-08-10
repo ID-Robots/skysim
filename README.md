@@ -183,6 +183,33 @@ docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
   -v $(pwd)/build/city/tiles:/world:ro -e SKYSIM_TILES=/world skysim
 ```
 
+`docker-entrypoint.sh` turns `SKYSIM_*` variables into flags: `SKYSIM_API_BIND`,
+`SKYSIM_API_PORT`, `SKYSIM_VEHICLES`, `SKYSIM_TILES`, `SKYSIM_STREAM_RADIUS`,
+`SKYSIM_STREAM_MAX`, `SKYSIM_DT`, `SKYSIM_TIME_MODE`, `SKYSIM_SPAWN_HOME`, and
+`SKYSIM_EXTRA_ARGS` for anything not listed.
+
+**Set `SKYSIM_TIME_MODE=interactive` on a long-lived server.** The default is `strict`,
+which is what determinism and CI replays need — a barrier every tick, and an abort when
+a vehicle misses it. A server that vehicles join and leave wants the abort replaced by
+eviction, or one lagging aircraft takes the fleet down with it. Both modes barrier on
+every connected vehicle's frame; what interactive adds is wall-clock pacing and a way
+out, freezing and then despawning a vehicle that has gone quiet for `--straggler-timeout`
+(default 2 s). Match `SKYSIM_DT` to the scheduler rate the vehicles are launched with,
+too: in lockstep, physics faster than the autopilot's loop means most ticks miss their
+deadline, and while that no longer corrupts the flight it does cost wall-clock pace.
+
+**`SKYSIM_CAMERA_FPS` is the camera switch.** Without it no frames are rendered and
+the camera endpoints serve nothing, whatever else is set. With it, `SKYSIM_CAMERA_SIZE`
+(default `256x144`), `SKYSIM_CAMERA_QUALITY`, `SKYSIM_CAMERA_THREADS`,
+`SKYSIM_CAMERA_FOV`, `SKYSIM_CAMERA_PITCH` and `SKYSIM_CAMERA_RANGE` apply:
+
+```bash
+docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
+  -v $(pwd)/build/city/tiles:/world:ro -e SKYSIM_TILES=/world \
+  -e SKYSIM_CAMERA_FPS=10 -e SKYSIM_CAMERA_SIZE=256x144 skysim
+# http://localhost:8642/instances/0/camera.mjpg
+```
+
 ---
 
 ## Control plane (`--api-port`)
@@ -191,7 +218,7 @@ docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
 |----------|--------|
 | `POST /vehicles` `{"instance":N, "launch_process":true}` (both fields optional) | reserve a requested or next-free ArduPilot instance (optionally forks arducopter) → `{id, instance, json_port, mavlink_tcp}` |
 | `DELETE /vehicles/{id}` | despawn, release instance, kill managed process |
-| `GET /vehicles` | per-vehicle: connected, frozen, held_ticks, pos_ned, `midair_collisions`, `building_contacts` |
+| `GET /vehicles` | per-vehicle: connected, frozen, silent_ticks, pos_ned, `midair_collisions`, `building_contacts` |
 | `GET /metrics` | tick p50/p99 µs, straggler_events, freezes, resident_tiles |
 | `POST /mission/check` `{"waypoints_ned":[[n,e,d],...], "clearance_m":1.0}` | sweep a planned route through loaded building geometry → `{checked, clear, hits}` |
 
@@ -206,6 +233,7 @@ the dashboard.
 | `--truth-log out.csv` | Ground truth per tick — judge the physics with this, not the EKF |
 | `--record-servo` / `--replay-servo` | Deterministic input tapes for reproducible runs |
 | `--time-mode strict` | Lockstep barrier on every vehicle; aborts on a straggler (CI) |
+| `--straggler-timeout <seconds>` | interactive: silence before a vehicle is frozen out of the barrier (2 s) |
 | `--stream-radius` / `--stream-max` | City tile residency around each vehicle |
 | `--physics-threads` | Opt a single huge world into Jolt's thread pool (only worth it past ~1000 bodies) |
 | `--io-threads` | Fan the reply path across cores (helps past ~48 vehicles) |

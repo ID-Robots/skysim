@@ -33,12 +33,22 @@ run as separate `skysim` processes (sharding) for near-linear scaling.
 
 World advances at fixed `dt` (default 1/400 s; per-deployment). Modes:
 
-- **strict** (CI, replays): barrier — tick when *every* registered vehicle's next input frame
-  has arrived. Deterministic; one stalled SITL stalls the world. Timeout ⇒ abort with report.
-- **interactive** (SkyHub operators in the loop): tick on schedule. A vehicle that missed the
-  deadline gets its last PWM held for up to `k` ticks (default 3); beyond that it is **frozen**
+- **strict** (CI, replays): barrier — tick when the next input frame of every *connected*
+  vehicle has arrived. Deterministic; one stalled SITL stalls the world. Timeout ⇒ abort with
+  report. The timeout starts once something has connected: a world still waiting for its first
+  SITL is not stalled, but a fleet that has all gone silent is, and aborts rather than hanging.
+- **interactive** (SkyHub operators in the loop): the same barrier, paced to the wall clock,
+  with an exit from it instead of an abort. A vehicle that missed the deadline stalls its own
+  tick; once it has been silent for `--straggler-timeout` (default 2 s) it is **frozen**
   (kinematic hold, flagged in the API) until frames resume, and auto-despawned after a grace
-  period. Replies are sent immediately after the tick that consumed each vehicle's input.
+  period. Freezing takes it out of the barrier entirely — the fleet stops both blocking on it
+  and waiting out its share of the frame grace — while it stays polled so it can thaw.
+  Replies are sent immediately after the tick that consumed each vehicle's input.
+
+  A late vehicle is never stepped on its previous tick's PWM. ArduPilot derives its scheduler
+  rate from the timestamp we return (`adjust_frame_time(1.0 / deltat)` in SIM_JSON.cpp), so a
+  step it did not contribute to re-rates its control loop and hands it motion it never
+  commanded — it crashed every takeoff. Lateness may cost wall-clock pace, never fidelity.
 
 Spawn/despawn only ever happens at a tick boundary (step 1), so mid-step body creation never occurs.
 

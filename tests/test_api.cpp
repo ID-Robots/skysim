@@ -106,7 +106,7 @@ int main() {
         v.mavlink_tcp_port = 6060;
         v.connected = true;
         v.frozen = true;
-        v.held_ticks = 4;
+        v.silent_ticks = 4;
         v.pos_ned[0] = 1.5;
         return std::vector<VehicleInfo>{v};
     };
@@ -230,7 +230,7 @@ int main() {
         auto list = client.Get("/vehicles");
         CHECK(list && list->status == 200);
         CHECK(list && list->body.find("\"frozen\":true") != std::string::npos);
-        CHECK(list && list->body.find("\"held_ticks\":4") != std::string::npos);
+        CHECK(list && list->body.find("\"silent_ticks\":4") != std::string::npos);
 
         auto metrics = client.Get("/metrics");
         CHECK(metrics && metrics->status == 200);
@@ -267,7 +267,12 @@ int main() {
         const std::vector<uint8_t> kCanned{0xFF, 0xD8, 'p', 'i', 'x', 0xFF, 0xD9};
         ControlServer::Snapshots with_camera = snaps;
         with_camera.camera_frame = [kCanned](uint32_t id) {
-            return id == 1 ? kCanned : std::vector<uint8_t>{};
+            // sim_time_s advances per call so the MJPEG routes see each poll as a new frame;
+            // they now send a frame once and skip repeats.
+            static double t = 0.0;
+            t += 0.1;
+            return id == 1 ? skysim::render::FrameStore::Frame{kCanned, t}
+                           : skysim::render::FrameStore::Frame{};
         };
 
         ControlServer server("127.0.0.1", kCameraPort, queue, with_camera);

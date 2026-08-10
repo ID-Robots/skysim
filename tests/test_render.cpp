@@ -261,7 +261,7 @@ int main() {
         skysim::render::RenderService service(scfg);
         CHECK(service.tiles_loaded() == 1);
         CHECK(service.triangle_count() > 0);
-        CHECK(service.frame(1).empty()); // nothing published yet, so nothing to draw
+        CHECK(service.frame(1).jpeg.empty()); // nothing published yet, so nothing to draw
 
         skysim::render::RenderService::Pose pose;
         pose.vehicle_id = 1;
@@ -273,11 +273,11 @@ int main() {
         std::vector<uint8_t> frame;
         for (int i = 0; i < 200 && frame.empty(); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            frame = service.frame(1);
+            frame = service.frame(1).jpeg;
         }
         CHECK(!frame.empty());
         CHECK(frame.size() > 2 && frame[0] == 0xFF && frame[1] == 0xD8); // a real JPEG
-        CHECK(service.frame(2).empty());                                 // only the posed vehicle
+        CHECK(service.frame(2).jpeg.empty());                            // only the posed vehicle
 
         // Despawn it: the next pass must drop the frame rather than keep serving
         // a picture of a vehicle that is gone.
@@ -285,7 +285,7 @@ int main() {
         bool cleared = false;
         for (int i = 0; i < 200 && !cleared; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            cleared = service.frame(1).empty();
+            cleared = service.frame(1).jpeg.empty();
         }
         CHECK(cleared);
 
