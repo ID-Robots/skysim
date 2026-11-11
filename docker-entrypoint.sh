@@ -47,6 +47,10 @@ add_if_set SKYSIM_TIME_MODE --time-mode
 
 add_if_set SKYSIM_SPAWN_HOME --spawn-home
 
+# Simulated radio field to start with (a JSON spec file, docs/RADIO.md). A gateway can
+# also set or replace it at runtime with PUT /radio, so this is only for a fixed field.
+add_if_set SKYSIM_RADIO_SPEC --radio-spec
+
 # Camera. SKYSIM_CAMERA_FPS is the switch — without --camera-fps the render
 # service is never built and every other camera setting is inert, which is
 # exactly how a deployment ends up serving a control plane with no pictures on

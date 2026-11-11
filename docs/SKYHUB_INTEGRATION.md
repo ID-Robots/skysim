@@ -47,6 +47,10 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
 - **[S3] (later, M6) crash push**: skysim already exposes `midair_collisions` +
   `static_contacts` per vehicle in `GET /vehicles`; optionally add a webhook/SSE so the
   gateway doesn't have to poll.
+- **[S4] Simulated radio field** (done): `PUT /radio` takes a radio spec (carriers, towers,
+  coverage holes) and skysim then serves the ground truth — `GET /radio/sample`,
+  `GET /radio/grid`, and a `radio` object per vehicle in `GET /vehicles`. Model and API:
+  [`docs/RADIO.md`](RADIO.md).
 
 ### 2. skyhub_core (`sitl/` image)
 - **[C1] `scripts/sitl.sh`**: no change needed for the model (env `SITL_MODEL` already
@@ -75,6 +79,13 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
     typed alert).
 - **[G4] Keep the post-flight path untouched** — dataflash log analysis keeps working and
   cross-checks the live detection.
+- **[G5] Simulated radio** (optional): when a simulated drone is created with a simulated
+  radio spec and `SKYSIM_ENABLED` is set, the gateway may forward that spec with
+  `PUT /radio` (wrapped `{"radio": {...}}` or bare) so the field the simulated modems report
+  from is also queryable as ground truth in skysim. skysim validates it and answers 400 with
+  the offending field on a bad spec; the gateway should treat any failure there as a
+  warning, never as a failed drone creation. One skysim world holds one field, so the last
+  spec PUT wins.
 
 ### 4. skyhub_dashboard (optional polish)
 - **[D1]** Toast/banner on the new `crash` SocketIO event (PrimeNG `MessageService`, same

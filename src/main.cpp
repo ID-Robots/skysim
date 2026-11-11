@@ -4,16 +4,20 @@
 // --canned keeps the M1 kinematic reply path; --replay-servo re-runs a recorded input tape.
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <csignal>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -23,6 +27,8 @@
 #include "core/thread_pool.h"
 #include "core/world.h"
 #include "protocol/packets.h"
+#include "radio/radio_model.h"
+#include "radio/radio_spec.h"
 #include "render/render_service.h"
 #include "protocol/udp_endpoint.h"
 #include "terrain/tile_streamer.h"
@@ -89,6 +95,8 @@ struct Options {
     // the anchor used to cook the building world; the old default sat ~1.7 km away.
     std::string spawn_home = "42.1403890,24.7645490,0,0";
     std::string spawn_defaults;
+    // Simulated radio field loaded at startup (docs/RADIO.md); PUT /radio can replace it later.
+    std::string radio_spec;
     double spacing_m = 5.0; // east spacing between spawn positions (fleet airspace layout)
 };
 
@@ -193,6 +201,8 @@ Options parse_args(int argc, char **argv) {
             o.spawn_home = need_value("--spawn-home");
         } else if (std::strcmp(argv[i], "--spawn-defaults") == 0) {
             o.spawn_defaults = need_value("--spawn-defaults");
+        } else if (std::strcmp(argv[i], "--radio-spec") == 0) {
+            o.radio_spec = need_value("--radio-spec");
         } else if (std::strcmp(argv[i], "--spacing") == 0) {
             o.spacing_m = std::atof(need_value("--spacing"));
         } else {
@@ -225,6 +235,75 @@ Options parse_args(int argc, char **argv) {
 
 std::atomic<bool> g_stop{false};
 void on_signal(int) { g_stop.store(true); }
+
+// --radio-spec: the radio field a deployment starts with. Any problem stops startup with the
+// bad-option exit code: a survey flown against a field that silently failed to load would
+// read as "no service" everywhere rather than as a configuration error.
+bool load_radio_spec(const std::string &path, skysim::radio::RadioField &field) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        std::fprintf(stderr, "skysim: cannot read --radio-spec %s\n", path.c_str());
+        return false;
+    }
+    std::stringstream text;
+    text << in.rdbuf();
+    skysim::radio::SpecResult parsed = skysim::radio::parse_radio_spec(text.str());
+    if (!parsed.spec) {
+        std::fprintf(stderr, "skysim: --radio-spec %s: %s\n", path.c_str(), parsed.error.c_str());
+        return false;
+    }
+    size_t towers = 0;
+    for (const auto &c : parsed.spec->carriers) {
+        towers += c.towers.size();
+    }
+    std::printf("skysim: radio field from %s: %zu carrier(s), %zu tower(s), %zu hole(s)\n", path.c_str(),
+                parsed.spec->carriers.size(), towers, parsed.spec->holes.size());
+    field.set(std::make_shared<const skysim::radio::RadioModel>(std::move(*parsed.spec)));
+    return true;
+}
+
+// Where the world's NED origin is on the earth, for placing vehicles in the radio field:
+// --spawn-home's lat,lon, with its altitude as the ground's height AMSL (0 when omitted).
+// It is the same point every managed SITL is given as --home.
+//
+// Every field must be a whole number (spaces around it allowed): a prefix parse would read
+// "47,8x,500" as 47,8 at ground 0 and place every vehicle with no warning. Values are
+// range-checked too, since from_chars reads "nan" and "inf" as numbers.
+std::optional<skysim::radio::GeoAnchor> spawn_anchor(const std::string &home) {
+    std::vector<double> fields; // lat, lon[, alt[, yaw]]
+    size_t start = 0;
+    while (true) {
+        const size_t comma = home.find(',', start);
+        std::string_view field(home);
+        field = field.substr(start, comma == std::string::npos ? std::string_view::npos : comma - start);
+        while (!field.empty() && field.front() == ' ') {
+            field.remove_prefix(1);
+        }
+        while (!field.empty() && field.back() == ' ') {
+            field.remove_suffix(1);
+        }
+        double v = 0.0;
+        const auto parsed = std::from_chars(field.data(), field.data() + field.size(), v);
+        if (field.empty() || parsed.ec != std::errc() || parsed.ptr != field.data() + field.size() ||
+            !std::isfinite(v) || fields.size() == 4) {
+            return std::nullopt;
+        }
+        fields.push_back(v);
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    if (fields.size() < 2) {
+        return std::nullopt;
+    }
+    const skysim::radio::GeoAnchor anchor{fields[0], fields[1], fields.size() > 2 ? fields[2] : 0.0};
+    if (std::fabs(anchor.lat_deg) > 90.0 || std::fabs(anchor.lon_deg) > 180.0 ||
+        std::fabs(anchor.ground_amsl_m) > 10000.0) {
+        return std::nullopt;
+    }
+    return anchor;
+}
 
 // One vehicle: endpoint (null when replaying) + body + motors + straggler bookkeeping.
 struct VehicleSlot {
@@ -1045,6 +1124,12 @@ int main(int argc, char **argv) {
     std::signal(SIGTERM, on_signal);
     std::signal(SIGPIPE, SIG_IGN);
 
+    // Before anything heavier starts, so a bad spec fails the launch at once.
+    auto radio_field = std::make_shared<skysim::radio::RadioField>();
+    if (!opt.radio_spec.empty() && !load_radio_spec(opt.radio_spec, *radio_field)) {
+        return 2;
+    }
+
     skysim::core::WorldConfig wcfg;
     wcfg.dt_s = opt.dt_s;
     wcfg.wind_steady_ned = opt.wind_ned;
@@ -1180,8 +1265,16 @@ int main(int argc, char **argv) {
         snaps.camera_frame = [&app](uint32_t id) {
             return app.render_service ? app.render_service->frame(id) : skysim::render::FrameStore::Frame{};
         };
+        skysim::api::ControlServer::RadioConfig radio_cfg;
+        radio_cfg.field = radio_field;
+        radio_cfg.home = spawn_anchor(opt.spawn_home);
+        if (!radio_cfg.home) {
+            std::fprintf(stderr,
+                         "skysim: --spawn-home %s is not lat,lon[,alt,yaw]: vehicles carry no radio values\n",
+                         opt.spawn_home.c_str());
+        }
         api = std::make_unique<skysim::api::ControlServer>(opt.api_bind, opt.api_port, app.queue,
-                                                           std::move(snaps));
+                                                           std::move(snaps), std::move(radio_cfg));
     }
 
     int rc = 0;

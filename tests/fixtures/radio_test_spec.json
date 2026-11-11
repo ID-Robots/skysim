@@ -1,0 +1,11 @@
+{"radio": {"seed": 7, "shadowing_sigma_db": 6.0, "shadow_corr_m": 60.0, "noise_floor_dbm": -104.0,
+  "modems": ["SimTel A", "SimTel B"],
+  "carriers": [
+    {"name": "SimTel A", "mcc_mnc": "00101", "rat": "LTE", "band": 20, "earfcn": 6300,
+     "towers": [
+       {"id": "A1", "lat": 47.0000, "lon": 8.0000, "height_m": 30, "rsrp_1km_dbm": -75, "azimuth_deg": null, "beamwidth_deg": 65, "downtilt_deg": 6, "pci": 101},
+       {"id": "A2", "lat": 47.0100, "lon": 8.0150, "height_m": 25, "rsrp_1km_dbm": -78, "azimuth_deg": 225, "beamwidth_deg": 65, "downtilt_deg": 4, "pci": 102}]},
+    {"name": "SimTel B", "mcc_mnc": "00102", "rat": "LTE", "band": 3, "earfcn": 1300,
+     "towers": [
+       {"id": "B1", "lat": 46.9950, "lon": 8.0100, "height_m": 35, "rsrp_1km_dbm": -80, "azimuth_deg": 0, "beamwidth_deg": 90, "downtilt_deg": 5, "pci": 201}]}],
+  "holes": [{"lat": 47.0040, "lon": 8.0060, "radius_m": 150, "extra_loss_db": 35}]}}

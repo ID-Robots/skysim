@@ -185,8 +185,8 @@ docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
 
 `docker-entrypoint.sh` turns `SKYSIM_*` variables into flags: `SKYSIM_API_BIND`,
 `SKYSIM_API_PORT`, `SKYSIM_VEHICLES`, `SKYSIM_TILES`, `SKYSIM_STREAM_RADIUS`,
-`SKYSIM_STREAM_MAX`, `SKYSIM_DT`, `SKYSIM_TIME_MODE`, `SKYSIM_SPAWN_HOME`, and
-`SKYSIM_EXTRA_ARGS` for anything not listed.
+`SKYSIM_STREAM_MAX`, `SKYSIM_DT`, `SKYSIM_TIME_MODE`, `SKYSIM_SPAWN_HOME`,
+`SKYSIM_RADIO_SPEC`, and `SKYSIM_EXTRA_ARGS` for anything not listed.
 
 **Set `SKYSIM_TIME_MODE=interactive` on a long-lived server.** The default is `strict`,
 which is what determinism and CI replays need — a barrier every tick, and an abort when
@@ -218,13 +218,21 @@ docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
 |----------|--------|
 | `POST /vehicles` `{"instance":N, "launch_process":true}` (both fields optional) | reserve a requested or next-free ArduPilot instance (optionally forks arducopter) → `{id, instance, json_port, mavlink_tcp}` |
 | `DELETE /vehicles/{id}` | despawn, release instance, kill managed process |
-| `GET /vehicles` | per-vehicle: connected, frozen, silent_ticks, pos_ned, `midair_collisions`, `building_contacts` |
+| `GET /vehicles` | per-vehicle: connected, frozen, silent_ticks, pos_ned, `midair_collisions`, `building_contacts`; `radio` when a radio field is set |
 | `GET /metrics` | tick p50/p99 µs, straggler_events, freezes, resident_tiles |
 | `POST /mission/check` `{"waypoints_ned":[[n,e,d],...], "clearance_m":1.0}` | sweep a planned route through loaded building geometry → `{checked, clear, hits}` |
+| `PUT` / `GET` / `DELETE /radio` | set, read or clear the simulated 4G radio field (carriers, towers, coverage holes) |
+| `GET /radio/sample?lat&lon&alt_amsl` | RSRP / RSRQ / SINR / RSSI, serving cell and link quality per carrier at a point |
+| `GET /radio/grid?bbox&alt_rel&step_m&carrier` | the same as a ground-truth raster over an area (≤ 250 000 cells) |
 
 All mutations execute at tick boundaries; reads come from per-tick snapshots. The SkyHub
 gateway polls `GET /vehicles` and, on a collision-counter increase, emits a crash alert to
 the dashboard.
+
+The radio field is a deterministic LTE model — path loss that eases with altitude, sector
+and vertical antenna patterns, correlated shadowing, coverage holes, same-carrier
+interference — for developing network-quality surveys in simulation. Model, spec format and
+API: [`docs/RADIO.md`](docs/RADIO.md).
 
 ## Useful flags
 
@@ -238,6 +246,7 @@ the dashboard.
 | `--physics-threads` | Opt a single huge world into Jolt's thread pool (only worth it past ~1000 bodies) |
 | `--io-threads` | Fan the reply path across cores (helps past ~48 vehicles) |
 | `--canned` | M1 protocol-debug mode |
+| `--radio-spec field.json` | Start with a simulated radio field ([`docs/RADIO.md`](docs/RADIO.md)); `PUT /radio` can replace it |
 
 Live acceptance harnesses (need `ARDUPILOT_ROOT`; use `--base-instance 1`+ if something
 already owns the instance-0 SITL ports):
@@ -283,6 +292,7 @@ src/core/       frames.h (NED/FRD <-> Jolt), world.cpp (the ONLY Jolt-aware TU),
 src/vehicle/    motor lag + X-quad mixer + instance allocator / process manager
 src/terrain/    OBJ -> MeshShape cooker + proximity tile streamer
 src/api/        REST control plane (cpp-httplib)
+src/radio/      simulated 4G radio field: spec validation + deterministic RSRP/SINR model
 src/render/     threaded software rasteriser + JPEG/MJPEG camera feed per vehicle
 tools/cooker/   pretile.py (demo city) + osm_buildings.py (real city) + tile_cooker CLI
 tools/bench/    gated world, protocol, and UDP reply-path performance benchmarks

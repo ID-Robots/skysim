@@ -71,10 +71,19 @@ add_library(skysim_vehicle STATIC
 target_include_directories(skysim_vehicle PUBLIC src)
 target_compile_options(skysim_vehicle PRIVATE -Wall -Wextra -Wshadow)
 
+# --- simulated 4G radio field (no Jolt, no HTTP; docs/RADIO.md) -------------------------------
+add_library(skysim_radio STATIC
+    src/radio/json.cpp
+    src/radio/radio_spec.cpp
+    src/radio/radio_model.cpp
+)
+target_include_directories(skysim_radio PUBLIC src)
+target_compile_options(skysim_radio PRIVATE -Wall -Wextra -Wshadow)
+
 # --- control plane (M4) -----------------------------------------------------------------------
 add_library(skysim_api STATIC src/api/control_server.cpp)
 target_include_directories(skysim_api PUBLIC src)
-target_link_libraries(skysim_api PUBLIC skysim_vehicle Threads::Threads PRIVATE httplib::httplib)
+target_link_libraries(skysim_api PUBLIC skysim_vehicle skysim_radio Threads::Threads PRIVATE httplib::httplib)
 target_compile_options(skysim_api PRIVATE -Wall -Wextra -Wshadow)
 
 # --- core: Jolt world (the only Jolt consumer above tools/) ----------------------------------
@@ -184,6 +193,18 @@ target_link_libraries(test_api PRIVATE skysim_api httplib::httplib)
 target_compile_options(test_api PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME api COMMAND test_api)
 
+add_executable(test_radio tests/test_radio.cpp)
+target_link_libraries(test_radio PRIVATE skysim_radio Threads::Threads)
+target_compile_definitions(test_radio PRIVATE SKYSIM_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_compile_options(test_radio PRIVATE -Wall -Wextra -Wshadow)
+add_test(NAME radio COMMAND test_radio)
+
+add_executable(test_radio_api tests/test_radio_api.cpp)
+target_link_libraries(test_radio_api PRIVATE skysim_api httplib::httplib)
+target_compile_definitions(test_radio_api PRIVATE SKYSIM_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_compile_options(test_radio_api PRIVATE -Wall -Wextra -Wshadow)
+add_test(NAME radio_api COMMAND test_radio_api)
+
 add_executable(test_thread_pool tests/test_thread_pool.cpp)
 target_include_directories(test_thread_pool PRIVATE src)
 target_link_libraries(test_thread_pool PRIVATE Threads::Threads)
@@ -196,7 +217,7 @@ target_compile_options(test_streamer PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME streamer COMMAND test_streamer)
 
 set_tests_properties(
-    packets json frames quad world collision endpoint manager api thread_pool streamer
+    packets json frames quad world collision endpoint manager api radio radio_api thread_pool streamer
     PROPERTIES LABELS "unit"
 )
 

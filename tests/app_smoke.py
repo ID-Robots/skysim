@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """App-level smoke of the skysim binary (ctest 'app_smoke'): exercises main.cpp's replay,
-canned, strict-physics, REST, strict-abort, and bad-args paths without any real SITL.
+canned, strict-physics, REST, radio field, strict-abort, and bad-args paths without any real SITL.
 
-Usage: app_smoke.py <path-to-skysim>   (instances 91..95 / ports 189xx: far from live use)
+Usage: app_smoke.py <path-to-skysim>   (instances 91..95, 97 / ports 189xx: far from live use)
 """
 from __future__ import annotations
 
@@ -134,6 +134,50 @@ def case_rest() -> None:
         check(stop(proc) == 0, "rest clean shutdown")
 
 
+def case_radio(tmp: str) -> None:
+    """--radio-spec loads a field at startup; vehicles carry it; PUT/DELETE /radio replace it."""
+    spec_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "radio_test_spec.json")
+    port = 18647
+    proc = subprocess.Popen([SIM, "--vehicles", "0", "--base-instance", "97",
+                             "--time-mode", "interactive", "--api-port", str(port),
+                             "--spawn-home", "47.0, 8.0, 0, 0", "--radio-spec", spec_path])
+    time.sleep(1)
+    try:
+        check(api(port, "GET", "/radio")["radio"]["seed"] == 7, "radio spec loaded at startup")
+        api(port, "POST", "/vehicles", b"{}")
+        vehicle = api(port, "GET", "/vehicles")[0]
+        cell = vehicle["radio"]["cell"]
+        check(cell["source"] == "sim" and cell["operator"] == "SimTel A", "vehicle carries the primary modem")
+        check(abs(vehicle["radio"]["lat"] - 47.0) < 1e-4, "vehicle radio sampled at its truth position")
+        sample = api(port, "GET", "/radio/sample?lat=47&lon=8.002&alt_amsl=60")
+        check(sample["cell"]["cell_id"] == "00101-A1" and sample["cell"]["registered"], "radio sample served")
+        check(api(port, "DELETE", "/radio")["cleared"], "radio cleared")
+        check("radio" not in api(port, "GET", "/vehicles")[0], "no radio without a spec")
+    finally:
+        check(stop(proc) == 0, "radio clean shutdown")
+
+    # A home that only half parses must not place vehicles anywhere: no radio, and a warning.
+    proc = subprocess.Popen([SIM, "--vehicles", "0", "--base-instance", "97",
+                             "--time-mode", "interactive", "--api-port", str(port),
+                             "--spawn-home", "47,8x,500,0", "--radio-spec", spec_path],
+                            stderr=subprocess.PIPE, text=True)
+    time.sleep(1)
+    try:
+        api(port, "POST", "/vehicles", b"{}")
+        check("radio" not in api(port, "GET", "/vehicles")[0], "no radio without a usable home")
+    finally:
+        check(stop(proc) == 0, "bad-home clean shutdown")
+    err = proc.stderr.read() if proc.stderr else ""
+    check("--spawn-home 47,8x,500,0 is not lat,lon" in err, "bad home reported at startup")
+
+    bad = os.path.join(tmp, "bad_radio.json")
+    with open(bad, "w") as f:
+        f.write('{"radio": {"seed": 1}}')
+    for path in (bad, os.path.join(tmp, "missing_radio.json")):
+        rc = subprocess.run([SIM, "--radio-spec", path], capture_output=True, text=True, timeout=30)
+        check(rc.returncode == 2 and "--radio-spec" in rc.stderr, f"bad radio spec rejected: {path}")
+
+
 def case_strict_abort() -> None:
     proc = subprocess.Popen([SIM, "--vehicles", "2", "--base-instance", "94",
                              "--strict-timeout", "1"],
@@ -168,6 +212,7 @@ def case_bad_args() -> None:
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="skysim_smoke_") as tmp:
         case_replay(tmp)
+        case_radio(tmp)
     case_canned()
     case_physics_udp()
     case_rest()
