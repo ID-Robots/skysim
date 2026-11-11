@@ -71,6 +71,15 @@ add_library(skysim_vehicle STATIC
 target_include_directories(skysim_vehicle PUBLIC src)
 target_compile_options(skysim_vehicle PRIVATE -Wall -Wextra -Wshadow)
 
+# --- simulated 4G radio field (no Jolt, no HTTP; docs/RADIO.md) -------------------------------
+add_library(skysim_radio STATIC
+    src/radio/json.cpp
+    src/radio/radio_spec.cpp
+    src/radio/radio_model.cpp
+)
+target_include_directories(skysim_radio PUBLIC src)
+target_compile_options(skysim_radio PRIVATE -Wall -Wextra -Wshadow)
+
 # --- control plane (M4) -----------------------------------------------------------------------
 add_library(skysim_api STATIC src/api/control_server.cpp)
 target_include_directories(skysim_api PUBLIC src)
