@@ -126,6 +126,10 @@ class ControlServer {
 
     // Largest raster GET /radio/grid computes: rows × columns × carriers.
     static constexpr size_t kMaxGridCells = 250000;
+    // Rasters computed at once. One at the cap costs about a core-second; the HTTP pool is
+    // sized for camera streams, and without a bound a burst of grid requests could take
+    // every core the physics tick needs. Requests past it get 503.
+    static constexpr int kMaxGridsInFlight = 2;
 
     // Binds bind_addr:port and serves on its own thread. Throws on bind failure (startup
     // only). Use "0.0.0.0" when the SkyHub gateway calls in from a docker bridge network.

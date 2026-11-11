@@ -12,6 +12,7 @@
 
 #include "api/control_server.h"
 #include "radio/radio_model.h"
+#include "radio/json.h"
 #include "radio/radio_spec.h"
 
 namespace {
@@ -184,6 +185,52 @@ int main() {
     // 1° x 1° at 250 m is ~445 x ~304 = ~135k cells per carrier.
     CHECK(has(client.Get("/radio/grid?bbox=8,47,9,48&alt_rel=30&step_m=250&carrier=SimTel%20A"), 200));
     CHECK(has(client.Get("/radio/grid?bbox=8,47,9,48&alt_rel=30&step_m=250"), 400, "grid too large"));
+
+    // A query value that is not UTF-8 is quoted back as U+FFFD, so the error is still JSON.
+    auto not_utf8 = client.Get("/radio/grid?bbox=8,47,8.01,47.01&alt_rel=30&carrier=%FF");
+    CHECK(has(not_utf8, 400, R"(carrier \"\ufffd\" is not in the radio spec)"));
+    std::string json_error;
+    CHECK(not_utf8 && radio::json::parse(not_utf8->body, json_error).has_value());
+
+    // At most kMaxGridsInFlight rasters compute at once; the rest are told to come back.
+    // Rounds of simultaneous near-cap requests until one is turned away.
+    {
+        int ok = 0;
+        int busy = 0;
+        int other = 0;
+        for (int round = 0; round < 20 && busy == 0; ++round) {
+            std::atomic<int> r_ok{0};
+            std::atomic<int> r_busy{0};
+            std::atomic<int> r_other{0};
+            std::vector<std::thread> burst;
+            for (int k = 0; k < 8; ++k) {
+                burst.emplace_back([&] {
+                    httplib::Client bc("127.0.0.1", kPort);
+                    bc.set_read_timeout(60, 0);
+                    // ~233k cells: just under the cap, so each takes as long as one can.
+                    auto r = bc.Get("/radio/grid?bbox=8,47,9,48&alt_rel=30&step_m=190&carrier=SimTel%20A");
+                    if (has(r, 200, "\"layers\"")) {
+                        ++r_ok;
+                    } else if (has(r, 503, "grids already computing")) {
+                        ++r_busy;
+                    } else {
+                        ++r_other;
+                    }
+                });
+            }
+            for (auto &t : burst) {
+                t.join();
+            }
+            ok += r_ok.load();
+            busy += r_busy.load();
+            other += r_other.load();
+        }
+        CHECK(busy > 0);
+        CHECK(ok >= ControlServer::kMaxGridsInFlight);
+        CHECK(other == 0);
+        // Every slot came back.
+        CHECK(has(client.Get("/radio/grid?bbox=8,47,8.01,47.01&alt_rel=30"), 200));
+    }
 
     // --- vehicles carry the field at their truth position. ---
     auto list = client.Get("/vehicles");

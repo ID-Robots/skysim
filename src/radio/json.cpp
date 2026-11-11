@@ -3,8 +3,10 @@
 #include "radio/json.h"
 
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <unordered_set>
 
 namespace skysim::radio::json {
 
@@ -21,6 +23,42 @@ const Value *Value::find(std::string_view key) const {
 }
 
 namespace {
+
+// Length of the well-formed UTF-8 sequence starting at s[0] (n bytes available), or 0 when
+// it is not one: a stray continuation byte, an overlong form, a surrogate, past U+10FFFF, or
+// cut short. Names a spec carries are echoed in every response, so they must be text.
+size_t utf8_length(const unsigned char *s, size_t n) {
+    const unsigned char c = s[0];
+    if (c < 0x80) {
+        return 1;
+    }
+    size_t len = 0;
+    uint32_t cp = 0;
+    if (c >= 0xC2 && c <= 0xDF) {
+        len = 2;
+        cp = c & 0x1Fu;
+    } else if (c >= 0xE0 && c <= 0xEF) {
+        len = 3;
+        cp = c & 0x0Fu;
+    } else if (c >= 0xF0 && c <= 0xF4) {
+        len = 4;
+        cp = c & 0x07u;
+    } else {
+        return 0;
+    }
+    if (n < len) {
+        return 0;
+    }
+    for (size_t i = 1; i < len; ++i) {
+        if ((s[i] & 0xC0u) != 0x80u) {
+            return 0;
+        }
+        cp = (cp << 6) | (s[i] & 0x3Fu);
+    }
+    const bool overlong = (len == 3 && cp < 0x800) || (len == 4 && cp < 0x10000);
+    const bool surrogate = cp >= 0xD800 && cp <= 0xDFFF;
+    return overlong || surrogate || cp > 0x10FFFF ? 0 : len;
+}
 
 class Parser {
   public:
@@ -101,6 +139,9 @@ class Parser {
             ++pos_;
             return true;
         }
+        // A set, not a scan of the keys so far: a large body of distinct keys must not cost
+        // a quadratic number of comparisons on a control-plane thread.
+        std::unordered_set<std::string> seen;
         while (true) {
             skip_space();
             if (peek() != '"') {
@@ -111,7 +152,7 @@ class Parser {
             if (!string(key)) {
                 return false;
             }
-            if (out.find(key) != nullptr) {
+            if (!seen.insert(key).second) {
                 fail("duplicate key");
                 return false;
             }
@@ -264,6 +305,19 @@ class Parser {
                 fail("control character in string");
                 return false;
             }
+            if (static_cast<unsigned char>(c) >= 0x80) {
+                const size_t len =
+                    utf8_length(reinterpret_cast<const unsigned char *>(text_.data()) + pos_ - 1,
+                                text_.size() - pos_ + 1);
+                if (len == 0) {
+                    --pos_;
+                    fail("invalid UTF-8 in string");
+                    return false;
+                }
+                out.append(text_.substr(pos_ - 1, len));
+                pos_ += len - 1;
+                continue;
+            }
             if (c != '\\') {
                 out += c;
                 continue;
@@ -372,7 +426,21 @@ std::optional<Value> parse(std::string_view text, std::string &error) {
 
 void append_string(std::string &out, std::string_view s) {
     out += '"';
-    for (const char c : s) {
+    for (size_t i = 0; i < s.size(); ++i) {
+        const char c = s[i];
+        if (static_cast<unsigned char>(c) >= 0x80) {
+            // Text that is not UTF-8 (a query parameter echoed in an error, say) is replaced
+            // byte by byte, so the response stays valid JSON whatever it quotes.
+            const size_t len =
+                utf8_length(reinterpret_cast<const unsigned char *>(s.data()) + i, s.size() - i);
+            if (len == 0) {
+                out += "\\ufffd";
+            } else {
+                out.append(s.substr(i, len));
+                i += len - 1;
+            }
+            continue;
+        }
         switch (c) {
         case '"':
             out += "\\\"";
@@ -411,11 +479,13 @@ void append_number(std::string &out, double v) {
 }
 
 void append_fixed(std::string &out, std::optional<double> v, int decimals) {
-    if (!v.has_value()) {
+    // JSON has no spelling for NaN or infinity: a value that is not a number is not reported.
+    if (!v.has_value() || !std::isfinite(*v)) {
         out += "null";
         return;
     }
-    char buf[48];
+    // Room for any finite double at the precisions used here (DBL_MAX is 309 digits).
+    char buf[352];
     std::snprintf(buf, sizeof(buf), "%.*f", decimals, *v);
     out += buf;
 }

@@ -102,6 +102,8 @@ LinkQuality classify(const CarrierSample &s);
 // Immutable once built, so any number of threads may sample one concurrently.
 class RadioModel {
   public:
+    // Throws std::invalid_argument for a spec the model cannot evaluate: no carriers, a
+    // carrier without towers, or shadow_corr_m below 1 m. parse_radio_spec never yields one.
     explicit RadioModel(RadioSpec spec);
 
     const RadioSpec &spec() const { return spec_; }

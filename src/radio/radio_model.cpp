@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <numbers>
+#include <stdexcept>
 #include <utility>
 
 #include "radio/json.h"
@@ -21,6 +22,31 @@ constexpr double kRadToDeg = 180.0 / std::numbers::pi;
 constexpr double kMinCosLat = 1e-9;
 
 double round_to(double v, double unit) { return std::round(v / unit) * unit; }
+
+// An angle in degrees brought into [-180, 180], whatever its magnitude.
+double wrap_degrees(double d) {
+    d = std::fmod(d, 360.0);
+    if (d > 180.0) {
+        d -= 360.0;
+    } else if (d < -180.0) {
+        d += 360.0;
+    }
+    return d;
+}
+
+// floor(g) as a shadowing-grid index. Anything a valid spec and a real position produce is
+// far inside int64 (|x| <= half the equator, corr >= 1 m); this only keeps a pathological
+// input — a NaN position — from an out-of-range conversion, which is undefined behaviour.
+int64_t grid_index(double g) {
+    constexpr double kLimit = 1e15;
+    if (!(g > -kLimit)) { // also NaN
+        return static_cast<int64_t>(-kLimit);
+    }
+    if (!(g < kLimit)) {
+        return static_cast<int64_t>(kLimit);
+    }
+    return static_cast<int64_t>(std::floor(g));
+}
 
 } // namespace
 
@@ -71,7 +97,7 @@ Position position_from_ned(const GeoAnchor &anchor, const double pos_ned[3]) {
     const double cos_lat = std::max(kMinCosLat, std::cos(anchor.lat_deg * kDegToRad));
     Position p;
     p.lat_deg = anchor.lat_deg + pos_ned[0] / kEarthRadiusM * kRadToDeg;
-    p.lon_deg = anchor.lon_deg + pos_ned[1] / (kEarthRadiusM * cos_lat) * kRadToDeg;
+    p.lon_deg = wrap_degrees(anchor.lon_deg + pos_ned[1] / (kEarthRadiusM * cos_lat) * kRadToDeg);
     p.alt_rel_m = -pos_ned[2];
     p.alt_amsl_m = anchor.ground_amsl_m + p.alt_rel_m;
     return p;
@@ -105,12 +131,22 @@ LinkQuality classify(const CarrierSample &s) {
 }
 
 RadioModel::RadioModel(RadioSpec spec) : spec_(std::move(spec)) {
-    // The frame is anchored on the first tower of the first carrier. A spec from
-    // parse_radio_spec always has one; a hand-built one without gets the origin instead.
-    if (!spec_.carriers.empty() && !spec_.carriers.front().towers.empty()) {
-        lat0_deg_ = spec_.carriers.front().towers.front().lat_deg;
-        lon0_deg_ = spec_.carriers.front().towers.front().lon_deg;
+    // What sampling relies on. parse_radio_spec guarantees all of it; a hand-built spec is
+    // refused here rather than indexing an empty tower list later.
+    if (spec_.carriers.empty()) {
+        throw std::invalid_argument("radio spec has no carriers");
     }
+    for (const Carrier &c : spec_.carriers) {
+        if (c.towers.empty()) {
+            throw std::invalid_argument("radio carrier \"" + c.name + "\" has no towers");
+        }
+    }
+    if (!(spec_.shadow_corr_m >= 1.0)) {
+        throw std::invalid_argument("radio spec shadow_corr_m must be at least 1 m");
+    }
+    // The frame is anchored on the first tower of the first carrier.
+    lat0_deg_ = spec_.carriers.front().towers.front().lat_deg;
+    lon0_deg_ = spec_.carriers.front().towers.front().lon_deg;
     cos_lat0_ = std::max(kMinCosLat, std::cos(lat0_deg_ * kDegToRad));
 
     for (const Carrier &c : spec_.carriers) {
@@ -152,12 +188,7 @@ std::optional<size_t> RadioModel::carrier_index(const std::string &name) const {
 
 void RadioModel::to_local(double lat_deg, double lon_deg, double &x_east_m, double &y_north_m) const {
     // Δlon taken the short way round, so a field straddling the antimeridian stays local.
-    double dlon = lon_deg - lon0_deg_;
-    if (dlon > 180.0) {
-        dlon -= 360.0;
-    } else if (dlon < -180.0) {
-        dlon += 360.0;
-    }
+    const double dlon = wrap_degrees(lon_deg - lon0_deg_);
     x_east_m = kEarthRadiusM * dlon * kDegToRad * cos_lat0_;
     y_north_m = kEarthRadiusM * (lat_deg - lat0_deg_) * kDegToRad;
 }
@@ -166,12 +197,10 @@ double RadioModel::shadowing_db(size_t carrier_index, double x_east_m, double y_
     // Step 5: grid of shadow_corr_m cells; ix = floor(x / corr), fractional part = weight.
     const double gx = x_east_m / spec_.shadow_corr_m;
     const double gy = y_north_m / spec_.shadow_corr_m;
-    const double fx0 = std::floor(gx);
-    const double fy0 = std::floor(gy);
-    const auto ix = static_cast<int64_t>(fx0);
-    const auto iy = static_cast<int64_t>(fy0);
-    const double fx = gx - fx0;
-    const double fy = gy - fy0;
+    const int64_t ix = grid_index(gx);
+    const int64_t iy = grid_index(gy);
+    const double fx = gx - static_cast<double>(ix);
+    const double fy = gy - static_cast<double>(iy);
     const uint64_t c = carrier_index;
     const uint64_t seed = spec_.seed;
     const double g = shadow_node(seed, ix, iy, c) * (1.0 - fx) * (1.0 - fy) +
@@ -337,12 +366,17 @@ std::string sample_json(const RadioModel &model, const Position &p) {
         return std::nullopt;
     };
 
-    // Callers bound the inputs (the API validates ranges; a vehicle is where physics put it),
-    // so the fixed-point fields fit with room to spare.
-    char buf[256];
-    std::snprintf(buf, sizeof(buf), R"({"lat":%.7f,"lon":%.7f,"alt_rel":%.2f,"alt_amsl":%.2f,"link":")",
-                  p.lat_deg, p.lon_deg, p.alt_rel_m, p.alt_amsl_m);
-    std::string out = buf;
+    // append_fixed writes null for a non-finite coordinate (a vehicle whose state blew up),
+    // so the response stays valid JSON; such a position samples as unregistered.
+    std::string out = R"({"lat":)";
+    json::append_fixed(out, p.lat_deg, 7);
+    out += R"(,"lon":)";
+    json::append_fixed(out, p.lon_deg, 7);
+    out += R"(,"alt_rel":)";
+    json::append_fixed(out, p.alt_rel_m, 2);
+    out += R"(,"alt_amsl":)";
+    json::append_fixed(out, p.alt_amsl_m, 2);
+    out += R"(,"link":")";
     out += to_string(classify(samples[modems.front()]));
     out += R"(","cell":)";
     append_cell(out, model, modems.front(), samples[modems.front()], "primary");

@@ -44,34 +44,35 @@ Code: `src/radio/` (no Jolt, no HTTP). Tests: `tests/test_radio.cpp` (model, spe
 ```
 
 Accepted wrapped (`{"radio": {...}}`, so a whole simulator-link object can be passed through
-with its other keys ignored) or bare. Unknown keys are ignored. Every number must be finite;
-JSON has no NaN or infinity, and a literal too large or too small for a double is refused.
+with its other keys ignored) or bare. Unknown keys are ignored. Strings must be UTF-8. Every
+number is range-checked — the bounds below sit far outside anything physical, but a finite
+yet absurd value (a tower at +3000 dBm) would otherwise overflow the model to infinity.
 
 | Field | Type | Rule |
 |---|---|---|
 | `seed` | integer | required, 0 … 2⁶⁴−1 |
-| `shadowing_sigma_db` | number | required, ≥ 0 |
-| `shadow_corr_m` | number | required, ≥ 1 |
-| `noise_floor_dbm` | number | required |
+| `shadowing_sigma_db` | number | required, 0 … 30 |
+| `shadow_corr_m` | number | required, 1 … 100 000 |
+| `noise_floor_dbm` | number | required, −200 … 0 |
 | `modems` | list of carrier names | optional; default: every carrier in spec order. 1–8 names, each a carrier of this spec, no repeats. `[0]` is the primary modem |
 | `carriers` | list | required, 1–8 |
-| `carriers[].name` | string | required, 1–64 characters, unique. Reported as `operator` |
+| `carriers[].name` | string | required, 1–64 bytes, unique. Reported as `operator` |
 | `carriers[].mcc_mnc` | string \| null | optional, 5 or 6 digits |
 | `carriers[].rat` | string \| null | optional, `LTE`, `NR`, `WCDMA` or `GSM` |
 | `carriers[].band`, `earfcn` | integer \| null | optional, ≥ 0 |
 | `carriers[].towers` | list | required, ≥ 1; at most **64 towers across all carriers** |
-| `towers[].id` | string | required, 1–64 characters, unique within its carrier |
+| `towers[].id` | string | required, 1–64 bytes, unique within its carrier |
 | `towers[].lat`, `lon` | number | required, degrees, within ±90 / ±180 |
-| `towers[].height_m` | number | required; antenna height on the same axis as the vehicle's `alt_amsl` (see below) |
-| `towers[].rsrp_1km_dbm` | number | required; RSRP 1 km out on the main beam |
-| `towers[].azimuth_deg` | number \| null | optional; null or absent = omnidirectional |
+| `towers[].height_m` | number | required, −1000 … 10 000; antenna height on the same axis as the vehicle's `alt_amsl` (see below) |
+| `towers[].rsrp_1km_dbm` | number | required, −200 … 0; RSRP 1 km out on the main beam |
+| `towers[].azimuth_deg` | number \| null | optional, −360 … 360; null or absent = omnidirectional |
 | `towers[].beamwidth_deg` | number | 0 < bw ≤ 360; required when `azimuth_deg` is set |
 | `towers[].downtilt_deg` | number | required, −90 … 90 |
 | `towers[].pci` | integer \| null | optional, 0 … 1007 |
 | `holes` | list | optional, at most 64 |
 | `holes[].lat`, `lon` | number | required |
-| `holes[].radius_m` | number | required, > 0 |
-| `holes[].extra_loss_db` | number | required, ≥ 0 |
+| `holes[].radius_m` | number | required, 0 < r ≤ 100 000 |
+| `holes[].extra_loss_db` | number | required, 0 … 300 |
 
 A bad spec is refused with a 400 whose `error` names the first problem and where it is,
 e.g. `{"error":"radio.carriers[0].towers[1].beamwidth_deg: required for a sector (azimuth_deg set)"}`.
@@ -164,6 +165,8 @@ as is — or `{"radio": null}` when no field is set. `DELETE` clears it:
 
 At least one of `alt_amsl` / `alt_rel` is required. Given `alt_amsl` alone,
 `alt_rel = alt_amsl − ground_amsl`; given `alt_rel` alone, `alt_amsl = alt_rel + ground_amsl`.
+Given both, both are used as given and `ground_amsl` plays no part — the way a recorder
+holds them, a GPS altitude and a height above home that need not agree to the metre.
 Altitudes must lie within −1000 … 100 000 m.
 
 ```bash
@@ -225,7 +228,8 @@ curl 'http://127.0.0.1:8642/radio/grid?bbox=8.003,47.003,8.0045,47.0045&alt_rel=
 
 Values are null where the carrier is not registered (`quality` is then `"none"`). A request
 over **250 000 cells** (rows × columns × carriers) is refused with a 400 — raise `step_m`,
-shrink the box or pick a carrier. Even at the cap a raster takes about a second to compute.
+shrink the box or pick a carrier. At most two rasters compute at once; a request beyond that
+gets a 503 to retry, so a burst of them cannot take the cores the physics tick needs.
 
 ### `GET /vehicles`
 
@@ -238,8 +242,9 @@ truth position:
 - `alt_amsl` = the `--spawn-home` altitude field (taken as the home ground's AMSL height) +
   `alt_rel`.
 
-No field, no `radio` key. A `--spawn-home` that does not parse as `lat,lon[,alt,yaw]` leaves
-vehicles without radio values (and says so at startup).
+No field, no `radio` key. A `--spawn-home` that does not parse as `lat,lon[,alt,yaw]` within
+±90 / ±180 (and ±10 000 m) leaves vehicles without radio values, and says so at startup. A
+vehicle whose position is not finite samples as unregistered, with null coordinates.
 
 ## Loading a field at startup
 

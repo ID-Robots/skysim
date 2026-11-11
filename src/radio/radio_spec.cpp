@@ -5,7 +5,6 @@
 #include <charconv>
 #include <cmath>
 #include <cstdio>
-#include <limits>
 
 #include "radio/json.h"
 
@@ -15,20 +14,21 @@ namespace {
 
 using json::Value;
 
-constexpr double kInf = std::numeric_limits<double>::infinity();
-
 // Accepted values of a number field. `lo_open` makes the lower bound exclusive.
+//
+// Every field is bounded, not merely finite: the model raises 10 to a tenth of a dBm figure,
+// and a finite but absurd one (a tower at +3100 dBm) overflows to infinity downstream. The
+// bounds sit far outside anything physical, so they only ever refuse a mistake.
 struct Range {
-    double lo = -kInf;
-    double hi = kInf;
+    double lo = 0.0;
+    double hi = 0.0;
     bool lo_open = false;
 };
 
-constexpr Range kAny{};
 constexpr Range kLatitude{-90.0, 90.0};
 constexpr Range kLongitude{-180.0, 180.0};
-constexpr Range kNonNegative{0.0, kInf};
-constexpr Range kPositive{0.0, kInf, true};
+constexpr Range kPower{-200.0, 0.0};       // dBm: rsrp_1km_dbm, noise_floor_dbm
+constexpr Range kHeight{-1000.0, 10000.0}; // m AMSL
 
 class Reader {
   public:
@@ -59,11 +59,9 @@ class Reader {
         const double x = v->number;
         if (x < range.lo || x > range.hi || (range.lo_open && x == range.lo)) {
             char buf[96];
-            if (range.hi == kInf) {
-                std::snprintf(buf, sizeof(buf), "must be %s %g", range.lo_open ? ">" : ">=", range.lo);
-            } else {
-                std::snprintf(buf, sizeof(buf), "must be between %g and %g", range.lo, range.hi);
-            }
+            std::snprintf(buf, sizeof(buf),
+                          range.lo_open ? "must be > %g and <= %g" : "must be between %g and %g", range.lo,
+                          range.hi);
             return fail(at, buf);
         }
         out = x;
@@ -154,9 +152,9 @@ bool read_tower(Reader &r, const Value &v, const std::string &path, Tower &t) {
     }
     if (!r.required_string(v, "id", path, t.id) || !r.required_number(v, "lat", path, kLatitude, t.lat_deg) ||
         !r.required_number(v, "lon", path, kLongitude, t.lon_deg) ||
-        !r.required_number(v, "height_m", path, kAny, t.height_m) ||
-        !r.required_number(v, "rsrp_1km_dbm", path, kAny, t.rsrp_1km_dbm) ||
-        !r.number(v, "azimuth_deg", path, kAny, t.azimuth_deg, false) ||
+        !r.required_number(v, "height_m", path, kHeight, t.height_m) ||
+        !r.required_number(v, "rsrp_1km_dbm", path, kPower, t.rsrp_1km_dbm) ||
+        !r.number(v, "azimuth_deg", path, Range{-360.0, 360.0}, t.azimuth_deg, false) ||
         !r.number(v, "beamwidth_deg", path, Range{0.0, 360.0, true}, t.beamwidth_deg, false) ||
         !r.required_number(v, "downtilt_deg", path, Range{-90.0, 90.0}, t.downtilt_deg) ||
         !r.integer(v, "pci", path, 1007, t.pci)) {
@@ -214,8 +212,8 @@ bool read_hole(Reader &r, const Value &v, const std::string &path, Hole &h) {
     }
     return r.required_number(v, "lat", path, kLatitude, h.lat_deg) &&
            r.required_number(v, "lon", path, kLongitude, h.lon_deg) &&
-           r.required_number(v, "radius_m", path, kPositive, h.radius_m) &&
-           r.required_number(v, "extra_loss_db", path, kNonNegative, h.extra_loss_db);
+           r.required_number(v, "radius_m", path, Range{0.0, 100000.0, true}, h.radius_m) &&
+           r.required_number(v, "extra_loss_db", path, Range{0.0, 300.0}, h.extra_loss_db);
 }
 
 bool find_carrier(const RadioSpec &spec, const std::string &name) {
@@ -264,11 +262,11 @@ bool read_spec(Reader &r, const Value &v, const std::string &path, RadioSpec &sp
     const Value *carriers = nullptr;
     const Value *holes = nullptr;
     if (!r.seed(v, path, spec.seed) ||
-        !r.required_number(v, "shadowing_sigma_db", path, kNonNegative, spec.shadowing_sigma_db) ||
+        !r.required_number(v, "shadowing_sigma_db", path, Range{0.0, 30.0}, spec.shadowing_sigma_db) ||
         // Below a metre the correlation grid stops meaning anything for a survey on ~50 m
         // cells, and it keeps the node indices far inside int64.
-        !r.required_number(v, "shadow_corr_m", path, Range{1.0, kInf}, spec.shadow_corr_m) ||
-        !r.required_number(v, "noise_floor_dbm", path, kAny, spec.noise_floor_dbm) ||
+        !r.required_number(v, "shadow_corr_m", path, Range{1.0, 100000.0}, spec.shadow_corr_m) ||
+        !r.required_number(v, "noise_floor_dbm", path, kPower, spec.noise_floor_dbm) ||
         !r.array(v, "carriers", path, carriers, true) || !r.array(v, "holes", path, holes, false)) {
         return false;
     }

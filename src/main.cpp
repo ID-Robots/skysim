@@ -262,11 +262,15 @@ bool load_radio_spec(const std::string &path, skysim::radio::RadioField &field) 
 
 // Where the world's NED origin is on the earth, for placing vehicles in the radio field:
 // --spawn-home's lat,lon, with its altitude as the ground's height AMSL (0 when omitted).
-// It is the same point every managed SITL is given as --home.
+// It is the same point every managed SITL is given as --home. sscanf reads "nan" and "inf"
+// as numbers, so the values are range-checked too: a NaN anchor would put every vehicle
+// nowhere.
 std::optional<skysim::radio::GeoAnchor> spawn_anchor(const std::string &home) {
     skysim::radio::GeoAnchor anchor;
-    if (std::sscanf(home.c_str(), "%lf,%lf,%lf", &anchor.lat_deg, &anchor.lon_deg, &anchor.ground_amsl_m) <
-        2) {
+    const int fields =
+        std::sscanf(home.c_str(), "%lf,%lf,%lf", &anchor.lat_deg, &anchor.lon_deg, &anchor.ground_amsl_m);
+    if (fields < 2 || !(std::fabs(anchor.lat_deg) <= 90.0) || !(std::fabs(anchor.lon_deg) <= 180.0) ||
+        !(std::fabs(anchor.ground_amsl_m) <= 10000.0)) {
         return std::nullopt;
     }
     return anchor;

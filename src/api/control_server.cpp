@@ -4,6 +4,7 @@
 
 #include <httplib.h>
 
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -482,7 +483,8 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
         res.set_content(radio::sample_json(*model, p), "application/json");
     });
 
-    s.Get("/radio/grid", [radio_field](const httplib::Request &req, httplib::Response &res) {
+    auto grids_in_flight = std::make_shared<std::atomic<int>>(0);
+    s.Get("/radio/grid", [radio_field, grids_in_flight](const httplib::Request &req, httplib::Response &res) {
         const auto model = radio_field->get();
         if (!model) {
             reply_error(res, 404, "no radio spec set (PUT /radio first)");
@@ -513,6 +515,18 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
                 res, 400,
                 "grid too large: more than " + std::to_string(kMaxGridCells) +
                     " cells (rows x columns x carriers); raise step_m, shrink bbox or pick a carrier");
+            return;
+        }
+        // Released on every way out, a throw included.
+        struct Slot {
+            std::atomic<int> &count;
+            ~Slot() { count.fetch_sub(1); }
+        };
+        const int computing = grids_in_flight->fetch_add(1);
+        const Slot slot{*grids_in_flight};
+        if (computing >= kMaxGridsInFlight) {
+            reply_error(res, 503,
+                        "busy: " + std::to_string(kMaxGridsInFlight) + " grids already computing; retry");
             return;
         }
         res.set_content(radio::grid_json(*model, grid, *shape), "application/json");

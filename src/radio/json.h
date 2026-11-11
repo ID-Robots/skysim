@@ -42,16 +42,19 @@ inline constexpr int kMaxDepth = 32;
 
 // Parses one complete JSON document (surrounding whitespace allowed). On failure returns
 // nullopt and sets `error` to a message naming the byte offset. Duplicate object keys are
-// rejected: two values for one field is ambiguous, and a spec must mean one thing.
+// rejected: two values for one field is ambiguous, and a spec must mean one thing. Strings
+// must be well-formed UTF-8.
 std::optional<Value> parse(std::string_view text, std::string &error);
 
-// Appends `s` as a quoted JSON string with the mandatory escapes.
+// Appends `s` as a quoted JSON string with the mandatory escapes. Bytes that are not
+// well-formed UTF-8 are written as U+FFFD, so the output is valid JSON whatever `s` holds.
 void append_string(std::string &out, std::string_view s);
 
 // Appends a finite double in its shortest round-trip form ("47", "8.015", "-1e-07").
 void append_number(std::string &out, double v);
 
-// Appends a fixed-point number with `decimals` places, or null when `v` is absent.
+// Appends a fixed-point number with `decimals` places, or null when `v` is absent or not
+// finite.
 void append_fixed(std::string &out, std::optional<double> v, int decimals);
 
 } // namespace skysim::radio::json

@@ -6,9 +6,12 @@
 //   test_radio --write-vector PATH   regenerate the vector from tests/fixtures/radio_test_spec.json
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
+#include <stdexcept>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -117,9 +120,9 @@ std::string vector_json(const RadioModel &model) {
 RadioModel load_vector_model() {
     const SpecResult r = parse_radio_spec(read_file(kFixtures + "radio_test_spec.json"));
     if (!r.spec.has_value()) {
+        // Nothing below can run without it.
         std::printf("FAIL: radio_test_spec.json: %s\n", r.error.c_str());
-        ++g_failures;
-        return RadioModel(RadioSpec{});
+        std::exit(1);
     }
     return RadioModel(*r.spec);
 }
@@ -184,37 +187,15 @@ void test_json_reader() {
     CHECK(json::parse("\"\\u0041\\u07FF\\uFFFF\"", err).has_value());
 
     // Each malformed document is refused with an offset, never accepted or crashed on.
-    const char *bad[] = {"",
-                         "{",
-                         "{\"a\" 1}",
-                         "{\"a\":1,}",
-                         "{a:1}",
-                         "[1 2]",
-                         "[1,",
-                         "tru",
-                         "nul",
-                         "\"abc",
-                         "\"a\x01\"",
-                         "\"\\x\"",
-                         "\"\\u12\"",
-                         "\"\\uD800\"",
-                         "\"\\uD800\\u0041\"",
-                         "\"\\uDC00\"",
-                         "01",
-                         "-",
-                         "1.",
-                         "1e",
-                         "+1",
-                         "1e999",
-                         "1e-999",
-                         "{\"a\":1,\"a\":2}",
-                         "[1] x",
-                         ".5",
-                         "{\"a\": tru}",
-                         "{\"ab",
-                         "{\"a\":1 \"b\":2}",
-                         "\"\\u1\"",
-                         "\"\\u12G4\""};
+    const char *bad[] = {
+        "", "{", "{\"a\" 1}", "{\"a\":1,}", "{a:1}", "[1 2]", "[1,", "tru", "nul", "\"abc", "\"a\x01\"",
+        "\"\\x\"", "\"\\u12\"", "\"\\uD800\"", "\"\\uD800\\u0041\"", "\"\\uDC00\"", "01", "-", "1.", "1e",
+        "+1", "1e999", "1e-999", "{\"a\":1,\"a\":2}", "[1] x", ".5", "{\"a\": tru}", "{\"ab",
+        "{\"a\":1 \"b\":2}", "\"\\u1\"", "\"\\u12G4\"",
+        // Not UTF-8: stray continuation, bad lead bytes, overlong forms, a
+        // surrogate, past U+10FFFF, a bad continuation, cut short.
+        "\"\x80\"", "\"\xC0\xAF\"", "\"\xF5\x80\x80\x80\"", "\"\xE0\x80\x80\"", "\"\xF0\x80\x80\x80\"",
+        "\"\xED\xA0\x80\"", "\"\xF4\x90\x80\x80\"", "\"\xC3\"", "\"\xE2\x82"};
     for (const char *text : bad) {
         err.clear();
         const bool parsed = json::parse(text, err).has_value();
@@ -244,6 +225,23 @@ void test_json_reader() {
     out += ',';
     json::append_fixed(out, -60.25, 1);
     CHECK(out == "null,-60.2" || out == "null,-60.3");
+
+    // Well-formed UTF-8 in, through, and out unchanged; anything else out as U+FFFD.
+    const auto utf8 = json::parse("\"\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x98\x80\"", err);
+    CHECK(utf8.has_value() && utf8->text == "\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x98\x80");
+    out.clear();
+    json::append_string(out, "a\xFF"
+                             "b\xC3\xA9\xE2\x82");
+    CHECK(out == "\"a\\ufffdb\xC3\xA9\\ufffd\\ufffd\"");
+    // Not a number is not reported, and no finite value is cut short.
+    out.clear();
+    json::append_fixed(out, std::numeric_limits<double>::infinity(), 1);
+    out += ',';
+    json::append_fixed(out, std::nan(""), 1);
+    CHECK(out == "null,null");
+    out.clear();
+    json::append_fixed(out, 1e300, 2);
+    CHECK(out.size() == 304 && out.substr(out.size() - 3) == ".00");
 }
 
 void test_terms() {
@@ -654,10 +652,28 @@ void test_spec_parsing() {
         {with("\"seed\":7", "\"seed\":\"7\""), "radio.seed: must be an integer"},
         {with("\"seed\":7", "\"seed\":18446744073709551616"), "radio.seed: must be an integer"},
         {with("\"shadowing_sigma_db\":6", "\"shadowing_sigma_db\":-1"),
-         "radio.shadowing_sigma_db: must be >= 0"},
+         "radio.shadowing_sigma_db: must be between 0 and 30"},
+        {with("\"shadowing_sigma_db\":6", "\"shadowing_sigma_db\":31"),
+         "radio.shadowing_sigma_db: must be between 0 and 30"},
+        {with("\"noise_floor_dbm\":-104", "\"noise_floor_dbm\":1"),
+         "radio.noise_floor_dbm: must be between -200 and 0"},
+        {with("\"rsrp_1km_dbm\":-75", "\"rsrp_1km_dbm\":3100"),
+         "radio.carriers[0].towers[0].rsrp_1km_dbm: must be between -200 and 0"},
+        {with("\"height_m\":30", "\"height_m\":10001"),
+         "radio.carriers[0].towers[0].height_m: must be between -1000 and 10000"},
+        {with("\"azimuth_deg\":225", "\"azimuth_deg\":1e9"),
+         "radio.carriers[0].towers[1].azimuth_deg: must be between -360 and 360"},
+        {with("\"extra_loss_db\":35", "\"extra_loss_db\":301"),
+         "radio.holes[0].extra_loss_db: must be between 0 and 300"},
+        {with("\"radius_m\":150", "\"radius_m\":100001"),
+         "radio.holes[0].radius_m: must be > 0 and <= 100000"},
+        {with("\"shadow_corr_m\":60", "\"shadow_corr_m\":1e6"),
+         "radio.shadow_corr_m: must be between 1 and 100000"},
+        {with("\"name\":\"SimTel A\"", "\"name\":\"SimTel \xFF\""), "invalid JSON at offset"},
         {with("\"shadowing_sigma_db\":6", "\"shadowing_sigma_db\":\"6\""),
          "radio.shadowing_sigma_db: must be a number"},
-        {with("\"shadow_corr_m\":60", "\"shadow_corr_m\":0.5"), "radio.shadow_corr_m: must be >= 1"},
+        {with("\"shadow_corr_m\":60", "\"shadow_corr_m\":0.5"),
+         "radio.shadow_corr_m: must be between 1 and 100000"},
         {with("\"noise_floor_dbm\":-104", "\"nf\":-104"),
          "radio.noise_floor_dbm: required number is missing"},
         {with("\"carriers\":", "\"carriers_\":"), "radio.carriers: required array is missing"},
@@ -705,7 +721,7 @@ void test_spec_parsing() {
         {with("\"azimuth_deg\":225,\"beamwidth_deg\":65", "\"azimuth_deg\":225"),
          "radio.carriers[0].towers[1].beamwidth_deg: required for a sector"},
         {with("\"azimuth_deg\":225,\"beamwidth_deg\":65", "\"azimuth_deg\":225,\"beamwidth_deg\":0"),
-         "radio.carriers[0].towers[1].beamwidth_deg: must be between 0 and 360"},
+         "radio.carriers[0].towers[1].beamwidth_deg: must be > 0 and <= 360"},
         {with("\"azimuth_deg\":225", "\"azimuth_deg\":\"sw\""),
          "radio.carriers[0].towers[1].azimuth_deg: must be a number"},
         {with("\"downtilt_deg\":6", "\"downtilt_deg\":91"),
@@ -716,8 +732,9 @@ void test_spec_parsing() {
         {with("\"holes\":[", "\"holes\":7,\"h\":["), "radio.holes: must be an array"},
         {many_holes, "radio.holes: must hold at most 64 holes"},
         {with("\"holes\":[", "\"holes\":[1,"), "radio.holes[0]: must be an object"},
-        {with("\"radius_m\":150", "\"radius_m\":0"), "radio.holes[0].radius_m: must be > 0"},
-        {with("\"extra_loss_db\":35", "\"extra_loss_db\":-1"), "radio.holes[0].extra_loss_db: must be >= 0"},
+        {with("\"radius_m\":150", "\"radius_m\":0"), "radio.holes[0].radius_m: must be > 0 and <= 100000"},
+        {with("\"extra_loss_db\":35", "\"extra_loss_db\":-1"),
+         "radio.holes[0].extra_loss_db: must be between 0 and 300"},
         {with("{\"lat\":47.004,", "{"), "radio.holes[0].lat: required number is missing"},
         {with("\"modems\":[\"SimTel A\",\"SimTel B\"]", "\"modems\":\"SimTel A\""),
          "radio.modems: must be an array"},
@@ -752,9 +769,43 @@ void test_hand_built_specs() {
     CHECK(m.modem_carriers() == std::vector<size_t>{0});
     CHECK(m.carrier_index("SimTel A") == std::optional<size_t>(0));
     CHECK(!m.carrier_index("SimTel Z").has_value());
-    // No carriers at all: a model still builds (anchored at 0,0), it just has nothing to sample.
-    const RadioModel empty{RadioSpec{}};
-    CHECK(empty.modem_carriers().empty());
+    // What sampling relies on is refused up front rather than indexed out of range later.
+    auto refused = [](const RadioSpec &bad) {
+        try {
+            const RadioModel unused(bad);
+            return false;
+        } catch (const std::invalid_argument &) {
+            return true;
+        }
+    };
+    CHECK(refused(RadioSpec{})); // no carriers
+    RadioSpec towerless = plain_spec();
+    towerless.carriers[0].towers.clear();
+    CHECK(refused(towerless));
+    RadioSpec fine_grid = plain_spec();
+    fine_grid.shadow_corr_m = 0.0;
+    CHECK(refused(fine_grid));
+
+    // A position that is not one — a vehicle whose state went NaN, a longitude far off the
+    // map — samples as no service and still renders as valid JSON, without undefined
+    // behaviour on the way (the shadowing grid index is clamped, longitudes wrapped).
+    const Position nowhere{std::nan(""), std::nan(""), 30.0, 30.0};
+    CHECK(!m.sample(0, nowhere).registered);
+    std::string err;
+    const auto doc = json::parse(sample_json(m, nowhere), err);
+    CHECK(doc.has_value() && doc->find("lat") != nullptr && doc->find("lat")->is_null());
+    CHECK(doc.has_value() && doc->find("link")->text == "none");
+    double x = 0.0;
+    double y = 0.0;
+    m.to_local(47.0, 8.0 + 360.0 * 1e10, x, y);
+    NEAR(x, 0.0, 1.0);
+    CHECK(std::isnan(m.shadowing_db(0, std::nan(""), 0.0)));
+    // Far past the clamp: the value is meaningless, but reaching it must be defined.
+    (void)m.shadowing_db(0, 1e300, -1e300);
+    // At a pole the east offset still lands on a real longitude.
+    const double ned[3] = {0.0, 5000.0, -10.0};
+    const Position polar = position_from_ned(GeoAnchor{90.0, 8.0, 0.0}, ned);
+    CHECK(polar.lon_deg >= -180.0 && polar.lon_deg <= 180.0);
 }
 
 void test_sample_json() {
