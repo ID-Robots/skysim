@@ -4,7 +4,9 @@
 
 #include <httplib.h>
 
+#include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cctype>
 #include <cstdlib>
@@ -12,6 +14,9 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+
+#include "radio/json.h"
+#include "radio/radio_spec.h"
 
 namespace skysim::api {
 
@@ -174,6 +179,111 @@ std::string vehicle_json(const VehicleInfo &v) {
     return buf;
 }
 
+// --- /radio helpers ---------------------------------------------------------------------------
+
+void reply_error(httplib::Response &res, int status, const std::string &message) {
+    std::string body = "{\"error\":";
+    radio::json::append_string(body, message);
+    body += '}';
+    res.status = status;
+    res.set_content(body, "application/json");
+}
+
+// A query parameter as a finite number in [lo, hi]. Absent leaves `out` empty and succeeds;
+// present but malformed or out of range fails with a message naming it.
+bool query_number(const httplib::Request &req, const char *name, double lo, double hi,
+                  std::optional<double> &out, std::string &error) {
+    out.reset();
+    if (!req.has_param(name)) {
+        return true;
+    }
+    const std::string text = req.get_param_value(name);
+    double v = 0.0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), v);
+    if (text.empty() || parsed.ec != std::errc() || parsed.ptr != text.data() + text.size() ||
+        !std::isfinite(v)) {
+        error = std::string(name) + " must be a number";
+        return false;
+    }
+    if (v < lo || v > hi) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "%s must be between %g and %g", name, lo, hi);
+        error = buf;
+        return false;
+    }
+    out = v;
+    return true;
+}
+
+constexpr double kMinAltitudeM = -1000.0;
+constexpr double kMaxAltitudeM = 100000.0;
+
+// The vertical position of a request. h (alt_amsl) is what towers are compared against;
+// alt_rel sets the path-loss exponent. Given alt_amsl, alt_rel defaults to alt_amsl minus
+// ground_amsl; given only alt_rel, alt_amsl = alt_rel + ground_amsl. ground_amsl defaults to
+// 0 m, where the two coincide.
+bool query_altitude(const httplib::Request &req, double &alt_rel, double &alt_amsl, std::string &error) {
+    std::optional<double> amsl;
+    std::optional<double> rel;
+    std::optional<double> ground;
+    if (!query_number(req, "alt_amsl", kMinAltitudeM, kMaxAltitudeM, amsl, error) ||
+        !query_number(req, "alt_rel", kMinAltitudeM, kMaxAltitudeM, rel, error) ||
+        !query_number(req, "ground_amsl", kMinAltitudeM, kMaxAltitudeM, ground, error)) {
+        return false;
+    }
+    if (!amsl && !rel) {
+        error = "alt_amsl or alt_rel (with ground_amsl) is required";
+        return false;
+    }
+    const double g = ground.value_or(0.0);
+    alt_amsl = amsl ? *amsl : *rel + g;
+    alt_rel = rel ? *rel : *amsl - g;
+    return true;
+}
+
+// "minLon,minLat,maxLon,maxLat".
+bool query_bbox(const httplib::Request &req, radio::GridRequest &grid, std::string &error) {
+    const std::string text = req.get_param_value("bbox");
+    double v[4] = {0.0, 0.0, 0.0, 0.0};
+    const char *p = text.data();
+    const char *end = p + text.size();
+    for (int i = 0; i < 4; ++i) {
+        const auto parsed = std::from_chars(p, end, v[i]);
+        const bool last = i == 3;
+        if (parsed.ec != std::errc() || !std::isfinite(v[i]) ||
+            (last ? parsed.ptr != end : *parsed.ptr != ',')) {
+            error = "bbox must be minLon,minLat,maxLon,maxLat";
+            return false;
+        }
+        p = parsed.ptr + 1;
+    }
+    grid.min_lon_deg = v[0];
+    grid.min_lat_deg = v[1];
+    grid.max_lon_deg = v[2];
+    grid.max_lat_deg = v[3];
+    if (v[0] < -180.0 || v[2] > 180.0 || v[1] < -90.0 || v[3] > 90.0 || v[0] > v[2] || v[1] > v[3]) {
+        error = "bbox must lie within ±180 lon / ±90 lat with min <= max";
+        return false;
+    }
+    return true;
+}
+
+std::string radio_put_summary(const radio::RadioSpec &spec) {
+    size_t towers = 0;
+    for (const auto &c : spec.carriers) {
+        towers += c.towers.size();
+    }
+    std::string out = "{\"ok\":true,\"carriers\":" + std::to_string(spec.carriers.size()) +
+                      ",\"towers\":" + std::to_string(towers) +
+                      ",\"holes\":" + std::to_string(spec.holes.size()) + ",\"modems\":[";
+    for (size_t i = 0; i < spec.modems.size(); ++i) {
+        out += i ? "," : "";
+        radio::json::append_string(out, spec.modems[i]);
+    }
+    out += "]}";
+    return out;
+}
+
 } // namespace
 
 struct ControlServer::Impl {
@@ -181,9 +291,13 @@ struct ControlServer::Impl {
     std::thread thread;
 };
 
-ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueue &queue, Snapshots snapshots)
+ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueue &queue, Snapshots snapshots,
+                             RadioConfig radio_config)
     : impl_(std::make_unique<Impl>()) {
     auto &s = impl_->server;
+    std::shared_ptr<radio::RadioField> radio_field =
+        radio_config.field ? radio_config.field : std::make_shared<radio::RadioField>();
+    const std::optional<radio::GeoAnchor> home = radio_config.home;
 
     // Camera streams hold a worker for their whole life.
     //
@@ -292,15 +406,116 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
         res.set_content("{\"ok\":true}", "application/json");
     });
 
-    s.Get("/vehicles", [snapshots](const httplib::Request &, httplib::Response &res) {
+    s.Get("/vehicles", [snapshots, radio_field, home](const httplib::Request &, httplib::Response &res) {
+        // With a radio spec set, each vehicle carries the field's values at its truth
+        // position — what a modem on board would report, without the modem.
+        const auto model = home ? radio_field->get() : nullptr;
         std::string out = "[";
         bool first = true;
         for (const auto &v : snapshots.vehicles()) {
-            out += (first ? "" : ",") + vehicle_json(v);
+            std::string entry = vehicle_json(v);
+            if (model) {
+                entry.pop_back(); // the closing brace
+                entry +=
+                    ",\"radio\":" + radio::sample_json(*model, radio::position_from_ned(*home, v.pos_ned)) +
+                    "}";
+            }
+            out += (first ? "" : ",") + entry;
             first = false;
         }
         out += "]";
         res.set_content(out, "application/json");
+    });
+
+    // --- simulated radio field (docs/RADIO.md) ---------------------------------------------
+    //
+    // A spec in, ground truth out: the gateway forwards the spec its simulated modems use,
+    // and a survey's measurements can then be checked against the field that produced them.
+    s.Put("/radio", [radio_field](const httplib::Request &req, httplib::Response &res) {
+        radio::SpecResult parsed = radio::parse_radio_spec(req.body);
+        if (!parsed.spec) {
+            reply_error(res, 400, parsed.error);
+            return;
+        }
+        // Built before the swap, so readers never wait on parsing or see a half-made model.
+        auto model = std::make_shared<const radio::RadioModel>(std::move(*parsed.spec));
+        const std::string summary = radio_put_summary(model->spec());
+        radio_field->set(std::move(model));
+        res.set_content(summary, "application/json");
+    });
+
+    s.Get("/radio", [radio_field](const httplib::Request &, httplib::Response &res) {
+        const auto model = radio_field->get();
+        res.set_content(model ? "{\"radio\":" + radio::radio_spec_json(model->spec()) + "}"
+                              : "{\"radio\":null}",
+                        "application/json");
+    });
+
+    s.Delete("/radio", [radio_field](const httplib::Request &, httplib::Response &res) {
+        res.set_content(radio_field->clear() ? "{\"ok\":true,\"cleared\":true}"
+                                             : "{\"ok\":true,\"cleared\":false}",
+                        "application/json");
+    });
+
+    s.Get("/radio/sample", [radio_field](const httplib::Request &req, httplib::Response &res) {
+        const auto model = radio_field->get();
+        if (!model) {
+            reply_error(res, 404, "no radio spec set (PUT /radio first)");
+            return;
+        }
+        std::string error;
+        std::optional<double> lat;
+        std::optional<double> lon;
+        radio::Position p;
+        if (!query_number(req, "lat", -90.0, 90.0, lat, error) ||
+            !query_number(req, "lon", -180.0, 180.0, lon, error) ||
+            !query_altitude(req, p.alt_rel_m, p.alt_amsl_m, error)) {
+            reply_error(res, 400, error);
+            return;
+        }
+        if (!lat || !lon) {
+            reply_error(res, 400, "lat and lon are required");
+            return;
+        }
+        p.lat_deg = *lat;
+        p.lon_deg = *lon;
+        res.set_content(radio::sample_json(*model, p), "application/json");
+    });
+
+    s.Get("/radio/grid", [radio_field](const httplib::Request &req, httplib::Response &res) {
+        const auto model = radio_field->get();
+        if (!model) {
+            reply_error(res, 404, "no radio spec set (PUT /radio first)");
+            return;
+        }
+        radio::GridRequest grid;
+        std::string error;
+        std::optional<double> step;
+        if (!query_bbox(req, grid, error) || !query_altitude(req, grid.alt_rel_m, grid.alt_amsl_m, error) ||
+            !query_number(req, "step_m", 1.0, 100000.0, step, error)) {
+            reply_error(res, 400, error);
+            return;
+        }
+        grid.step_m = step.value_or(grid.step_m);
+        if (req.has_param("carrier")) {
+            const auto index = model->carrier_index(req.get_param_value("carrier"));
+            if (!index) {
+                reply_error(res, 400,
+                            "carrier \"" + req.get_param_value("carrier") + "\" is not in the radio spec");
+                return;
+            }
+            grid.carriers.push_back(*index);
+        }
+        const size_t layers = grid.carriers.empty() ? model->spec().carriers.size() : 1;
+        const auto shape = radio::grid_shape(grid, layers, kMaxGridCells);
+        if (!shape) {
+            reply_error(
+                res, 400,
+                "grid too large: more than " + std::to_string(kMaxGridCells) +
+                    " cells (rows x columns x carriers); raise step_m, shrink bbox or pick a carrier");
+            return;
+        }
+        res.set_content(radio::grid_json(*model, grid, *shape), "application/json");
     });
 
     // The same two feeds addressed by ArduPilot instance.

@@ -1,7 +1,8 @@
 #pragma once
-// Control plane for SkyHub: REST (spawn/despawn/list/metrics). The HTTP thread never touches
-// world state: writes go through the tick-boundary CommandQueue (promises for replies), reads
-// come from snapshots published once per tick (CLAUDE.md invariant 5). WS /state lands at M6.
+// Control plane for SkyHub: REST (spawn/despawn/list/metrics, simulated radio field). The HTTP
+// thread never touches world state: writes go through the tick-boundary CommandQueue (promises
+// for replies), reads come from snapshots published once per tick (CLAUDE.md invariant 5).
+// WS /state lands at M6.
 #include <cstdint>
 #include <functional>
 #include <future>
@@ -12,6 +13,7 @@
 #include <vector>
 
 #include "core/world.h"
+#include "radio/radio_model.h"
 #include "render/frame_store.h"
 #include "vehicle/manager.h"
 
@@ -111,9 +113,24 @@ class ControlServer {
         std::function<skysim::render::FrameStore::Frame(uint32_t)> camera_frame;
     };
 
+    // The simulated radio field behind /radio (docs/RADIO.md). It is not world state — no
+    // tick reads it — so the HTTP threads own it outright: PUT swaps the model, and every
+    // read samples whichever model it took, without touching the tick thread.
+    struct RadioConfig {
+        // Shared with whoever loaded a spec at startup; null makes the server keep its own.
+        std::shared_ptr<radio::RadioField> field;
+        // Where the world's NED origin is on the earth (the spawn home and its ground AMSL).
+        // Without it GET /vehicles cannot place a vehicle in the field and carries no radio.
+        std::optional<radio::GeoAnchor> home;
+    };
+
+    // Largest raster GET /radio/grid computes: rows × columns × carriers.
+    static constexpr size_t kMaxGridCells = 250000;
+
     // Binds bind_addr:port and serves on its own thread. Throws on bind failure (startup
     // only). Use "0.0.0.0" when the SkyHub gateway calls in from a docker bridge network.
-    ControlServer(const std::string &bind_addr, int port, CommandQueue &queue, Snapshots snapshots);
+    ControlServer(const std::string &bind_addr, int port, CommandQueue &queue, Snapshots snapshots,
+                  RadioConfig radio = {});
     ~ControlServer();
     ControlServer(const ControlServer &) = delete;
     ControlServer &operator=(const ControlServer &) = delete;
