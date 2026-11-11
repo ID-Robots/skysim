@@ -193,6 +193,12 @@ target_link_libraries(test_api PRIVATE skysim_api httplib::httplib)
 target_compile_options(test_api PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME api COMMAND test_api)
 
+add_executable(test_radio tests/test_radio.cpp)
+target_link_libraries(test_radio PRIVATE skysim_radio Threads::Threads)
+target_compile_definitions(test_radio PRIVATE SKYSIM_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_compile_options(test_radio PRIVATE -Wall -Wextra -Wshadow)
+add_test(NAME radio COMMAND test_radio)
+
 add_executable(test_thread_pool tests/test_thread_pool.cpp)
 target_include_directories(test_thread_pool PRIVATE src)
 target_link_libraries(test_thread_pool PRIVATE Threads::Threads)
@@ -205,7 +211,7 @@ target_compile_options(test_streamer PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME streamer COMMAND test_streamer)
 
 set_tests_properties(
-    packets json frames quad world collision endpoint manager api thread_pool streamer
+    packets json frames quad world collision endpoint manager api radio thread_pool streamer
     PROPERTIES LABELS "unit"
 )
 

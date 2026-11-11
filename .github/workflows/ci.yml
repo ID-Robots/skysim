@@ -46,7 +46,8 @@ jobs:
         run: >-
           cmake --build build --parallel --target
           test_packets test_json test_frames test_quad test_world test_collision
-          test_endpoint test_manager test_api test_thread_pool test_streamer
+          test_endpoint test_manager test_api test_radio test_thread_pool
+          test_streamer
       - name: Run unit tests
         run: ctest --test-dir build --label-regex '^unit$' --output-on-failure
 
