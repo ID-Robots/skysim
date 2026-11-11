@@ -242,8 +242,9 @@ truth position:
 - `alt_amsl` = the `--spawn-home` altitude field (taken as the home ground's AMSL height) +
   `alt_rel`.
 
-No field, no `radio` key. A `--spawn-home` that does not parse as `lat,lon[,alt,yaw]` within
-±90 / ±180 (and ±10 000 m) leaves vehicles without radio values, and says so at startup. A
+No field, no `radio` key. A `--spawn-home` that is not `lat,lon[,alt[,yaw]]` — every field
+a number, within ±90 / ±180 (and ±10 000 m) — leaves vehicles without radio values, and says
+so at startup. A
 vehicle whose position is not finite samples as unregistered, with null coordinates.
 
 ## Loading a field at startup

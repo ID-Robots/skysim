@@ -4,6 +4,7 @@
 // --canned keeps the M1 kinematic reply path; --replay-servo re-runs a recorded input tape.
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -16,6 +17,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -262,15 +264,42 @@ bool load_radio_spec(const std::string &path, skysim::radio::RadioField &field) 
 
 // Where the world's NED origin is on the earth, for placing vehicles in the radio field:
 // --spawn-home's lat,lon, with its altitude as the ground's height AMSL (0 when omitted).
-// It is the same point every managed SITL is given as --home. sscanf reads "nan" and "inf"
-// as numbers, so the values are range-checked too: a NaN anchor would put every vehicle
-// nowhere.
+// It is the same point every managed SITL is given as --home.
+//
+// Every field must be a whole number (spaces around it allowed): a prefix parse would read
+// "47,8x,500" as 47,8 at ground 0 and place every vehicle with no warning. Values are
+// range-checked too, since from_chars reads "nan" and "inf" as numbers.
 std::optional<skysim::radio::GeoAnchor> spawn_anchor(const std::string &home) {
-    skysim::radio::GeoAnchor anchor;
-    const int fields =
-        std::sscanf(home.c_str(), "%lf,%lf,%lf", &anchor.lat_deg, &anchor.lon_deg, &anchor.ground_amsl_m);
-    if (fields < 2 || !(std::fabs(anchor.lat_deg) <= 90.0) || !(std::fabs(anchor.lon_deg) <= 180.0) ||
-        !(std::fabs(anchor.ground_amsl_m) <= 10000.0)) {
+    std::vector<double> fields; // lat, lon[, alt[, yaw]]
+    size_t start = 0;
+    while (true) {
+        const size_t comma = home.find(',', start);
+        std::string_view field(home);
+        field = field.substr(start, comma == std::string::npos ? std::string_view::npos : comma - start);
+        while (!field.empty() && field.front() == ' ') {
+            field.remove_prefix(1);
+        }
+        while (!field.empty() && field.back() == ' ') {
+            field.remove_suffix(1);
+        }
+        double v = 0.0;
+        const auto parsed = std::from_chars(field.data(), field.data() + field.size(), v);
+        if (field.empty() || parsed.ec != std::errc() || parsed.ptr != field.data() + field.size() ||
+            !std::isfinite(v) || fields.size() == 4) {
+            return std::nullopt;
+        }
+        fields.push_back(v);
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    if (fields.size() < 2) {
+        return std::nullopt;
+    }
+    const skysim::radio::GeoAnchor anchor{fields[0], fields[1], fields.size() > 2 ? fields[2] : 0.0};
+    if (std::fabs(anchor.lat_deg) > 90.0 || std::fabs(anchor.lon_deg) > 180.0 ||
+        std::fabs(anchor.ground_amsl_m) > 10000.0) {
         return std::nullopt;
     }
     return anchor;

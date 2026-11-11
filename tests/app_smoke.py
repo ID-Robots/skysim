@@ -140,7 +140,7 @@ def case_radio(tmp: str) -> None:
     port = 18647
     proc = subprocess.Popen([SIM, "--vehicles", "0", "--base-instance", "97",
                              "--time-mode", "interactive", "--api-port", str(port),
-                             "--spawn-home", "47.0,8.0,0,0", "--radio-spec", spec_path])
+                             "--spawn-home", "47.0, 8.0, 0, 0", "--radio-spec", spec_path])
     time.sleep(1)
     try:
         check(api(port, "GET", "/radio")["radio"]["seed"] == 7, "radio spec loaded at startup")
@@ -155,6 +155,20 @@ def case_radio(tmp: str) -> None:
         check("radio" not in api(port, "GET", "/vehicles")[0], "no radio without a spec")
     finally:
         check(stop(proc) == 0, "radio clean shutdown")
+
+    # A home that only half parses must not place vehicles anywhere: no radio, and a warning.
+    proc = subprocess.Popen([SIM, "--vehicles", "0", "--base-instance", "97",
+                             "--time-mode", "interactive", "--api-port", str(port),
+                             "--spawn-home", "47,8x,500,0", "--radio-spec", spec_path],
+                            stderr=subprocess.PIPE, text=True)
+    time.sleep(1)
+    try:
+        api(port, "POST", "/vehicles", b"{}")
+        check("radio" not in api(port, "GET", "/vehicles")[0], "no radio without a usable home")
+    finally:
+        check(stop(proc) == 0, "bad-home clean shutdown")
+    err = proc.stderr.read() if proc.stderr else ""
+    check("--spawn-home 47,8x,500,0 is not lat,lon" in err, "bad home reported at startup")
 
     bad = os.path.join(tmp, "bad_radio.json")
     with open(bad, "w") as f:
