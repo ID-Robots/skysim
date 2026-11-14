@@ -96,6 +96,17 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   `tools/survey/survey_fixture.py` writes into EXIF).
 - **Reconstruction fixture**: `tools/survey/survey_fixture.py` renders a survey grid of the demo
   city without ArduPilot, with EXIF GPS and an ODM `geo.txt`; see the README.
+- **ODM on simulated surveys** (gateway `odm` target, contract section 3): ODM 3.6's default
+  incremental SfM reconstructed a nadir grid plus one oblique grid of the demo city to 1-6 cm,
+  but on nadir + crosshatch (338 frames) it bootstrapped from two obliques seeing almost only
+  flat ground, took the wrong one of a plane homography's two solutions, and diverged (camera
+  positions ~100 m off, a scrambled orthophoto) — with or without GPS in the bundle, with fixed
+  intrinsics, with 0.2 m GPS accuracy. The demo city is ~84 % flat ground; a scanned city is
+  not. Expect a dev mapping run over the demo city to need either a scene with more relief or
+  a check of ODM's GPS errors in its report before showing the result (a failed run looked like
+  this: GPS errors ~100+ m, average GSD reported as 1 cm). Do not pass camera angles in
+  geo.txt for `--sfm-algorithm triangulation`: ODM 3.6 turns them into rotations tens of
+  degrees off at this latitude (`opendm/photo.py` compute_opk).
 
 ### 2. skyhub_core (`sitl/` image)
 - **[C1] `scripts/sitl.sh`**: no change needed for the model (env `SITL_MODEL` already

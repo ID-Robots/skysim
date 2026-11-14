@@ -289,11 +289,27 @@ reconstruction fixture:
 
 ```bash
 cmake --build build --target survey_still tile_cooker
-# 300 x 200 m block, 100 m up, 80/70 % overlap, nadir plus a crosshatch at -60:
+# 300 x 200 m block, 100 m up, 80/70 % overlap, nadir plus a crosshatch at -60 (338 frames):
 tools/survey/survey_fixture.py --out build/odm/images --crosshatch -60
 docker run --rm -v $(pwd)/build:/datasets opendronemap/odm --project-path /datasets odm \
   --geo /datasets/odm/images/geo.txt
 ```
+
+Reconstructed with OpenDroneMap 3.6 (orthophoto, 10 cm; textured mesh):
+
+![ODM orthophoto of the fixture block](.github/assets/skysim-odm-orthophoto.jpg)
+![ODM textured mesh of the fixture block](.github/assets/skysim-odm-mesh.jpg)
+
+The frames hold up to the geometry: ODM's own structure from motion puts the nadir grid plus
+either oblique grid within 1-6 cm of the geotags, the cameras within 0.01 degrees of their true
+pointing, and self-calibrates the focal length to the exact one. One caveat, about ODM rather
+than the frames: on the full nadir + crosshatch set its default incremental SfM can bootstrap
+from two obliques that see almost only flat ground (the demo city is ~84 % ground), and a
+plane-based start has two valid solutions — it took the wrong one and the model diverged. The
+images above come from the two cm-accurate partial models merged, all tracks triangulated with
+`opensfm reconstruct_from_prior`, then ODM's dense, mesh, texture and orthophoto stages as
+usual. Do not feed ODM camera angles in `geo.txt` for `--sfm-algorithm triangulation`: ODM 3.6
+converts them through a frame that is not local level away from the equator.
 
 A 1600x1200 nadir frame of the demo city renders in about 0.55 s on one core, 0.27 s on the
 two threads a still gets by default, and 0.15–0.2 s on four (Ryzen 7 5700X), plus ~40 ms of
