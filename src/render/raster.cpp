@@ -81,15 +81,24 @@ void fill(const std::vector<ScreenTriangle> &tris, int width, Band &band) {
 Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::ThreadPool *pool,
                          std::vector<int32_t> *surface, bool caller_runs) const {
     Image image;
-    image.width = cfg_.width;
-    image.height = cfg_.height;
-    image.rgb.assign(static_cast<size_t>(cfg_.width) * cfg_.height * 3, 0);
-    if (surface != nullptr) {
-        surface->assign(static_cast<size_t>(cfg_.width) * cfg_.height, kSurfaceSky);
-    }
-
     std::vector<ScreenTriangle> tris;
-    transform(scene, camera, tris);
+    // Setup: the frame buffers and the pass over the whole world that picks what is in shot.
+    // With caller_runs = false it runs on a pool worker like the rest, so the caller's thread
+    // (an HTTP worker at normal priority) does none of the work.
+    const auto setup = [&] {
+        image.width = cfg_.width;
+        image.height = cfg_.height;
+        image.rgb.assign(static_cast<size_t>(cfg_.width) * cfg_.height * 3, 0);
+        if (surface != nullptr) {
+            surface->assign(static_cast<size_t>(cfg_.width) * cfg_.height, kSurfaceSky);
+        }
+        transform(scene, camera, tris);
+    };
+    if (pool != nullptr && !caller_runs) {
+        pool->parallel_for(1, [&](size_t, size_t) { setup(); }, false);
+    } else {
+        setup();
+    }
 
     const Vec3 eye = camera.position();
     const auto &normals = scene.normals();

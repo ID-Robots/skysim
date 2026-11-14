@@ -89,6 +89,7 @@ struct StillFrame {
         kBusy,     // every render slot taken: 503 + Retry-After
         kInvalid,  // a request field out of bounds: 400
         kDisabled, // no still camera on this server: 404
+        kFailed,   // the render itself failed (out of memory, encoder): 500
     };
     Status status{Status::kDisabled};
     std::vector<uint8_t> jpeg;

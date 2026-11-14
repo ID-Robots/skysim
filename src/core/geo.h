@@ -41,15 +41,10 @@ inline GeoPoint geo_from_ned(const GeoOrigin &origin, double north_m, double eas
     const double scale = std::max(std::cos((origin.lat_deg + dlat_deg * 0.5) * kDegToRad), 0.01);
     GeoPoint p;
     p.lat_deg = std::clamp(origin.lat_deg + dlat_deg, -90.0, 90.0);
-    double lon = origin.lon_deg + east_m * kArduLocationScalingFactorInv * 1e-7 / scale;
-    // wrap_longitude(): stay in (-180, 180].
-    while (lon > 180.0) {
-        lon -= 360.0;
-    }
-    while (lon <= -180.0) {
-        lon += 360.0;
-    }
-    p.lon_deg = lon;
+    // wrap_longitude(): stay in (-180, 180]. A remainder, not a loop, so no input can spin it.
+    const double lon =
+        std::remainder(origin.lon_deg + east_m * kArduLocationScalingFactorInv * 1e-7 / scale, 360.0);
+    p.lon_deg = lon == -180.0 ? 180.0 : lon;
     p.alt_rel_m = -down_m;
     p.alt_amsl_m = origin.alt_amsl_m - down_m;
     return p;

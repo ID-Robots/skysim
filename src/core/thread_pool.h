@@ -6,9 +6,12 @@
 // exists because the reply sendto() is a kernel-bound syscall that parallelizes across cores.
 //
 // Reuse-safe: persistent workers, no per-call thread creation. Not for the physics path.
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -75,14 +78,40 @@ class ThreadPool {
         cv_.notify_all();
 
         if (caller_runs) {
-            run_chunk(0, nchunks, count, fn); // caller runs the first chunk
+            guarded_chunk(0, nchunks, count, fn); // caller runs the first chunk
         }
 
         std::unique_lock<std::mutex> lock(done_mutex_);
         done_cv_.wait(lock, [this] { return remaining_.load(std::memory_order_acquire) == 0; });
+        lock.unlock();
+        // Rethrown only once every chunk is done: nothing is still running against `fn` or
+        // the caller's frame when the exception unwinds it.
+        std::exception_ptr error;
+        {
+            std::lock_guard<std::mutex> guard(error_mutex_);
+            error.swap(error_);
+        }
+        if (error) {
+            std::rethrow_exception(error);
+        }
     }
 
   private:
+    // A chunk that throws (a bad_alloc on a big frame, say) must not escape a worker thread —
+    // that is std::terminate for the whole process, physics included. The first exception is
+    // kept and rethrown to the caller of parallel_for.
+    void guarded_chunk(size_t idx, size_t chunks, size_t count,
+                       const std::function<void(size_t, size_t)> &fn) {
+        try {
+            run_chunk(idx, chunks, count, fn);
+        } catch (...) {
+            std::lock_guard<std::mutex> guard(error_mutex_);
+            if (!error_) {
+                error_ = std::current_exception();
+            }
+        }
+    }
+
     static void run_chunk(size_t idx, size_t chunks, size_t count,
                           const std::function<void(size_t, size_t)> &fn) {
         const size_t begin = count * idx / chunks;
@@ -112,7 +141,7 @@ class ThreadPool {
             // This worker owns chunk (worker_index + first) if it exists.
             const size_t idx = static_cast<size_t>(worker_index) + first;
             if (idx < chunks) {
-                run_chunk(idx, chunks, count, *fn);
+                guarded_chunk(idx, chunks, count, *fn);
             }
             if (idx < chunks) {
                 if (remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
@@ -134,6 +163,8 @@ class ThreadPool {
     size_t first_ = 1;
 
     std::atomic<size_t> remaining_{0};
+    std::mutex error_mutex_;
+    std::exception_ptr error_;
     std::mutex done_mutex_;
     std::condition_variable done_cv_;
 };

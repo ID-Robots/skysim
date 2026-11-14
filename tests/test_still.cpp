@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -278,6 +279,12 @@ void test_geo() {
     const auto w2 = skysim::core::geo_from_ned({0.0, -179.9999, 0.0}, 0.0, -100.0, 0.0);
     CHECK(w2.lon_deg > 179.99);
     CHECK(skysim::core::geo_from_ned({89.9999, 0.0, 0.0}, 1000.0, 0.0, 0.0).lat_deg == 90.0);
+    CHECK(skysim::core::geo_from_ned({0.0, -180.0, 0.0}, 0.0, 0.0, 0.0).lon_deg == 180.0); // (-180, 180]
+    // An absurd offset wraps in one step rather than looping.
+    const double far = skysim::core::geo_from_ned({0.0, 0.0, 0.0}, 0.0, 1e15, 0.0).lon_deg;
+    CHECK(far > -180.0 && far <= 180.0);
+    // Colour to byte: clamped, and NaN is black rather than undefined behaviour.
+    CHECK(render::to_byte(-1.0) == 0 && render::to_byte(2.0) == 255 && render::to_byte(std::nan("")) == 0);
 }
 
 void test_scene(const render::RasterScene &scene) {
@@ -798,6 +805,11 @@ void test_http(const std::shared_ptr<const render::RasterScene> &scene) {
         auto missing_id = client.Get("/vehicles/99999999999999999999/still.jpg");
         CHECK(missing_id && missing_id->status == 404 &&
               missing_id->body.find("no such vehicle") != std::string::npos);
+        // 2^32 + 7 is not vehicle 7: an id too big for the type does not wrap onto another one.
+        auto wrapped = client.Get("/vehicles/4294967303/still.jpg?w=64&h=64");
+        CHECK(wrapped && wrapped->status == 404);
+        auto zeros = client.Get("/instances/0031/still.jpg?w=64&h=64");
+        CHECK(zeros && zeros->status == 200 && zeros->get_header_value("X-Skysim-Instance") == "31");
 
         // Busy: the one slot is taken, so the route answers 503 with Retry-After at once.
         {
@@ -849,6 +861,22 @@ void test_http(const std::shared_ptr<const render::RasterScene> &scene) {
         client.set_read_timeout(30, 0);
         auto r = client.Get("/instances/31/still.jpg?w=64&h=64");
         CHECK(r && r->status == 200 && !r->has_header("X-Skysim-Lat") && r->has_header("X-Skysim-Alt-Rel"));
+        CHECK(r && r->get_header_value("X-Skysim-Warning").find("no geo anchor") != std::string::npos);
+    }
+
+    // A render that failed is the server's fault: 500, with the reason, as JSON.
+    {
+        auto failing = snaps;
+        failing.still = [](const VehicleInfo &, const render::StillRequest &) {
+            render::StillFrame f;
+            f.status = render::StillFrame::Status::kFailed;
+            f.error = "render failed: std::bad_alloc";
+            return f;
+        };
+        ControlServer server("127.0.0.1", kPort, queue, failing, radio);
+        httplib::Client client("127.0.0.1", kPort);
+        auto r = client.Get("/instances/31/still.jpg");
+        CHECK(r && r->status == 500 && r->body.find("bad_alloc") != std::string::npos);
     }
 
     // Still camera off: the routes say so.
@@ -952,6 +980,31 @@ void test_thread_pool_modes() {
         },
         false);
     CHECK(!caller_worked.load()); // caller_runs = false: the caller only waited
+
+    // A chunk that throws, on a worker or on the caller, reaches the caller as an exception
+    // once every chunk has finished — and the pool keeps working afterwards.
+    for (const bool caller_runs : {false, true}) {
+        bool caught = false;
+        std::atomic<int> finished{0};
+        try {
+            pool.parallel_for(
+                4,
+                [&](size_t begin, size_t) {
+                    if (begin == 1 || (caller_runs && begin == 0)) {
+                        throw std::runtime_error("chunk failed");
+                    }
+                    ++finished;
+                },
+                caller_runs);
+        } catch (const std::runtime_error &e) {
+            caught = std::string(e.what()) == "chunk failed";
+        }
+        CHECK(caught);
+        CHECK(finished.load() >= 2);
+    }
+    std::atomic<int> after{0};
+    pool.parallel_for(8, [&](size_t begin, size_t end) { after += static_cast<int>(end - begin); });
+    CHECK(after.load() == 8);
     CHECK(std::all_of(hits.begin(), hits.end(), [](int h) { return h == 1; }));
     for (int i = 0; i < 100 && started.load() < 3; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));

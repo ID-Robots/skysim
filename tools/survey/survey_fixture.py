@@ -320,6 +320,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             ap.error("pitches must be between -90 and -30 (a survey camera looks down)")
     if args.alt <= 0 or args.size[0] <= 0 or args.size[1] <= 0:
         ap.error("--alt and --size must be positive")
+    # The server's own bounds (render::StillRequest), so a fixture frame is one the still
+    # route could have served.
+    if not 10.0 <= args.hfov <= 120.0:
+        ap.error("--hfov must be between 10 and 120")
+    if not all(64 <= v <= 4096 for v in args.image):
+        ap.error("--image sides must be between 64 and 4096")
+    if not 1 <= args.quality <= 100:
+        ap.error("--quality must be between 1 and 100")
+    if not 0 <= args.seed <= 0xFFFFFFFF:
+        ap.error("--seed must be between 0 and 4294967295")
+    if not 0 <= args.threads <= 256:
+        ap.error("--threads must be between 0 and 256")
     return args
 
 

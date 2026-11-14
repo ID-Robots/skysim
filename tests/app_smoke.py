@@ -47,6 +47,17 @@ def api(port: int, method: str, path: str, body: bytes | None = None):
         return json.loads(resp.read().decode() or "{}")
 
 
+def listed(port: int, count: int) -> list:
+    """GET /vehicles once it lists `count` vehicles: POST /vehicles answers when the tick thread
+    has spawned the vehicle, but the snapshot GET reads is published at the end of that tick."""
+    deadline = time.time() + 5
+    vehicles = api(port, "GET", "/vehicles")
+    while len(vehicles) < count and time.time() < deadline:
+        time.sleep(0.02)
+        vehicles = api(port, "GET", "/vehicles")
+    return vehicles
+
+
 def case_replay(tmp: str) -> None:
     rec = os.path.join(tmp, "servo.csv")
     out = os.path.join(tmp, "truth.csv")
@@ -125,7 +136,7 @@ def case_rest() -> None:
         check(v1["instance"] == 93, "spawn allocates base instance")
         v2 = api(port, "POST", "/vehicles", b"{\"launch_process\":true}")  # /bin/true exits: ok
         check(v2["instance"] == 94, "second spawn next instance")
-        listing = api(port, "GET", "/vehicles")
+        listing = listed(port, 2)
         check(len(listing) == 2, "list shows both")
         m = api(port, "GET", "/metrics")
         check(m["vehicles"] == 2 and m["tick"] > 0, "metrics live")
@@ -170,7 +181,7 @@ def case_radio(tmp: str) -> None:
     try:
         check(api(port, "GET", "/radio")["radio"]["seed"] == 7, "radio spec loaded at startup")
         api(port, "POST", "/vehicles", b"{}")
-        vehicle = api(port, "GET", "/vehicles")[0]
+        vehicle = listed(port, 1)[0]
         cell = vehicle["radio"]["cell"]
         check(cell["source"] == "sim" and cell["operator"] == "SimTel A", "vehicle carries the primary modem")
         check(abs(vehicle["radio"]["lat"] - 47.0) < 1e-4, "vehicle radio sampled at its truth position")
@@ -189,7 +200,7 @@ def case_radio(tmp: str) -> None:
     time.sleep(1)
     try:
         api(port, "POST", "/vehicles", b"{}")
-        check("radio" not in api(port, "GET", "/vehicles")[0], "no radio without a usable home")
+        check("radio" not in listed(port, 1)[0], "no radio without a usable home")
     finally:
         check(stop(proc) == 0, "bad-home clean shutdown")
     err = proc.stderr.read() if proc.stderr else ""

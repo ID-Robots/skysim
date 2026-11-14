@@ -248,6 +248,8 @@ API: [`docs/RADIO.md`](docs/RADIO.md).
 A simulated mapping mission needs photos that photogrammetry can reconstruct, so skysim has a
 survey still camera beside the small pilot feed:
 
+![A nadir and a -60 degree oblique survey still of the demo city, from the reconstruction fixture](.github/assets/skysim-survey-stills.jpg)
+
 ```bash
 curl -o frame.jpg -D - "http://127.0.0.1:8642/instances/0/still.jpg?w=1600&h=1200&pitch=-90"
 # X-Skysim-Time-Usec, X-Skysim-Lat, X-Skysim-Lon, X-Skysim-Alt-Amsl, X-Skysim-Alt-Rel,
@@ -269,7 +271,8 @@ sim time from the same tick), on background-priority worker threads, and never w
 slows the physics tick. At most `SKYSIM_STILL_CONCURRENCY` render at once; past that the
 answer is `503` with `Retry-After: 1`. Every input is bounded and every error is JSON. Lat/lon
 come from `--spawn-home` by ArduPilot's own flat-earth conversion, so they match the GPS the
-autopilot reports.
+autopilot reports (if `--spawn-home` is not `lat,lon[,alt,yaw]` they are left out and an
+`X-Skysim-Warning` header says so).
 
 The world is textured for structure from motion: roads with lane markings, crossings and
 manholes, kerbs and paved sidewalks, patches of grass, dry grass, gravel, soil and paving with
@@ -292,7 +295,9 @@ docker run --rm -v $(pwd)/build:/datasets opendronemap/odm --project-path /datas
   --geo /datasets/odm/images/geo.txt
 ```
 
-On one core a 1600x1200 nadir frame of the demo city renders in about 0.3 s (0.13 s on four).
+A 1600x1200 nadir frame of the demo city renders in about 0.55 s on one core, 0.27 s on the
+two threads a still gets by default, and 0.15–0.2 s on four (Ryzen 7 5700X), plus ~40 ms of
+JPEG encode.
 
 ## Useful flags
 

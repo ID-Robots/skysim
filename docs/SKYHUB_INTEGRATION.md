@@ -59,9 +59,12 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   (50..3000), `q` 90 (1..100). Response `image/jpeg` with `X-Skysim-Time-Usec`,
   `X-Skysim-Lat`, `X-Skysim-Lon`, `X-Skysim-Alt-Amsl`, `X-Skysim-Alt-Rel`, `X-Skysim-Yaw`,
   `X-Skysim-Pitch`, `X-Skysim-Roll` (camera axes, degrees) and `X-Skysim-Hfov` (also
-  `X-Skysim-Ned`, `-Vehicle`, `-Instance`). Errors are JSON: `400` for a bad query, `404` for an
+  `X-Skysim-Ned`, `-Vehicle`, `-Instance`). If `--spawn-home` did not parse (skysim warns at
+  startup) there is no earth position to give: `X-Skysim-Lat`, `-Lon` and `-Alt-Amsl` are left
+  out and `X-Skysim-Warning` says why. Errors are JSON: `400` for a bad query, `404` for an
   unknown instance/vehicle or a still camera that is off, `503` + `Retry-After: 1` when
-  `SKYSIM_STILL_CONCURRENCY` (default 2) renders are already running. `SKYSIM_TEXTURE_SEED`
+  `SKYSIM_STILL_CONCURRENCY` (default 2) renders are already running, `500` if a render fails
+  (out of memory on a huge frame, say). `SKYSIM_TEXTURE_SEED`
   (default 1) picks the world's texture. Meaning of the pose headers: docs/PROTOCOL.md.
 
 #### Using the still camera from a simulated survey (core, gateway)
@@ -73,8 +76,9 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   sidecar instead. The pose headers say exactly where the frame was taken from; the
   CAMERA_FEEDBACK position stays the EXIF GPS, and the two agree (same conversion as
   ArduPilot's GPS).
-- **Capacity**: a 1600x1200 frame takes about 0.3 s of one core (two background-priority
-  threads per render by default, `--still-threads`), so the default two slots keep up with two
+- **Capacity**: a 1600x1200 frame takes about 0.55 s of one core, ~0.3 s on the two
+  background-priority threads a render gets by default (`--still-threads`), so the default two
+  slots keep up with two
   vehicles triggering every 2 s with room to spare. Raise `SKYSIM_STILL_CONCURRENCY` for more
   vehicles on a box with the cores for it; renders run at nice +10 and never slow the tick.
 - **gateway SITL camera model**: "skysim survey camera", 1600x1200, hfov 73.7° — a 24 mm

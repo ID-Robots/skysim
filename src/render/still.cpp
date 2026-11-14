@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cerrno>
 #include <cmath>
+#include <exception>
+#include <string>
 
 #if defined(__linux__)
 #include <sys/resource.h>
@@ -186,13 +188,24 @@ StillFrame StillService::render(Lease &lease, const StillPose &pose, const Still
     }
     const Quat camera = still_camera_attitude(pose.quat_ned_frd, req, frame.camera);
     core::ThreadPool *pool = pools_[static_cast<size_t>(lease.slot())].get();
-    const Image image = render_still(*scene_, pose.position_ned, camera, req, pool, /*caller_runs=*/false);
-    // The encode is the other big cost of a frame; it runs on a worker too.
-    pool->parallel_for(
-        1, [&](size_t, size_t) { frame.jpeg = encode_jpeg(image, req.quality); }, /*caller_runs=*/false);
-    frame.status = frame.jpeg.empty() ? StillFrame::Status::kDisabled : StillFrame::Status::kOk;
+    try {
+        const Image image =
+            render_still(*scene_, pose.position_ned, camera, req, pool, /*caller_runs=*/false);
+        // The encode is the other big cost of a frame; it runs on a worker too.
+        pool->parallel_for(
+            1, [&](size_t, size_t) { frame.jpeg = encode_jpeg(image, req.quality); }, /*caller_runs=*/false);
+    } catch (const std::exception &e) {
+        // A 4096 x 4096 frame on a box short of memory: a failed request, not a dead server.
+        frame.jpeg.clear();
+        frame.error = std::string("render failed: ") + e.what();
+    }
     if (frame.jpeg.empty()) {
-        frame.error = "encode failed";
+        frame.status = StillFrame::Status::kFailed;
+        if (frame.error.empty()) {
+            frame.error = "render failed: encoder produced nothing";
+        }
+    } else {
+        frame.status = StillFrame::Status::kOk;
     }
     return frame;
 }

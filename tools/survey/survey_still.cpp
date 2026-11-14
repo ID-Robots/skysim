@@ -59,6 +59,15 @@ double number(const char *flag, const char *text) {
     return v;
 }
 
+// A whole number in [lo, hi]; anything else is a usage error, never an out-of-range cast.
+long long whole(const char *flag, const char *text, long long lo, long long hi) {
+    const double v = number(flag, text);
+    if (v != std::floor(v) || v < static_cast<double>(lo) || v > static_cast<double>(hi)) {
+        usage(flag);
+    }
+    return static_cast<long long>(v);
+}
+
 Options parse(int argc, char **argv) {
     Options o;
     for (int i = 1; i < argc; ++i) {
@@ -74,25 +83,26 @@ Options parse(int argc, char **argv) {
         } else if (std::strcmp(a, "--out") == 0) {
             o.out = value(a);
         } else if (std::strcmp(a, "--seed") == 0) {
-            o.seed = static_cast<uint32_t>(number(a, value(a)));
+            o.seed = static_cast<uint32_t>(whole(a, value(a), 0, 4294967295LL));
         } else if (std::strcmp(a, "--threads") == 0) {
-            o.threads = static_cast<int>(number(a, value(a)));
+            o.threads = static_cast<int>(whole(a, value(a), 0, 256));
         } else if (std::strcmp(a, "--repeat") == 0) {
-            o.repeat = static_cast<int>(number(a, value(a)));
+            o.repeat = static_cast<int>(whole(a, value(a), 1, 100000));
         } else if (std::strcmp(a, "--size") == 0) {
             const char *v = value(a);
             const char *x = std::strchr(v, 'x');
             if (x == nullptr) {
                 usage(a);
             }
-            o.request.width = std::atoi(v);
-            o.request.height = std::atoi(x + 1);
+            const std::string w(v, x);
+            o.request.width = static_cast<int>(whole(a, w.c_str(), 1, 100000));
+            o.request.height = static_cast<int>(whole(a, x + 1, 1, 100000));
         } else if (std::strcmp(a, "--hfov") == 0) {
             o.request.hfov_deg = number(a, value(a));
         } else if (std::strcmp(a, "--range") == 0) {
             o.request.range_m = number(a, value(a));
         } else if (std::strcmp(a, "--quality") == 0) {
-            o.request.quality = static_cast<int>(number(a, value(a)));
+            o.request.quality = static_cast<int>(whole(a, value(a), 1, 100));
         } else if (std::strcmp(a, "--home") == 0) {
             if (std::sscanf(value(a), "%lf,%lf,%lf", &o.home.lat_deg, &o.home.lon_deg, &o.home.alt_amsl_m) !=
                 3) {

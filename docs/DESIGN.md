@@ -163,7 +163,9 @@ haze starts at half the draw distance for stills, at the camera for the pilot vi
 (sphere of 6 378 100 m, longitude scaled at the mid latitude; `src/core/geo.h`), from
 `--spawn-home`, so a frame's geotag and the autopilot's own GPS agree.
 
-**Costs** (demo city, Ryzen 7 5700X): a 1600x1200 nadir still is about 0.3 s on one core and
-0.13 s on four, plus ~40 ms of JPEG encode; the pilot camera's 256x144 frame went from 0.3 ms
-to about 2.5 ms on its four-thread pool with texture and shadows, which still holds 10 fps for
-some 40 vehicles.
+**Costs** (demo city, Ryzen 7 5700X): a 1600x1200 nadir still is about 0.55 s on one core,
+0.27 s on two (the default per render) and 0.15–0.2 s on four, plus ~40 ms of JPEG encode.
+Under a sustained burst of stills (two rendering, the rest turned away with 503) tick p99 moved
+from 12.8 to 15.0 µs and the world kept 800 Hz. The pilot camera's 256x144 frame went from
+0.3 ms to about 2.5 ms on its four-thread pool with texture and shadows, which still holds
+10 fps for some 40 vehicles.

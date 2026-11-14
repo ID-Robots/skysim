@@ -38,7 +38,11 @@ inline constexpr double kSunLight[3] = {0.78, 0.75, 0.70};
 //: rather than as blank sky.
 inline constexpr double kMaxHaze = 0.82;
 
-inline uint8_t to_byte(double v) { return static_cast<uint8_t>(std::clamp(v, 0.0, 1.0) * 255.0 + 0.5); }
+// NaN maps to 0: std::clamp would pass it through to a cast that is undefined for it.
+inline uint8_t to_byte(double v) {
+    const double c = v > 0.0 ? (v < 1.0 ? v : 1.0) : 0.0;
+    return static_cast<uint8_t>(c * 255.0 + 0.5);
+}
 
 inline double mix(double a, double b, double t) { return a + (b - a) * t; }
 

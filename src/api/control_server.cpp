@@ -365,6 +365,9 @@ void reply_still(const ControlServer::Snapshots &snapshots, const std::optional<
     case render::StillFrame::Status::kDisabled:
         reply_error(res, 404, frame.error.empty() ? "still camera disabled" : frame.error);
         return;
+    case render::StillFrame::Status::kFailed:
+        reply_error(res, 500, frame.error);
+        return;
     case render::StillFrame::Status::kOk:
         break;
     }
@@ -377,6 +380,11 @@ void reply_still(const ControlServer::Snapshots &snapshots, const std::optional<
         set_header(res, "X-Skysim-Lat", "%.9f", geo.lat_deg);
         set_header(res, "X-Skysim-Lon", "%.9f", geo.lon_deg);
         set_header(res, "X-Skysim-Alt-Amsl", "%.3f", geo.alt_amsl_m);
+    } else {
+        // --spawn-home did not parse (skysim said so at startup): there is no earth position
+        // to give, and an invented one would geotag a survey somewhere it was not flown.
+        res.set_header("X-Skysim-Warning",
+                       "no geo anchor: --spawn-home is not lat,lon[,alt,yaw]; no lat/lon");
     }
     set_header(res, "X-Skysim-Alt-Rel", "%.3f", -v.pos_ned[2]);
     set_header(res, "X-Skysim-Yaw", "%.4f", frame.camera.yaw_deg);
@@ -763,11 +771,16 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
             reply_error(res, 400, error);
             return;
         }
+        // The whole number in the path, or no match at all: the regex takes any number of
+        // digits, and one too big for the id type must be "no such", not wrap onto another
+        // vehicle. Leading zeros name the same vehicle.
         const std::string key = req.matches[1].str();
-        // strtoul, not stoul: the regex accepts any number of digits; saturating is "no such".
-        const auto id = static_cast<uint32_t>(std::strtoul(key.c_str(), nullptr, 10));
-        for (const auto &v : snapshots.vehicles()) {
-            if (by_instance ? std::to_string(v.instance) == key : v.id == id) {
+        uint64_t number = 0;
+        const auto parsed = std::from_chars(key.data(), key.data() + key.size(), number);
+        const bool valid = parsed.ec == std::errc() && parsed.ptr == key.data() + key.size() &&
+                           number <= (by_instance ? 0x7FFFFFFFULL : 0xFFFFFFFFULL);
+        for (const auto &v : valid ? snapshots.vehicles() : std::vector<VehicleInfo>{}) {
+            if (by_instance ? static_cast<uint64_t>(v.instance) == number : v.id == number) {
                 reply_still(snapshots, home, v, request, res);
                 return;
             }
