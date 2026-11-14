@@ -12,6 +12,7 @@
 // starts a comment). For each frame one CSV line goes to stdout:
 //   name,lat,lon,alt_amsl,alt_rel,yaw,pitch,roll,render_ms
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -157,6 +158,11 @@ int main(int argc, char **argv) {
             char *end = nullptr;
             x = ok ? std::strtod(f.c_str(), &end) : 0.0;
             ok = ok && end != f.c_str() && std::isfinite(x);
+            // The whole field is the number: "12junk" is a malformed pose, not north 12.
+            while (ok && *end != '\0' && std::isspace(static_cast<unsigned char>(*end)) != 0) {
+                ++end;
+            }
+            ok = ok && *end == '\0';
         }
         if (!ok) {
             std::fprintf(stderr, "survey_still: bad pose line: %s\n", line.c_str());

@@ -267,15 +267,25 @@ def stamp_for(index: int) -> str:
 
 
 def demo_tiles(build: Path, cooker: Path) -> Path:
-    """The demo city of tools/getting_started.sh, cooked once into the build directory."""
-    tiles = build / "survey_demo" / "tiles"
-    if tiles.is_dir() and any(tiles.glob("*.jshape")):
+    """The demo city of tools/getting_started.sh, cooked once into the build directory.
+
+    Reused only once a cook has completed (a marker written after tile_cooker succeeds): a
+    cook interrupted half-way would otherwise be taken for the whole city on the next run.
+    """
+    base = build / "survey_demo"
+    tiles = base / "tiles"
+    done = base / "COOKED"
+    if done.is_file() and tiles.is_dir():
         return tiles
-    obj = build / "survey_demo" / "obj"
+    for stale in (*tiles.glob("*"), *(base / "obj").glob("*")):
+        stale.unlink()
+    done.unlink(missing_ok=True)
+    obj = base / "obj"
     subprocess.run([sys.executable, str(REPO / "tools" / "cooker" / "pretile.py"), str(obj),
                     "--extent", "600", "--tile-size", "300"], check=True, stdout=subprocess.DEVNULL)
     subprocess.run([str(cooker), str(tiles), *sorted(str(p) for p in obj.glob("*.obj"))], check=True,
                    stdout=subprocess.DEVNULL)
+    done.write_text("tools/cooker/pretile.py --extent 600 --tile-size 300\n")
     return tiles
 
 
@@ -337,8 +347,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    still = args.survey_still or args.build_dir / "survey_still"
-    cooker = args.tile_cooker or args.build_dir / "tile_cooker"
+    # Absolute, so a relative path (./survey_still) runs that file rather than a PATH lookup.
+    still = (args.survey_still or args.build_dir / "survey_still").resolve()
+    cooker = (args.tile_cooker or args.build_dir / "tile_cooker").resolve()
     if not os.access(still, os.X_OK):
         print(f"survey_fixture: no {still}; build it: cmake --build {args.build_dir} --target survey_still "
               "tile_cooker", file=sys.stderr)
@@ -347,8 +358,17 @@ def main(argv: list[str]) -> int:
 
     grids, frames = plan(args)
     args.out.mkdir(parents=True, exist_ok=True)
-    for old in args.out.glob("g*_*.jpg"):
-        old.unlink()  # a smaller plan into the same directory must not leave old frames behind
+    # A smaller plan into the same directory must not leave old frames behind — but only
+    # frames this tool wrote there (listed in its previous manifest) are anyone's to delete.
+    previous = args.out / "manifest.json"
+    if previous.is_file():
+        try:
+            owned = [img["name"] for img in json.loads(previous.read_text()).get("images", [])]
+        except (ValueError, AttributeError, TypeError, KeyError):
+            owned = []
+        for name in owned:
+            if isinstance(name, str) and Path(name).name == name:
+                (args.out / name).unlink(missing_ok=True)
 
     poses = "".join(f"{f.name},{f.north},{f.east},{f.down},{f.yaw},{f.pitch},0\n" for f in frames)
     cmd = [str(still), "--tiles", str(tiles), "--out", str(args.out), "--seed", str(args.seed),

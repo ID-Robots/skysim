@@ -74,7 +74,9 @@ class RasterScene {
     // The triangle a point on a building lies on (within tolerance_m of its plane), or -1.
     int find_triangle(const core::Vec3 &p, double tolerance_m = 0.02) const;
 
-    // Distance from p to the nearest outline edge of its face, through its triangle.
+    // Distance from p to the nearest outline edge of its face. Roofs measure against every
+    // outline edge of the whole face (a parapet must follow the roof's edge, not the edges of
+    // whichever triangle of it p happens to be in); other faces through p's own triangle.
     double edge_distance(size_t tri, const core::Vec3 &p) const;
 
     // Highest point of any building, metres above the ground plane.
@@ -94,6 +96,10 @@ class RasterScene {
     std::vector<uint8_t> tri_outline_;               // bit k: edge opposite vertex k is outline
     std::vector<std::array<float, 3>> tri_altitude_; // vertex k to the opposite edge, metres
     std::vector<SurfaceFrame> frames_;
+    // Outline edges of each roof face, as segments: frame f owns
+    // roof_outline_[roof_outline_start_[f] .. roof_outline_start_[f + 1]).
+    std::vector<uint32_t> roof_outline_start_;
+    std::vector<std::array<core::Vec3, 2>> roof_outline_;
     size_t building_count_{0};
     WorldTexture texture_{1};
 

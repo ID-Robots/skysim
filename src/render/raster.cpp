@@ -111,6 +111,10 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
                 const Vec3 dir = camera.ray(x, y);
                 int32_t id = band.ids[bi];
                 double t = -1.0;
+                // The ground plane, intersected on its own: geometry below it (a basement in
+                // a scanned tile, say) is underground and must lose to it, however the fill
+                // went. Ties go to the mesh — a face lying on the ground is drawn as itself.
+                const double ground_t = dir[2] > 1e-9 && eye[2] < 0.0 ? -eye[2] / dir[2] : -1.0;
                 if (id >= 0) {
                     // Exact hit on the winning triangle's plane.
                     const Vec3 &n = normals[static_cast<size_t>(id)];
@@ -121,9 +125,13 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
                     if (!(t > 0.0)) { // grazing: fall back to the filled depth
                         t = static_cast<double>(band.depth[bi]) / std::max(dot(dir, camera.forward()), 1e-9);
                     }
-                } else if (dir[2] > 1e-9 && eye[2] < 0.0) {
+                    if (ground_t > 0.0 && ground_t < t * (1.0 - 1e-9)) {
+                        id = kSurfaceGround;
+                        t = ground_t;
+                    }
+                } else if (ground_t > 0.0) {
                     id = kSurfaceGround;
-                    t = -eye[2] / dir[2];
+                    t = ground_t;
                 } else {
                     id = kSurfaceSky;
                 }

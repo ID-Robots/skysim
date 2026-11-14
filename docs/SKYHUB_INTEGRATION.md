@@ -73,13 +73,21 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   `SKYSIM_INSTANCE` set, fetch `{SKYSIM_URL}/instances/{SKYSIM_INSTANCE}/still.jpg?w=…&h=…&hfov=…&pitch=…`
   per CAMERA_FEEDBACK, retrying a `503` after `Retry-After` a bounded number of times. Do not
   draw on the frame — a banner breaks feature matching; mark it simulated in EXIF and the
-  sidecar instead. The pose headers say exactly where the frame was taken from; the
-  CAMERA_FEEDBACK position stays the EXIF GPS, and the two agree (same conversion as
-  ArduPilot's GPS).
+  sidecar instead.
+- **Which position geotags the frame.** A still is rendered from the vehicle's pose *when the
+  request is served*, and its `X-Skysim-*` headers are that pose exactly. A request sent as the
+  CAMERA_FEEDBACK arrives differs from the feedback by the distance flown in between (tens of
+  centimetres for tens of milliseconds at survey speed); one that waited out a `503` was
+  rendered further along the track (about 10 m after a 1 s retry at 10 m/s). Correlate the two before trusting the feedback for the
+  geotag: compare the frame's position (`X-Skysim-Lat` / `-Lon` / `-Alt-Amsl`) with the
+  feedback's. If they differ by more than the capture tolerance, geotag the simulated frame
+  with the pose headers (they are the truth for that picture) or drop the capture, and keep
+  the original CAMERA_FEEDBACK values in the sidecar either way. `X-Skysim-Time-Usec` is
+  skysim's world clock, offset per vehicle from the autopilot's `time_usec`
+  (docs/PROTOCOL.md), so compare positions, or time differences, not raw timestamps.
 - **Capacity**: a 1600x1200 frame takes about 0.55 s of one core, ~0.3 s on the two
   background-priority threads a render gets by default (`--still-threads`), so the default two
-  slots keep up with two
-  vehicles triggering every 2 s with room to spare. Raise `SKYSIM_STILL_CONCURRENCY` for more
+  slots keep up with two vehicles triggering every 2 s with room to spare. Raise `SKYSIM_STILL_CONCURRENCY` for more
   vehicles on a box with the cores for it; renders run at nice +10 and never slow the tick.
 - **gateway SITL camera model**: "skysim survey camera", 1600x1200, hfov 73.7° — a 24 mm
   equivalent (36 mm film width), e.g. a 13.2 mm-wide sensor with an 8.81 mm lens (what

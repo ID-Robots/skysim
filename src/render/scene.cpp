@@ -116,6 +116,8 @@ void RasterScene::build_identity() {
     tri_outline_.assign(n, 0);
     tri_altitude_.assign(n, {0.0F, 0.0F, 0.0F});
     frames_.clear();
+    roof_outline_start_.assign(1, 0);
+    roof_outline_.clear();
     building_count_ = 0;
     if (n == 0) {
         return;
@@ -253,6 +255,36 @@ void RasterScene::build_identity() {
     for (SurfaceFrame &f : frames_) {
         if (f.kind == SurfaceFrame::Kind::kRoof && -f.z_top < 0.05) {
             f.kind = SurfaceFrame::Kind::kUnderside;
+        }
+    }
+
+    // Every roof's outline as segments, grouped by face, for edge_distance().
+    roof_outline_start_.assign(frames_.size() + 1, 0);
+    roof_outline_.clear();
+    const auto is_roof = [this](size_t i) {
+        return frames_[tri_frame_[i]].kind == SurfaceFrame::Kind::kRoof;
+    };
+    for (size_t i = 0; i < n; ++i) {
+        if (is_roof(i)) {
+            for (uint32_t k = 0; k < 3; ++k) {
+                roof_outline_start_[tri_frame_[i] + 1] += (tri_outline_[i] >> k) & 1U;
+            }
+        }
+    }
+    for (size_t f = 0; f < frames_.size(); ++f) {
+        roof_outline_start_[f + 1] += roof_outline_start_[f];
+    }
+    roof_outline_.resize(roof_outline_start_.back());
+    std::vector<uint32_t> cursor(roof_outline_start_.begin(), roof_outline_start_.end() - 1);
+    for (size_t i = 0; i < n; ++i) {
+        if (!is_roof(i)) {
+            continue;
+        }
+        for (int k = 0; k < 3; ++k) {
+            if (((tri_outline_[i] >> k) & 1U) != 0U) {
+                roof_outline_[cursor[tri_frame_[i]]++] = {vertex(tris_[i], (k + 1) % 3),
+                                                          vertex(tris_[i], (k + 2) % 3)};
+            }
         }
     }
 
@@ -469,6 +501,20 @@ void RasterScene::lit_colour(int tri, const Vec3 &p, double footprint_m, double 
 }
 
 double RasterScene::edge_distance(size_t tri, const Vec3 &p) const {
+    const uint32_t frame = tri_frame_[tri];
+    if (frames_[frame].kind == SurfaceFrame::Kind::kRoof) {
+        double best_sq = 1e18;
+        for (uint32_t k = roof_outline_start_[frame]; k < roof_outline_start_[frame + 1]; ++k) {
+            const Vec3 &a = roof_outline_[k][0];
+            const Vec3 d = sub(roof_outline_[k][1], a);
+            const Vec3 ap = sub(p, a);
+            const double len_sq = dot(d, d);
+            const double s = len_sq > 0.0 ? std::clamp(dot(ap, d) / len_sq, 0.0, 1.0) : 0.0;
+            const Vec3 off{ap[0] - d[0] * s, ap[1] - d[1] * s, ap[2] - d[2] * s};
+            best_sq = std::min(best_sq, dot(off, off));
+        }
+        return best_sq < 1e18 ? std::sqrt(best_sq) : 1e9;
+    }
     const auto &t = tris_[tri];
     const Vec3 &n = normals_[tri];
     const double area2 = dot(n, cross(sub(t.b, t.a), sub(t.c, t.a)));

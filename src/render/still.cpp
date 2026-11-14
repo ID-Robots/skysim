@@ -55,7 +55,10 @@ CameraAngles angles_from_camera_quat(const Quat &camera_quat) {
     const double sinp = std::clamp(2.0 * (w * y - z * x), -1.0, 1.0);
     CameraAngles a;
     a.pitch_deg = std::asin(sinp) * kRadToDeg;
-    if (std::fabs(sinp) > 0.999999) {
+    // Only at the singularity itself (within ~1e-6 rad of it): anywhere else the regular
+    // conversion is well defined in doubles, and taking this branch early would report
+    // angles for a different optical axis.
+    if (std::fabs(sinp) > 1.0 - 1e-12) {
         // Looking straight down (or up): yaw is where the top of the image points.
         const Vec3 down = core::quat_rotate(q, {0.0, 0.0, 1.0});
         const double sign = sinp < 0.0 ? -1.0 : 1.0;

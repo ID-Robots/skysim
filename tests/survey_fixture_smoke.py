@@ -105,11 +105,20 @@ def main() -> int:
         check(b"SIMULATED IMAGERY" in jpeg[:2048] and b"skysim survey camera" in jpeg[:2048],
               "frames are marked simulated in EXIF")
 
-        # A narrower plan into the same directory leaves no stale frames behind.
+        # A narrower plan into the same directory leaves no stale frames behind — and touches
+        # nothing it did not write.
+        foreign = tmp / "a" / "gopro_0001.jpg"
+        foreign.write_bytes(b"not ours")
         third = run_fixture(still, tiles, tmp / "a", "--size", "60x40")
         check(third.returncode == 0, "re-run into the same directory")
         rerun = json.loads((tmp / "a" / "manifest.json").read_text())
-        check(len(digests(tmp / "a")) == rerun["frames"] < manifest["frames"], "old frames cleared")
+        check(len(digests(tmp / "a")) - 1 == rerun["frames"] < manifest["frames"], "old frames cleared")
+        check(foreign.read_bytes() == b"not ours", "an image the fixture did not write is left alone")
+
+        # The renderer refuses a malformed pose rather than reading a number's prefix.
+        junk = subprocess.run([still, "--tiles", str(tiles), "--out", str(tmp / "d")],
+                              input="f.jpg,12junk,0,-60,90,-90,0\n", capture_output=True, text=True, check=False)
+        check(junk.returncode == 2 and "bad pose line" in junk.stderr, "malformed pose refused")
 
         bad = run_fixture(still, tiles, tmp / "c", "--front-overlap", "1.2")
         check(bad.returncode == 2, "an impossible overlap is refused")

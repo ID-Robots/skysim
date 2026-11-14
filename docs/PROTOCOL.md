@@ -154,16 +154,27 @@ Hard interop rules for our emitter:
 was rendered from, in this protocol's terms, so a frame can be lined up with what the autopilot
 saw:
 
+Verified against the Copter-4.7.0 tag:
+
 - `X-Skysim-Time-Usec` is the state JSON's `"timestamp"` (world physics time) in microseconds,
-  from the same tick as the position and attitude.
+  from the same tick as the position and attitude. ArduPilot's own clock advances by the deltas
+  of that field (`SIM_JSON.cpp:500-508`, `time_now_us += deltat * 1.0e6`), so an autopilot's
+  `time_usec` (e.g. in CAMERA_FEEDBACK) differs from it by a constant per vehicle — the world
+  time at which that SITL connected.
 - The position is the `"position"` NED sent in that tick; `X-Skysim-Alt-Rel` is `-down`.
 - `X-Skysim-Lat` / `-Lon` / `-Alt-Amsl` are that NED position offset from `--spawn-home` (the
-  `--home` every managed SITL is given) the way ArduPilot turns `"position"` into its GPS fix:
-  `Location::offset()` in `libraries/AP_Common/Location.cpp`, a flat-earth step with
-  `LOCATION_SCALING_FACTOR_INV = 89.83204953368922` (1e-7 deg per metre, RADIUS_OF_EARTH
-  6 378 100 m) and the east step divided by `longitude_scale()` (cosine of the mid latitude,
-  floored at 0.01). Implemented in `src/core/geo.h`. Re-verify against the pinned
-  `$ARDUPILOT_ROOT` if Location.cpp changes.
+  `--home` every managed SITL is given) the way ArduPilot turns `"position"` into its GPS fix.
+  SITL sets `position = state.position + origin.get_distance_NE_double(home)`
+  (`SIM_JSON.cpp:401-403`) and then `location = origin; location.offset(position.x,
+  position.y)`, `alt = home.alt - position.z` (`SIM_Aircraft.cpp:161-166`). `offset_latlng()`
+  (`AP_Common/Location.cpp:480-487`) steps `dlat = north * LOCATION_SCALING_FACTOR_INV` and
+  `dlng = east * LOCATION_SCALING_FACTOR_INV / longitude_scale(lat + dlat/2)`, with
+  `LATLON_TO_M_INV = 89.83204953368922` (1e-7 deg per metre; `AP_Math/definitions.h:52-53`,
+  i.e. `RADIUS_OF_EARTH 6378100`, `:48`) and `longitude_scale()` = cos(lat), floored at 0.01
+  (`Location.cpp:528-532`). `src/core/geo.h` does the same from home in doubles. SITL also
+  re-bases `origin` on the vehicle once a second (`SIM_Aircraft.cpp:192-203`) and works in
+  integer 1e-7 degrees; over a survey block both differ from offsetting home directly by about a
+  centimetre, well under one pixel of a survey frame.
 - `X-Skysim-Yaw` / `-Pitch` / `-Roll` are the **camera's** axes (x along the optical axis, y to
   the image's right, z to its bottom) as NED Z-Y-X Euler angles in degrees, yaw 0..360. With a
   stabilised gimbal they are heading + requested yaw, requested pitch, 0; at pitch ±90 roll is

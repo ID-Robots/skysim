@@ -396,6 +396,25 @@ void test_angles() {
     // ... and at it, where yaw is where the top of the image faces.
     const CameraAngles n = angles_from_camera_quat(camera_quat_from_angles(250.0, -90.0, 0.0));
     CHECK(std::fabs(n.yaw_deg - 250.0) < 1e-6 && n.pitch_deg == -90.0 && n.roll_deg == 0.0);
+    // Near the pole, but not at it, the angles must still describe the same camera: rebuild the
+    // attitude from them and compare its axes with the original's.
+    for (const auto &[yaw, pitch, roll] : {std::array<double, 3>{0.0, -89.95, 90.0},
+                                           {45.0, -89.999, -30.0},
+                                           {250.0, -90.0, 0.0},
+                                           {10.0, -60.0, 15.0},
+                                           {300.0, 89.99, 45.0}}) {
+        const Quat q0 = camera_quat_from_angles(yaw, pitch, roll);
+        const CameraAngles back = angles_from_camera_quat(q0);
+        const Quat q1 = camera_quat_from_angles(back.yaw_deg, back.pitch_deg, back.roll_deg);
+        double worst = 0.0;
+        for (const Vec3 &axis : {Vec3{1, 0, 0}, Vec3{0, 1, 0}, Vec3{0, 0, 1}}) {
+            const Vec3 a0 = skysim::core::quat_rotate(q0, axis);
+            const Vec3 a1 = skysim::core::quat_rotate(q1, axis);
+            worst = std::max(
+                {worst, std::fabs(a0[0] - a1[0]), std::fabs(a0[1] - a1[1]), std::fabs(a0[2] - a1[2])});
+        }
+        CHECK(worst < 1e-6);
+    }
     const CameraAngles up = angles_from_camera_quat(camera_quat_from_angles(30.0, 90.0, 0.0));
     CHECK(std::fabs(up.yaw_deg - 30.0) < 1e-6 && up.pitch_deg == 90.0);
 
@@ -640,6 +659,50 @@ void test_ground_without_tiles(skysim::core::ThreadPool &pool) {
                          &pool, true, &surface);
     CHECK(surface[5 * level.width + 10] == render::kSurfaceSky);
     CHECK(surface[static_cast<size_t>(level.height - 5) * level.width + 10] == render::kSurfaceGround);
+}
+
+// Faces built straight from triangles (NED), for shapes the cooked fixtures do not have.
+skysim::core::World::Triangle tri(Vec3 a, Vec3 b, Vec3 c) {
+    skysim::core::World::Triangle t;
+    t.a = a;
+    t.b = b;
+    t.c = c;
+    return t;
+}
+
+void test_geometry_edges(skysim::core::ThreadPool &pool) {
+    // A long, narrow roof (100 x 10 m, 20 m up) split along its diagonal. (99, 9.8) lies in the
+    // triangle without the long east edge, yet that edge — 0.2 m away — is the nearest one of
+    // the roof's outline, and the parapet must follow it.
+    render::RasterScene roof;
+    const double z = -20.0;
+    roof.build({tri({0, 0, z}, {100, 10, z}, {100, 0, z}), tri({0, 0, z}, {0, 10, z}, {100, 10, z}),
+                tri({0, 0, 0}, {100, 0, 0}, {100, 0, z}), tri({0, 0, 0}, {100, 0, z}, {0, 0, z})});
+    const int t = roof.find_triangle({99.0, 9.8, z});
+    CHECK(t >= 0);
+    if (t >= 0) {
+        CHECK(roof.frame_of(static_cast<size_t>(t)).kind == render::SurfaceFrame::Kind::kRoof);
+        CHECK(std::fabs(roof.edge_distance(static_cast<size_t>(t), {99.0, 9.8, z}) - 0.2) < 1e-9);
+        CHECK(std::fabs(roof.edge_distance(static_cast<size_t>(t), {50.0, 5.0, z}) - 5.0) < 1e-9);
+    }
+    // A wall measures through its own triangle.
+    const int w = roof.find_triangle({50.0, 0.0, -5.0});
+    CHECK(w >= 0 && roof.frame_of(static_cast<size_t>(w)).kind == render::SurfaceFrame::Kind::kWall);
+
+    // Geometry below the ground plane is underground: a nadir camera sees the ground over it,
+    // never the buried face, while a face standing on the ground still shows.
+    render::RasterScene buried;
+    buried.build({tri({-50, -50, 10}, {50, -50, 10}, {50, 50, 10}),
+                  tri({-50, -50, 10}, {50, 50, 10}, {-50, 50, 10}),
+                  tri({-5, -5, -1}, {5, -5, -1}, {5, 5, -1}), tri({-5, -5, -1}, {5, 5, -1}, {-5, 5, -1})});
+    std::vector<int32_t> surface;
+    render::StillRequest req = small_request(128, 96);
+    render::render_still(buried, {20.0, 20.0, -60.0}, render::camera_quat_from_angles(0, -90, 0), req, &pool,
+                         true, &surface);
+    CHECK(surface[static_cast<size_t>(req.height / 2) * req.width + req.width / 2] == render::kSurfaceGround);
+    render::render_still(buried, {0.0, 0.0, -60.0}, render::camera_quat_from_angles(0, -90, 0), req, &pool,
+                         true, &surface);
+    CHECK(surface[static_cast<size_t>(req.height / 2) * req.width + req.width / 2] >= 0); // the 1 m slab
 }
 
 void test_service(const std::shared_ptr<const render::RasterScene> &scene) {
@@ -1035,6 +1098,7 @@ int main() {
     test_determinism(*scene, *reseeded, pool);
     test_consistency(*scene, pool);
     test_ground_without_tiles(pool);
+    test_geometry_edges(pool);
     test_service(scene);
     test_http(scene);
     test_pilot_camera(scene);
