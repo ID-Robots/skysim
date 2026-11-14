@@ -65,6 +65,13 @@ if [[ -n "${SKYSIM_CAMERA_FPS:-}" ]]; then
     add_if_set SKYSIM_CAMERA_RANGE --camera-range
 fi
 
+# Survey still camera (GET /instances/<n>/still.jpg). On by default and independent of
+# SKYSIM_CAMERA_FPS: it renders on demand, so it costs nothing until it is asked for.
+# SKYSIM_STILL_CONCURRENCY caps renders in flight (default 2; 0 turns the route off) and
+# SKYSIM_TEXTURE_SEED picks the world's texture (default 1) for stills and camera alike.
+add_if_set SKYSIM_STILL_CONCURRENCY --still-concurrency
+add_if_set SKYSIM_TEXTURE_SEED --texture-seed
+
 if [[ -n "${SKYSIM_EXTRA_ARGS:-}" ]]; then
     # shellcheck disable=SC2206 # deliberate word splitting: caller supplies flags
     extra=(${SKYSIM_EXTRA_ARGS})

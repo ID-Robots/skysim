@@ -47,7 +47,7 @@ jobs:
           cmake --build build --parallel --target
           test_packets test_json test_frames test_quad test_world test_collision
           test_endpoint test_manager test_api test_radio test_radio_api test_thread_pool
-          test_streamer
+          test_streamer test_still
       - name: Run unit tests
         run: ctest --test-dir build --label-regex '^unit$' --output-on-failure
 
@@ -62,7 +62,7 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
       - name: Build simulator
-        run: cmake --build build --parallel --target skysim
+        run: cmake --build build --parallel --target skysim survey_still tile_cooker
       - name: Run binary and lifecycle happy paths
         run: ctest --test-dir build --label-regex '^happy-path$' --output-on-failure
 

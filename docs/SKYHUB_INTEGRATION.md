@@ -51,6 +51,37 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   coverage holes) and skysim then serves the ground truth — `GET /radio/sample`,
   `GET /radio/grid`, and a `radio` object per vehicle in `GET /vehicles`. Model and API:
   [`docs/RADIO.md`](RADIO.md).
+- **[S5] Survey still camera** (done; 3D mapping contract, section 1):
+  `GET /instances/<n>/still.jpg` (or `/vehicles/<id>/still.jpg`) renders one frame on demand
+  from the vehicle's latest snapshot pose — independent of `SKYSIM_CAMERA_FPS`. Query (all
+  optional): `w` 1600 (64..4096), `h` 1200 (64..4096), `hfov` 73.7 (10..120), `pitch` -90
+  (-90..0), `yaw` 0 (relative to heading, ±360), `roll_stab` 1 (0 = rigid mount), `range` 600
+  (50..3000), `q` 90 (1..100). Response `image/jpeg` with `X-Skysim-Time-Usec`,
+  `X-Skysim-Lat`, `X-Skysim-Lon`, `X-Skysim-Alt-Amsl`, `X-Skysim-Alt-Rel`, `X-Skysim-Yaw`,
+  `X-Skysim-Pitch`, `X-Skysim-Roll` (camera axes, degrees) and `X-Skysim-Hfov` (also
+  `X-Skysim-Ned`, `-Vehicle`, `-Instance`). Errors are JSON: `400` for a bad query, `404` for an
+  unknown instance/vehicle or a still camera that is off, `503` + `Retry-After: 1` when
+  `SKYSIM_STILL_CONCURRENCY` (default 2) renders are already running. `SKYSIM_TEXTURE_SEED`
+  (default 1) picks the world's texture. Meaning of the pose headers: docs/PROTOCOL.md.
+
+#### Using the still camera from a simulated survey (core, gateway)
+
+- **core `SurveyCaptureHandler`** (contract section 2): with `SKYSIM_URL` and
+  `SKYSIM_INSTANCE` set, fetch `{SKYSIM_URL}/instances/{SKYSIM_INSTANCE}/still.jpg?w=…&h=…&hfov=…&pitch=…`
+  per CAMERA_FEEDBACK, retrying a `503` after `Retry-After` a bounded number of times. Do not
+  draw on the frame — a banner breaks feature matching; mark it simulated in EXIF and the
+  sidecar instead. The pose headers say exactly where the frame was taken from; the
+  CAMERA_FEEDBACK position stays the EXIF GPS, and the two agree (same conversion as
+  ArduPilot's GPS).
+- **Capacity**: a 1600x1200 frame takes about 0.3 s of one core (two background-priority
+  threads per render by default, `--still-threads`), so the default two slots keep up with two
+  vehicles triggering every 2 s with room to spare. Raise `SKYSIM_STILL_CONCURRENCY` for more
+  vehicles on a box with the cores for it; renders run at nice +10 and never slow the tick.
+- **gateway SITL camera model**: "skysim survey camera", 1600x1200, hfov 73.7° — a 24 mm
+  equivalent (36 mm film width), e.g. a 13.2 mm-wide sensor with an 8.81 mm lens (what
+  `tools/survey/survey_fixture.py` writes into EXIF).
+- **Reconstruction fixture**: `tools/survey/survey_fixture.py` renders a survey grid of the demo
+  city without ArduPilot, with EXIF GPS and an ODM `geo.txt`; see the README.
 
 ### 2. skyhub_core (`sitl/` image)
 - **[C1] `scripts/sitl.sh`**: no change needed for the model (env `SITL_MODEL` already

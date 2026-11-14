@@ -121,7 +121,9 @@ int main(int argc, char **argv) {
     const skysim::render::Renderer renderer(cfg);
 
     const skysim::core::Vec3 pos{o.north, o.east, -o.alt};
-    skysim::core::ThreadPool pool(o.threads);
+    // --threads 0 is serial: no pool at all, rather than a pool of one worker plus the caller.
+    skysim::core::ThreadPool pool(std::max(o.threads, 1));
+    skysim::core::ThreadPool *workers = o.threads > 0 ? &pool : nullptr;
 
     skysim::render::RasterScene scene;
     const skysim::render::Rasterizer raster(cfg);
@@ -135,7 +137,8 @@ int main(int argc, char **argv) {
     const auto t0 = std::chrono::steady_clock::now();
     skysim::render::Image image;
     for (int i = 0; i < std::max(1, o.repeat); ++i) {
-        image = o.raster ? raster.render(scene, camera, &pool) : renderer.render(world, 0, pos, attitude, &pool);
+        image = o.raster ? raster.render(scene, camera, workers)
+                         : renderer.render(world, 0, pos, attitude, workers);
     }
     const auto t1 = std::chrono::steady_clock::now();
     if (o.repeat > 1) {

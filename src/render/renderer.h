@@ -4,6 +4,7 @@
 #include "core/world.h"
 #include "render/camera.h"
 #include "render/image.h"
+#include "render/scene.h"
 
 #include <cstdint>
 #include <vector>
@@ -27,22 +28,31 @@ namespace skysim::render {
 //
 // The cost is per-pixel rather than per-triangle, which is why the resolution is
 // deliberately small and the rows are spread across the pool.
+//
+// Appearance comes from a RasterScene: the hit point is looked up on the scene's triangles and
+// lit and textured by exactly the code the rasteriser uses, so the two pictures differ only
+// where their geometry does. Without a scene the ground is still textured and lit (an empty
+// scene's), and buildings are a flat grey.
 class Renderer {
   public:
-    explicit Renderer(const CameraConfig &cfg) : cfg_(cfg) {}
+    explicit Renderer(const CameraConfig &cfg, const RasterScene *appearance = nullptr)
+        : cfg_(cfg), appearance_(appearance) {}
 
     const CameraConfig &config() const { return cfg_; }
 
     // Render the view from `vehicle_id`'s airframe. The vehicle's own collision
     // box is excluded, or every ray would hit it at zero range.
+    // `surface`, when given, receives what each pixel hit, as Rasterizer::render reports it.
     Image render(const core::World &world, uint32_t vehicle_id, const core::Vec3 &position_ned,
-                 const core::Quat &quat_ned_frd, core::ThreadPool *pool = nullptr) const;
+                 const core::Quat &quat_ned_frd, core::ThreadPool *pool = nullptr,
+                 std::vector<int32_t> *surface = nullptr) const;
 
   private:
-    void render_rows(const core::World &world, const Camera &camera, uint32_t vehicle_id, Image &image, int row_begin,
-                     int row_end) const;
+    void render_rows(const core::World &world, const Camera &camera, uint32_t vehicle_id, Image &image,
+                     std::vector<int32_t> *surface, int row_begin, int row_end) const;
 
     CameraConfig cfg_;
+    const RasterScene *appearance_;
 };
 
 } // namespace skysim::render

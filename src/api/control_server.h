@@ -15,6 +15,7 @@
 #include "core/world.h"
 #include "radio/radio_model.h"
 #include "render/frame_store.h"
+#include "render/still_request.h"
 #include "vehicle/manager.h"
 
 namespace skysim::api {
@@ -31,6 +32,10 @@ struct VehicleInfo {
     uint64_t static_contacts = 0;    // any static touch, landings included
     uint64_t building_contacts = 0;  // building-tile strikes only — the "hit a building" signal
     double pos_ned[3] = {0.0, 0.0, 0.0};
+    // Attitude (FRD -> NED, w x y z) and the sim time of the tick this snapshot is from:
+    // with pos_ned, the exact pose a survey still is drawn from and stamped with.
+    double quat_ned_frd[4] = {1.0, 0.0, 0.0, 0.0};
+    double sim_time_s = 0.0;
 };
 
 struct MetricsInfo {
@@ -111,6 +116,11 @@ class ControlServer {
         // timestamp is what lets the MJPEG routes send a frame once instead of re-sending
         // whatever is in the slot. Published by the tick thread like everything else here.
         std::function<skysim::render::FrameStore::Frame(uint32_t)> camera_frame;
+        // Survey still camera: render one frame from this vehicle's snapshot pose. Null when
+        // the still camera is off, and the still routes answer 404. Called on an HTTP thread;
+        // it must not touch world state (it gets everything it needs in the VehicleInfo).
+        std::function<skysim::render::StillFrame(const VehicleInfo &, const skysim::render::StillRequest &)>
+            still;
     };
 
     // The simulated radio field behind /radio (docs/RADIO.md). It is not world state — no
@@ -120,7 +130,8 @@ class ControlServer {
         // Shared with whoever loaded a spec at startup; null makes the server keep its own.
         std::shared_ptr<radio::RadioField> field;
         // Where the world's NED origin is on the earth (the spawn home and its ground AMSL).
-        // Without it GET /vehicles cannot place a vehicle in the field and carries no radio.
+        // Without it GET /vehicles cannot place a vehicle in the field and carries no radio,
+        // and a survey still carries no X-Skysim-Lat / -Lon / -Alt-Amsl.
         std::optional<radio::GeoAnchor> home;
     };
 

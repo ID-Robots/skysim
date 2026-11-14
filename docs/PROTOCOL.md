@@ -148,6 +148,27 @@ Hard interop rules for our emitter:
 - Contact events must not produce NaN/Inf or multi-thousand-g spikes; clamp and smooth impulses
   (see DESIGN.md ground-contact notes) or the EKF diverges on landing.
 
+## Survey still pose headers (HTTP, not part of the wire protocol)
+
+`GET /instances/<n>/still.jpg` (docs/SKYHUB_INTEGRATION.md) stamps each frame with the pose it
+was rendered from, in this protocol's terms, so a frame can be lined up with what the autopilot
+saw:
+
+- `X-Skysim-Time-Usec` is the state JSON's `"timestamp"` (world physics time) in microseconds,
+  from the same tick as the position and attitude.
+- The position is the `"position"` NED sent in that tick; `X-Skysim-Alt-Rel` is `-down`.
+- `X-Skysim-Lat` / `-Lon` / `-Alt-Amsl` are that NED position offset from `--spawn-home` (the
+  `--home` every managed SITL is given) the way ArduPilot turns `"position"` into its GPS fix:
+  `Location::offset()` in `libraries/AP_Common/Location.cpp`, a flat-earth step with
+  `LOCATION_SCALING_FACTOR_INV = 89.83204953368922` (1e-7 deg per metre, RADIUS_OF_EARTH
+  6 378 100 m) and the east step divided by `longitude_scale()` (cosine of the mid latitude,
+  floored at 0.01). Implemented in `src/core/geo.h`. Re-verify against the pinned
+  `$ARDUPILOT_ROOT` if Location.cpp changes.
+- `X-Skysim-Yaw` / `-Pitch` / `-Roll` are the **camera's** axes (x along the optical axis, y to
+  the image's right, z to its bottom) as NED Z-Y-X Euler angles in degrees, yaw 0..360. With a
+  stabilised gimbal they are heading + requested yaw, requested pitch, 0; at pitch ±90 roll is
+  reported 0 and yaw is where the top of the image faces.
+
 ## Conformance
 
 `tools/harness/conformance.py` launches N real SITL instances against the sim and asserts:

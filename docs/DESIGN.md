@@ -3,8 +3,9 @@
 ## What this is / is not
 
 A headless, CPU-optimized rigid-body server speaking the ArduPilot SITL JSON protocol.
-Not a general robotics simulator: no plugins, no rendering in-process, no articulated bodies (v1).
-Visualization is out-of-process (WS state stream → three.js/Cesium client, later SkyHub itself).
+Not a general robotics simulator: no plugins, no articulated bodies (v1). Visualization is
+out-of-process (WS state stream → three.js/Cesium client, later SkyHub itself). The only
+in-process drawing is the vehicle cameras (below), and it never runs on the tick thread.
 
 ## Process model
 
@@ -114,3 +115,55 @@ core. Beyond that, shard. Re-measure with `world_bench` / `proto_bench` before t
 - `DELETE /vehicles/{id}`, `GET /vehicles`, `GET /metrics`, `WS /state` (snapshot stream).
 - SkyHub connects to each vehicle's MAVLink exactly as it would a real aircraft — the sim is
   invisible to it. This is the digital-twin rehearsal mode.
+
+## Rendering: pilot camera and survey stills
+
+Two cameras draw the same static world, off the tick thread:
+
+- **Pilot camera** (`--camera-fps`, `RenderService`): a small frame (256x144) per vehicle at a
+  fixed rate on its own thread and pool, served as `camera.jpg` / `camera.mjpg`.
+- **Survey still** (`GET .../still.jpg`, `StillService`): one large frame on request. The HTTP
+  route copies the vehicle out of the per-tick snapshot (position, attitude and sim time from
+  the same tick — `VehicleInfo` carries all three) and hands it to the still service, which
+  renders on one of `--still-concurrency` slots. Each slot owns a worker pool created at
+  startup whose threads run at nice +10, so on a box short of cores the physics tick wins every
+  contest for a CPU; the HTTP thread itself only waits. A request that finds every slot taken
+  gets `503` + `Retry-After` at once — a queue would hold HTTP workers and sockets for as long
+  as the backlog takes. Nothing in the path takes a lock the tick thread holds except the
+  snapshot mutex, for the length of a vector copy.
+
+**Scene.** `RasterScene` is built once from the tile directory (all tiles, not the streamed
+set) and shared read-only by both cameras. On build it works out what each triangle belongs to:
+buildings are connected components through shared corners, keyed by their lowest corner so a
+building keeps its colours whatever order tiles load in; faces are coplanar edge-connected sets
+(their extent places windows; edges no coplanar neighbour shares are the outline, which places
+parapets); and a uniform 2D grid of every shadow-casting triangle, with the tallest point per
+cell, carries shadow rays. The physics ground slab is dropped: the ground is the plane NED
+z = 0, intersected analytically, so it renders where no tile is loaded and never vanishes
+because a 4 km triangle reached behind the camera.
+
+**Rasteriser.** Per band of rows: fill triangles (near-plane clipped) into a depth and
+triangle-id buffer, then shade each pixel once at the exact intersection of its ray with the
+winning triangle's plane (or the ground plane). Bands are dealt round-robin to the workers and
+own their pixels, so the output does not depend on the thread count.
+
+**Appearance.** `WorldTexture` is a pure function of the world position, the building key, the
+face, and `--texture-seed`: roads on a 100 m grid offset 50 m (the demo city's streets) with
+markings, Voronoi land cover with shrubs, per-building wall and roof materials, windows,
+plinths, cornices, parapets and rooftop plant, detail to about 1 cm. Every pattern is
+band-limited by the pixel footprint — octaves finer than two pixels fade to their mean, stripes
+blend to their coverage — and the footprint is the exact area a pixel covers on the surface
+(Jacobian of the ray–plane intersection), not a function of distance alone. On a plane facing
+the camera squarely that area is the same for every pixel, so two nadir photos of the same
+spot filter it identically and give it byte-identical colour (`tests/test_still.cpp`). Light
+is a sky term plus a sun term (sun to the south-west, 55° up) with cast shadows from the grid;
+haze starts at half the draw distance for stills, at the camera for the pilot view.
+
+**Geotags.** Pose headers convert NED to lat/lon with ArduPilot's `Location::offset`
+(sphere of 6 378 100 m, longitude scaled at the mid latitude; `src/core/geo.h`), from
+`--spawn-home`, so a frame's geotag and the autopilot's own GPS agree.
+
+**Costs** (demo city, Ryzen 7 5700X): a 1600x1200 nadir still is about 0.3 s on one core and
+0.13 s on four, plus ~40 ms of JPEG encode; the pilot camera's 256x144 frame went from 0.3 ms
+to about 2.5 ms on its four-thread pool with texture and shadows, which still holds 10 fps for
+some 40 vehicles.

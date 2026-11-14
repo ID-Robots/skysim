@@ -18,10 +18,18 @@ namespace skysim::core {
 
 class ThreadPool {
   public:
-    explicit ThreadPool(int workers) {
+    // on_start runs once on each worker thread before it takes any work — the hook a
+    // background renderer uses to lower its workers' scheduling priority, so they yield to
+    // the physics tick rather than compete with it.
+    explicit ThreadPool(int workers, std::function<void()> on_start = {}) {
         const int n = workers > 1 ? workers : 1;
         for (int i = 0; i < n; ++i) {
-            threads_.emplace_back([this, i, n] { worker_loop(i, n); });
+            threads_.emplace_back([this, i, n, on_start] {
+                if (on_start) {
+                    on_start();
+                }
+                worker_loop(i, n);
+            });
         }
     }
 
@@ -44,22 +52,31 @@ class ThreadPool {
 
     // Run fn(i) for i in [0,count), split into <=size() contiguous chunks, one per worker plus
     // the calling thread. Blocks until all chunks finish. Safe to call only from one thread.
-    void parallel_for(size_t count, const std::function<void(size_t begin, size_t end)> &fn) {
+    //
+    // caller_runs = false keeps the calling thread out of the work: it only waits, and every
+    // chunk runs on a pool worker (one chunk per worker). For a caller whose own thread must
+    // not do the heavy lifting — an HTTP worker, which runs at normal priority.
+    void parallel_for(size_t count, const std::function<void(size_t begin, size_t end)> &fn,
+                      bool caller_runs = true) {
         if (count == 0) {
             return;
         }
-        const size_t nchunks = std::min(threads_.size() + 1, count);
+        const size_t nchunks = std::min(threads_.size() + (caller_runs ? 1 : 0), count);
+        const size_t first = caller_runs ? 1 : 0; // first chunk a worker owns
         {
             std::lock_guard<std::mutex> lock(mutex_);
             fn_ = &fn;
             count_ = count;
             chunks_ = nchunks;
-            remaining_ = nchunks - 1; // workers handle chunks 1..nchunks-1; caller does chunk 0
+            first_ = first;
+            remaining_ = nchunks - first; // workers handle chunks first..nchunks-1
             ++generation_;
         }
         cv_.notify_all();
 
-        run_chunk(0, nchunks, count, fn); // caller runs the first chunk
+        if (caller_runs) {
+            run_chunk(0, nchunks, count, fn); // caller runs the first chunk
+        }
 
         std::unique_lock<std::mutex> lock(done_mutex_);
         done_cv_.wait(lock, [this] { return remaining_.load(std::memory_order_acquire) == 0; });
@@ -79,7 +96,7 @@ class ThreadPool {
         uint64_t seen = 0;
         while (true) {
             const std::function<void(size_t, size_t)> *fn;
-            size_t count, chunks;
+            size_t count, chunks, first;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 cv_.wait(lock, [this, &seen] { return generation_ != seen; });
@@ -90,9 +107,10 @@ class ThreadPool {
                 fn = fn_;
                 count = count_;
                 chunks = chunks_;
+                first = first_;
             }
-            // This worker owns chunk (worker_index + 1) if it exists.
-            const size_t idx = static_cast<size_t>(worker_index) + 1;
+            // This worker owns chunk (worker_index + first) if it exists.
+            const size_t idx = static_cast<size_t>(worker_index) + first;
             if (idx < chunks) {
                 run_chunk(idx, chunks, count, *fn);
             }
@@ -113,6 +131,7 @@ class ThreadPool {
     const std::function<void(size_t, size_t)> *fn_ = nullptr;
     size_t count_ = 0;
     size_t chunks_ = 0;
+    size_t first_ = 1;
 
     std::atomic<size_t> remaining_{0};
     std::mutex done_mutex_;

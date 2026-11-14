@@ -30,6 +30,8 @@
 #include "radio/radio_model.h"
 #include "radio/radio_spec.h"
 #include "render/render_service.h"
+#include "render/scene.h"
+#include "render/still.h"
 #include "protocol/udp_endpoint.h"
 #include "terrain/tile_streamer.h"
 #include "vehicle/manager.h"
@@ -88,6 +90,13 @@ struct Options {
     // Worker threads for the render pass. They are outside the physics tick, so
     // this trades cores for frame rate and nothing else.
     int camera_threads = 4;
+    // Texture of the rendered world (SKYSIM_TEXTURE_SEED): the same seed draws the same world
+    // in every run, the pilot camera and the survey stills alike.
+    uint32_t texture_seed = 1;
+    // Survey still camera (GET .../still.jpg): renders at once at most (SKYSIM_STILL_CONCURRENCY,
+    // 0 = off), and worker threads per render. Independent of the camera feed above.
+    int still_concurrency = 2;
+    int still_threads = 2;
     double grace_s = 30.0;              // interactive: frozen longer than this => auto-despawn
     double strict_timeout_s = 10.0;     // strict: barrier stalled longer => abort with report
     std::string spawn_binary;           // arducopter for POST /vehicles {"launch_process":true}
@@ -99,6 +108,21 @@ struct Options {
     std::string radio_spec;
     double spacing_m = 5.0; // east spacing between spawn positions (fleet airspace layout)
 };
+
+// A whole number in [lo, hi], or exit with the bad-option code: these set thread counts and
+// the world's texture, where a silently truncated "2x" or a wrapped "-1" is a different
+// deployment from the one that was asked for.
+unsigned long long whole_number(const char *text, const char *flag, unsigned long long lo,
+                                unsigned long long hi) {
+    unsigned long long v = 0;
+    const char *end = text + std::strlen(text);
+    const auto parsed = std::from_chars(text, end, v);
+    if (parsed.ec != std::errc() || parsed.ptr != end || v < lo || v > hi) {
+        std::fprintf(stderr, "skysim: %s must be a whole number from %llu to %llu\n", flag, lo, hi);
+        std::exit(2);
+    }
+    return v;
+}
 
 Options parse_args(int argc, char **argv) {
     Options o;
@@ -177,6 +201,15 @@ Options parse_args(int argc, char **argv) {
             o.camera_quality = std::atoi(need_value("--camera-quality"));
         } else if (std::strcmp(argv[i], "--camera-threads") == 0) {
             o.camera_threads = std::atoi(need_value("--camera-threads"));
+        } else if (std::strcmp(argv[i], "--texture-seed") == 0) {
+            o.texture_seed = static_cast<uint32_t>(
+                whole_number(need_value("--texture-seed"), "--texture-seed", 0, 4294967295ULL));
+        } else if (std::strcmp(argv[i], "--still-concurrency") == 0) {
+            o.still_concurrency = static_cast<int>(
+                whole_number(need_value("--still-concurrency"), "--still-concurrency", 0, 16));
+        } else if (std::strcmp(argv[i], "--still-threads") == 0) {
+            o.still_threads =
+                static_cast<int>(whole_number(need_value("--still-threads"), "--still-threads", 1, 64));
         } else if (std::strcmp(argv[i], "--frame-grace") == 0) {
             o.frame_grace = std::atof(need_value("--frame-grace"));
         } else if (std::strcmp(argv[i], "--straggler-timeout") == 0) {
@@ -694,6 +727,8 @@ struct App {
     // Camera feed. Rendered on this thread because raycasting a stepping world
     // is not safe; published for the HTTP thread exactly like the snapshots above.
     std::unique_ptr<skysim::render::RenderService> render_service;
+    // Survey stills, rendered on HTTP request from the same snapshot /vehicles serves.
+    std::unique_ptr<skysim::render::StillService> still_service;
 
     std::unique_ptr<VehicleSlot> make_slot(int instance) {
         auto slot = std::make_unique<VehicleSlot>(instance);
@@ -849,6 +884,10 @@ struct App {
             for (int k = 0; k < 3; ++k) {
                 info.pos_ned[k] = v->state.pos_ned[k];
             }
+            for (int k = 0; k < 4; ++k) {
+                info.quat_ned_frd[k] = v->state.quat_ned_frd[k];
+            }
+            info.sim_time_s = world ? world->now() : 0.0;
             infos.push_back(info);
         }
         skysim::api::MetricsInfo m;
@@ -1176,6 +1215,19 @@ int main(int argc, char **argv) {
         app.io_pool = std::make_unique<skysim::core::ThreadPool>(opt.io_threads);
     }
 
+    // One render scene — tiles, textures, shadow grid — shared by the camera feed and the
+    // survey still camera, built when either is on. Stills need the control plane to be asked
+    // for, so a headless replay or canned run never pays for loading it.
+    const bool stills_on = opt.api_port > 0 && !opt.canned && !replaying && opt.still_concurrency > 0;
+    std::shared_ptr<const skysim::render::RasterScene> render_scene;
+    size_t render_tiles = 0;
+    if (opt.camera_fps > 0.0 || stills_on) {
+        render_scene = skysim::render::load_scene(opt.tiles, opt.texture_seed, &render_tiles);
+        std::printf(
+            "skysim: render scene has %zu tile(s), %zu triangle(s), %zu building(s), texture seed %u\n",
+            render_tiles, render_scene->triangle_count(), render_scene->building_count(), opt.texture_seed);
+    }
+
     if (opt.camera_fps > 0.0) {
         if (opt.camera_width <= 0 || opt.camera_height <= 0) {
             std::fprintf(stderr, "skysim: --camera-size must be WxH with both > 0\n");
@@ -1187,15 +1239,23 @@ int main(int argc, char **argv) {
         rcfg.camera.fov_deg = opt.camera_fov_deg;
         rcfg.camera.pitch_deg = opt.camera_pitch_deg;
         rcfg.camera.max_range_m = opt.camera_range_m;
-        rcfg.tiles_dir = opt.tiles;
+        rcfg.scene = render_scene;
+        rcfg.scene_tiles = render_tiles;
         rcfg.fps = opt.camera_fps;
         rcfg.quality = opt.camera_quality;
         rcfg.threads = opt.camera_threads;
         app.render_service = std::make_unique<skysim::render::RenderService>(rcfg);
-        std::printf("skysim: camera world has %zu tile(s), %zu triangle(s)\n", app.render_service->tiles_loaded(),
-                    app.render_service->triangle_count());
         std::printf("skysim: camera %dx%d @ %.1f fps on %d render thread(s)\n", opt.camera_width,
                     opt.camera_height, opt.camera_fps, opt.camera_threads);
+    }
+
+    if (stills_on) {
+        skysim::render::StillService::Config scfg;
+        scfg.concurrency = opt.still_concurrency;
+        scfg.threads = opt.still_threads;
+        app.still_service = std::make_unique<skysim::render::StillService>(render_scene, scfg);
+        std::printf("skysim: survey stills on demand, %d at a time on %d background thread(s) each\n",
+                    opt.still_concurrency, opt.still_threads);
     }
 
     if (replaying && (!app.world || opt.time_mode != "strict")) {
@@ -1265,6 +1325,19 @@ int main(int argc, char **argv) {
         snaps.camera_frame = [&app](uint32_t id) {
             return app.render_service ? app.render_service->frame(id) : skysim::render::FrameStore::Frame{};
         };
+        if (app.still_service) {
+            // The pose comes from the snapshot the route already read: position, attitude and
+            // time from one tick, copied out under the snapshot lock. Nothing here touches the
+            // tick thread, and the render runs on the still service's own workers.
+            snaps.still = [&app](const skysim::api::VehicleInfo &v, const skysim::render::StillRequest &r) {
+                skysim::render::StillPose pose;
+                pose.position_ned = {v.pos_ned[0], v.pos_ned[1], v.pos_ned[2]};
+                pose.quat_ned_frd = {v.quat_ned_frd[0], v.quat_ned_frd[1], v.quat_ned_frd[2],
+                                     v.quat_ned_frd[3]};
+                pose.sim_time_s = v.sim_time_s;
+                return app.still_service->render(pose, r);
+            };
+        }
         skysim::api::ControlServer::RadioConfig radio_cfg;
         radio_cfg.field = radio_field;
         radio_cfg.home = spawn_anchor(opt.spawn_home);

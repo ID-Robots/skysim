@@ -16,6 +16,7 @@
 #include <string>
 #include <thread>
 
+#include "core/geo.h"
 #include "radio/json.h"
 #include "radio/radio_spec.h"
 
@@ -283,6 +284,112 @@ std::string radio_put_summary(const radio::RadioSpec &spec) {
     }
     out += "]}";
     return out;
+}
+
+// --- survey still camera ----------------------------------------------------------------------
+
+// A query parameter as a whole number in [lo, hi]; absent leaves `out` alone and succeeds.
+bool query_int(const httplib::Request &req, const char *name, int lo, int hi, int &out, std::string &error) {
+    if (!req.has_param(name)) {
+        return true;
+    }
+    const std::string text = req.get_param_value(name);
+    long v = 0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), v);
+    if (text.empty() || parsed.ec != std::errc() || parsed.ptr != text.data() + text.size() || v < lo ||
+        v > hi) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "%s must be an integer between %d and %d", name, lo, hi);
+        error = buf;
+        return false;
+    }
+    out = static_cast<int>(v);
+    return true;
+}
+
+// The still's query: w, h, hfov, pitch, yaw, roll_stab, range, q — every one optional, every
+// one bounded, defaults as in render::StillRequest.
+bool parse_still_query(const httplib::Request &req, render::StillRequest &r, std::string &error) {
+    using R = render::StillRequest;
+    std::optional<double> hfov;
+    std::optional<double> pitch;
+    std::optional<double> yaw;
+    std::optional<double> range;
+    if (!query_int(req, "w", R::kMinSize, R::kMaxSize, r.width, error) ||
+        !query_int(req, "h", R::kMinSize, R::kMaxSize, r.height, error) ||
+        !query_number(req, "hfov", R::kMinHfovDeg, R::kMaxHfovDeg, hfov, error) ||
+        !query_number(req, "pitch", R::kMinPitchDeg, R::kMaxPitchDeg, pitch, error) ||
+        !query_number(req, "yaw", -R::kMaxYawDeg, R::kMaxYawDeg, yaw, error) ||
+        !query_number(req, "range", R::kMinRangeM, R::kMaxRangeM, range, error) ||
+        !query_int(req, "q", R::kMinQuality, R::kMaxQuality, r.quality, error)) {
+        return false;
+    }
+    r.hfov_deg = hfov.value_or(r.hfov_deg);
+    r.pitch_deg = pitch.value_or(r.pitch_deg);
+    r.yaw_deg = yaw.value_or(r.yaw_deg);
+    r.range_m = range.value_or(r.range_m);
+    if (req.has_param("roll_stab")) {
+        const std::string v = req.get_param_value("roll_stab");
+        if (v == "1" || v == "true") {
+            r.roll_stab = true;
+        } else if (v == "0" || v == "false") {
+            r.roll_stab = false;
+        } else {
+            error = "roll_stab must be 0 or 1";
+            return false;
+        }
+    }
+    return true;
+}
+
+void set_header(httplib::Response &res, const char *name, const char *format, double value) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), format, value);
+    res.set_header(name, buf);
+}
+
+// One still for one vehicle: render from the snapshot it came with, stamp the pose it was
+// rendered from, or say plainly why not.
+void reply_still(const ControlServer::Snapshots &snapshots, const std::optional<radio::GeoAnchor> &home,
+                 const VehicleInfo &v, const render::StillRequest &request, httplib::Response &res) {
+    const render::StillFrame frame = snapshots.still(v, request);
+    switch (frame.status) {
+    case render::StillFrame::Status::kBusy:
+        // Rendering takes a fraction of a second, so a second is long enough to wait.
+        res.set_header("Retry-After", "1");
+        reply_error(res, 503, frame.error);
+        return;
+    case render::StillFrame::Status::kInvalid:
+        reply_error(res, 400, frame.error);
+        return;
+    case render::StillFrame::Status::kDisabled:
+        reply_error(res, 404, frame.error.empty() ? "still camera disabled" : frame.error);
+        return;
+    case render::StillFrame::Status::kOk:
+        break;
+    }
+
+    res.set_header("X-Skysim-Time-Usec", std::to_string(std::llround(v.sim_time_s * 1e6)));
+    if (home) {
+        const core::GeoPoint geo =
+            core::geo_from_ned(core::GeoOrigin{home->lat_deg, home->lon_deg, home->ground_amsl_m},
+                               v.pos_ned[0], v.pos_ned[1], v.pos_ned[2]);
+        set_header(res, "X-Skysim-Lat", "%.9f", geo.lat_deg);
+        set_header(res, "X-Skysim-Lon", "%.9f", geo.lon_deg);
+        set_header(res, "X-Skysim-Alt-Amsl", "%.3f", geo.alt_amsl_m);
+    }
+    set_header(res, "X-Skysim-Alt-Rel", "%.3f", -v.pos_ned[2]);
+    set_header(res, "X-Skysim-Yaw", "%.4f", frame.camera.yaw_deg);
+    set_header(res, "X-Skysim-Pitch", "%.4f", frame.camera.pitch_deg);
+    set_header(res, "X-Skysim-Roll", "%.4f", frame.camera.roll_deg);
+    set_header(res, "X-Skysim-Hfov", "%.4f", request.hfov_deg);
+    char ned[96];
+    std::snprintf(ned, sizeof(ned), "%.3f,%.3f,%.3f", v.pos_ned[0], v.pos_ned[1], v.pos_ned[2]);
+    res.set_header("X-Skysim-Ned", ned);
+    res.set_header("X-Skysim-Vehicle", std::to_string(v.id));
+    res.set_header("X-Skysim-Instance", std::to_string(v.instance));
+    res.set_header("Cache-Control", "no-store");
+    res.set_content(reinterpret_cast<const char *>(frame.jpeg.data()), frame.jpeg.size(), "image/jpeg");
 }
 
 } // namespace
@@ -636,6 +743,42 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
                 std::this_thread::sleep_for(kFramePoll);
                 return true;
             });
+    });
+
+    // Survey still camera (docs/SKYHUB_INTEGRATION.md, "Survey stills"): one frame rendered on
+    // demand, at the size, field of view and gimbal angle asked for, from the vehicle's pose in
+    // the latest snapshot. The same frame by instance or by skysim id.
+    //
+    // The vehicle is found in one snapshot copy and handed over whole, so the picture and its
+    // pose headers come from the same tick; nothing here waits on the tick thread.
+    const auto still_route = [snapshots, home](const httplib::Request &req, httplib::Response &res,
+                                               bool by_instance) {
+        if (!snapshots.still || !snapshots.vehicles) {
+            reply_error(res, 404, "still camera disabled");
+            return;
+        }
+        render::StillRequest request;
+        std::string error;
+        if (!parse_still_query(req, request, error)) {
+            reply_error(res, 400, error);
+            return;
+        }
+        const std::string key = req.matches[1].str();
+        // strtoul, not stoul: the regex accepts any number of digits; saturating is "no such".
+        const auto id = static_cast<uint32_t>(std::strtoul(key.c_str(), nullptr, 10));
+        for (const auto &v : snapshots.vehicles()) {
+            if (by_instance ? std::to_string(v.instance) == key : v.id == id) {
+                reply_still(snapshots, home, v, request, res);
+                return;
+            }
+        }
+        reply_error(res, 404, by_instance ? "no such instance" : "no such vehicle");
+    };
+    s.Get(
+        R"(/instances/(\d+)/still.jpg)",
+        [still_route](const httplib::Request &req, httplib::Response &res) { still_route(req, res, true); });
+    s.Get(R"(/vehicles/(\d+)/still.jpg)", [still_route](const httplib::Request &req, httplib::Response &res) {
+        still_route(req, res, false);
     });
 
     s.Get("/metrics", [snapshots](const httplib::Request &, httplib::Response &res) {
