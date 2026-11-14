@@ -9,7 +9,11 @@ a photogrammetry run wants beside them:
 * ``<name>.jpg`` with EXIF: GPS position and altitude, image direction, focal length (and its
   35 mm equivalent), pixel size, Make "SkyHub", Model "skysim survey camera",
   ImageDescription "SIMULATED IMAGERY";
-* ``geo.txt`` for OpenDroneMap: ``EPSG:4326`` then ``name lon lat alt`` (x = longitude first);
+* ``geo.txt`` for OpenDroneMap: ``EPSG:4326`` then ``name lon lat alt`` (x = longitude first).
+  No camera angles: ODM 3.6 turns geo.txt yaw/pitch/roll into omega/phi/kappa through a frame
+  that is not local level away from the equator (opendm/photo.py compute_opk), so angles there
+  would hand ``--sfm-algorithm triangulation`` rotations tens of degrees off. The exact camera
+  angles are in manifest.json;
 * ``manifest.json``: the plan, every frame's pose, and each file's SHA-256.
 
 Geotags come from ``survey_still``, which converts NED to lat/lon exactly as the server's pose
