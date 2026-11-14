@@ -478,6 +478,12 @@ void RasterScene::albedo(int tri, const Vec3 &p, double footprint_m, double out[
         return;
     }
     const auto i = static_cast<size_t>(tri);
+    if (frames_[tri_frame_[i]].kind == SurfaceFrame::Kind::kUnderside) {
+        // A horizontal face at ground level: a building's underside (never seen from above),
+        // or a ground mesh in a scanned tile — which must look like the ground it lies on.
+        texture_.ground(p[0], p[1], footprint_m, out);
+        return;
+    }
     BuildingPoint b;
     b.building = tri_building_[i];
     b.frame = &frames_[tri_frame_[i]];

@@ -703,6 +703,19 @@ void test_geometry_edges(skysim::core::ThreadPool &pool) {
     render::render_still(buried, {0.0, 0.0, -60.0}, render::camera_quat_from_angles(0, -90, 0), req, &pool,
                          true, &surface);
     CHECK(surface[static_cast<size_t>(req.height / 2) * req.width + req.width / 2] >= 0); // the 1 m slab
+
+    // A face lying exactly on the ground ties with it, and the tie goes to the face.
+    render::RasterScene flat;
+    flat.build({tri({-5, -5, 0}, {5, -5, 0}, {5, 5, 0}), tri({-5, -5, 0}, {5, 5, 0}, {-5, 5, 0})});
+    render::render_still(flat, {0.0, 0.0, -60.0}, render::camera_quat_from_angles(0, -90, 0), req, &pool,
+                         true, &surface);
+    CHECK(surface[static_cast<size_t>(req.height / 2) * req.width + req.width / 2] >= 0);
+    CHECK(surface[0] == render::kSurfaceGround); // and beyond it, ground
+    // ... and looks like the ground it lies on.
+    double on_face[3], ground[3];
+    flat.albedo(0, {1.0, -2.0, 0.0}, 0.05, on_face);
+    flat.albedo(-1, {1.0, -2.0, 0.0}, 0.05, ground);
+    CHECK(on_face[0] == ground[0] && on_face[1] == ground[1] && on_face[2] == ground[2]);
 }
 
 void test_service(const std::shared_ptr<const render::RasterScene> &scene) {

@@ -82,9 +82,11 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   geotag: compare the frame's position (`X-Skysim-Lat` / `-Lon` / `-Alt-Amsl`) with the
   feedback's. If they differ by more than the capture tolerance, geotag the simulated frame
   with the pose headers (they are the truth for that picture) or drop the capture, and keep
-  the original CAMERA_FEEDBACK values in the sidecar either way. `X-Skysim-Time-Usec` is
-  skysim's world clock, offset per vehicle from the autopilot's `time_usec`
-  (docs/PROTOCOL.md), so compare positions, or time differences, not raw timestamps.
+  the original CAMERA_FEEDBACK values in the sidecar either way. Compare positions, not
+  timestamps: `X-Skysim-Time-Usec` is skysim's world clock, while CAMERA_FEEDBACK's
+  `time_usec` is GPS epoch time (0 before a GPS time) or, with a feedback pin, the autopilot's
+  boot clock (docs/PROTOCOL.md). The feedback position is the EKF's estimate, so allow for its
+  error (well under a metre in SITL) in the tolerance.
 - **Capacity**: a 1600x1200 frame takes about 0.55 s of one core, ~0.3 s on the two
   background-priority threads a render gets by default (`--still-threads`), so the default two
   slots keep up with two vehicles triggering every 2 s with room to spare. Raise `SKYSIM_STILL_CONCURRENCY` for more
