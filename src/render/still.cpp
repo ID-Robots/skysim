@@ -84,17 +84,16 @@ Quat still_camera_attitude(const Quat &quat_ned_frd, const StillRequest &req, Ca
     return q;
 }
 
-StillRequest gimbal_still_request(const StillPose &pose, const StillRequest &req, bool &followed) {
+Quat still_attitude(const StillPose &pose, const StillRequest &req, CameraAngles &angles, bool &followed) {
     followed = req.follow_gimbal && pose.gimbal;
     if (!followed) {
-        return req;
+        return still_camera_attitude(pose.quat_ned_frd, req, angles);
     }
-    StillRequest drawn = req;
-    // StillRequest is the HTTP query's, in degrees: convert at that boundary.
-    drawn.pitch_deg = pose.gimbal_pitch_rad * kRadToDeg;
-    drawn.yaw_deg = pose.gimbal_yaw_rad * kRadToDeg;
-    drawn.roll_stab = true;
-    return drawn;
+    const Quat q = Camera::stabilised(pose.quat_ned_frd, pose.gimbal_yaw_rad, pose.gimbal_pitch_rad);
+    // Degrees only for the headers. No roll by construction: say exactly 0, not a rounding of it.
+    angles = angles_from_camera_quat(q);
+    angles.roll_deg = 0.0;
+    return q;
 }
 
 CameraConfig still_camera_config(const StillRequest &req) {
@@ -204,12 +203,11 @@ StillFrame StillService::render(Lease &lease, const StillPose &pose, const Still
     }
     // Validated as asked; drawn where the gimbal points when it was asked to follow one. The
     // gimbal's own pitch is bounded by its range (vehicle/gimbal.h), not by the request's.
-    const StillRequest drawn = gimbal_still_request(pose, req, frame.gimbal);
-    const Quat camera = still_camera_attitude(pose.quat_ned_frd, drawn, frame.camera);
+    const Quat camera = still_attitude(pose, req, frame.camera, frame.gimbal);
     core::ThreadPool *pool = pools_[static_cast<size_t>(lease.slot())].get();
     try {
         const Image image =
-            render_still(*scene_, pose.position_ned, camera, drawn, pool, /*caller_runs=*/false);
+            render_still(*scene_, pose.position_ned, camera, req, pool, /*caller_runs=*/false);
         // The encode is the other big cost of a frame; it runs on a worker too.
         pool->parallel_for(
             1, [&](size_t, size_t) { frame.jpeg = encode_jpeg(image, req.quality); }, /*caller_runs=*/false);

@@ -500,14 +500,29 @@ void test_gimbal() {
     asked.follow_gimbal = true;
     bool followed = false;
     CameraAngles got;
-    still_camera_attitude(pose.quat_ned_frd, render::gimbal_still_request(pose, asked, followed), got);
+    const Quat followed_q = render::still_attitude(pose, asked, got, followed);
     CHECK(followed && std::fabs(got.pitch_deg + 60.0) < 1e-9 && std::fabs(got.yaw_deg - 90.0) < 1e-6 &&
           got.roll_deg == 0.0);
+    // The same attitude the stabilised request path draws for -60 at the heading.
+    StillRequest same;
+    same.pitch_deg = -60.0;
+    CameraAngles expected;
+    const Quat requested_q = still_camera_attitude(pose.quat_ned_frd, same, expected);
+    double worst = 0.0;
+    for (const Vec3 &axis : {Vec3{1, 0, 0}, Vec3{0, 1, 0}, Vec3{0, 0, 1}}) {
+        const Vec3 a = skysim::core::quat_rotate(followed_q, axis);
+        const Vec3 b = skysim::core::quat_rotate(requested_q, axis);
+        worst = std::max({worst, std::fabs(a[0] - b[0]), std::fabs(a[1] - b[1]), std::fabs(a[2] - b[2])});
+    }
+    CHECK(worst < 1e-9);
     asked.follow_gimbal = false;
-    CHECK(render::gimbal_still_request(pose, asked, followed).pitch_deg == -90.0 && !followed);
+    render::still_attitude(pose, asked, got, followed);
+    CHECK(!followed && std::fabs(got.pitch_deg + 60.0) > 5.0); // as asked, not the gimbal
     asked.follow_gimbal = true;
+    asked.roll_stab = true;
     pose.gimbal = false;
-    CHECK(render::gimbal_still_request(pose, asked, followed).pitch_deg == -90.0 && !followed);
+    render::still_attitude(pose, asked, got, followed);
+    CHECK(!followed && got.pitch_deg == -90.0);
 
     // The pilot camera on the gimbal looks along the heading at the gimbal's pitch, the
     // airframe's lean taken out: heading 90 (east), -60 -> forward (0, cos 60, sin 60) in NED.
