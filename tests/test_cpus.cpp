@@ -55,9 +55,34 @@ void test_parsers() {
     CHECK(near(cgroup_v1_quota_cpus(50000, 0), 0.0));
 }
 
+// A path as mountinfo writes it: space, tab, newline and backslash as octal escapes, so a
+// temporary directory with a space in it still makes a well-formed record.
+std::string mountinfo_escape(const std::string &path) {
+    std::string out;
+    for (const char c : path) {
+        switch (c) {
+        case ' ':
+            out += "\\040";
+            break;
+        case '\t':
+            out += "\\011";
+            break;
+        case '\n':
+            out += "\\012";
+            break;
+        case '\\':
+            out += "\\134";
+            break;
+        default:
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
 // A mountinfo line for a cgroup mount, the way the kernel writes one.
 std::string mountinfo_line(const fs::path &mount_point, const std::string &root, bool v2) {
-    return "30 25 0:26 " + root + " " + mount_point.string() +
+    return "30 25 0:26 " + mountinfo_escape(root) + " " + mountinfo_escape(mount_point.string()) +
            " rw,nosuid,nodev,noexec,relatime shared:9 - " +
            (v2 ? "cgroup2 cgroup2 rw,nsdelegate" : "cgroup cgroup rw,cpu,cpuacct") + "\n";
 }
@@ -85,6 +110,9 @@ void test_mountinfo() {
         CHECK(m[3].mount_point == "/mnt/with space" && m[3].v2); // optional fields skipped, \040 decoded
     }
     CHECK(mounts("").empty());
+    // Every escape mountinfo uses comes back as the character it stands for.
+    const auto odd = mounts(mountinfo_line("/tmp/a b\tc\\d\ne", "/x y", true));
+    CHECK(odd.size() == 1 && odd[0].mount_point == "/tmp/a b\tc\\d\ne" && odd[0].root == "/x y");
 }
 
 void test_cgroup_tree() {
