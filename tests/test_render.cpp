@@ -5,8 +5,10 @@
 // Asserting on pixels rather than on "it produced bytes" is the point: a renderer
 // that silently draws a blank frame, or draws the world upside down, still
 // produces a valid JPEG.
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -62,6 +64,13 @@ struct Px {
 Px pixel(const skysim::render::Image &img, int x, int y) {
     const size_t i = (static_cast<size_t>(y) * img.width + x) * 3;
     return {img.rgb[i], img.rgb[i + 1], img.rgb[i + 2]};
+}
+
+// CPU time this process has used, all threads, in seconds.
+double process_cpu_s() {
+    timespec ts{};
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+    return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) * 1e-9;
 }
 
 // Sky is the only thing in the palette that is markedly more blue than red.
@@ -291,6 +300,104 @@ int main() {
 
         std::filesystem::remove_all(tiles);
     } // ~RenderService must stop and join its thread rather than hang here
+
+    // --- RenderService draws only what somebody is watching. ---
+    //
+    // It used to draw every vehicle in the fleet at the camera rate whether or not anyone was
+    // looking: a dev server with one parked vehicle slot and no viewer burned two vCPU on it.
+    // Idle must cost nothing, a request must still get a frame promptly, and a vehicle that
+    // has not moved must not be drawn again.
+    {
+        using namespace std::chrono_literals;
+        using Clock = std::chrono::steady_clock;
+        skysim::render::RenderService::Config dcfg;
+        dcfg.camera = cam;
+        dcfg.scene = skysim::render::load_scene("", 1); // ground plane only: cheap frames
+        dcfg.fps = 50.0;
+        dcfg.threads = 2;
+        dcfg.demand_window_s = 0.3;
+        skysim::render::RenderService service(dcfg);
+        CHECK(service.threads() == 2);
+
+        // A vehicle in the fleet and nobody asking: nothing drawn, and no CPU spent.
+        skysim::render::RenderService::Pose pose;
+        pose.vehicle_id = 7;
+        pose.position_ned = pos;
+        pose.quat_ned_frd = level;
+        pose.sim_time_s = 1.0;
+        service.publish_poses({pose});
+        double cpu0 = process_cpu_s();
+        std::this_thread::sleep_for(500ms);
+        const double idle_cpu = process_cpu_s() - cpu0;
+        std::printf("test_render: idle camera with one unwatched vehicle used %.1f ms CPU in 500 ms\n",
+                    idle_cpu * 1e3);
+        CHECK(service.stats().frames_drawn == 0);
+        CHECK(service.stats().watched == 0);
+        CHECK(idle_cpu < 0.05); // it used to be the whole frame rate's worth: >1 core
+
+        // The first request starts the drawing and gets its frame within the wait.
+        const auto first = service.frame(7, 0, 2000ms);
+        CHECK(!first.jpeg.empty() && first.jpeg[0] == 0xFF && first.jpeg[1] == 0xD8);
+        CHECK(first.seq > 0);
+
+        // A stream waits for the next frame rather than reading the same one again.
+        pose.position_ned[0] += 1.0;
+        pose.sim_time_s = 2.0;
+        service.publish_poses({pose});
+        auto next = service.frame(7, first.seq, 2000ms);
+        CHECK(next.seq > first.seq);
+        for (int i = 0; i < 10 && next.sim_time_s != 2.0; ++i) {
+            next = service.frame(7, next.seq, 2000ms); // the pass that read the old pose
+        }
+        CHECK(next.sim_time_s == 2.0);
+
+        // Not moving: the frame is re-sent each pass, not drawn again.
+        const uint64_t drawn_before = service.stats().frames_drawn;
+        uint64_t seq = next.seq;
+        for (int i = 0; i < 6; ++i) {
+            const auto f = service.frame(7, seq, 2000ms);
+            CHECK(f.seq > seq && f.jpeg == next.jpeg);
+            seq = f.seq;
+        }
+        const auto busy = service.stats();
+        CHECK(busy.frames_drawn <= drawn_before + 1); // at most the one being recorded as this ran
+        CHECK(busy.frames_reused >= 5);
+        CHECK(busy.target_fps == 50.0 && busy.threads == 2);
+
+        // A vehicle that is not in the fleet never gets a frame, so asking does not wait.
+        const auto asked = Clock::now();
+        CHECK(service.frame(99, 0, 2000ms).jpeg.empty());
+        CHECK(Clock::now() - asked < 500ms);
+
+        // Stop asking: within the demand window the service stops drawing, reports idle,
+        // drops the frame (it is no longer the camera's view) and goes back to costing nothing.
+        std::this_thread::sleep_for(800ms);
+        const auto lapsed = service.stats();
+        CHECK(lapsed.watched == 0 && lapsed.fps == 0.0);
+        cpu0 = process_cpu_s();
+        std::this_thread::sleep_for(400ms);
+        const double after_cpu = process_cpu_s() - cpu0;
+        const auto still_lapsed = service.stats();
+        CHECK(still_lapsed.frames_drawn == lapsed.frames_drawn);
+        CHECK(still_lapsed.frames_reused == lapsed.frames_reused);
+        CHECK(after_cpu < 0.05);
+        CHECK(service.frame(7).jpeg.empty()); // asking again restarts it, but there is no stale frame
+    }
+
+    // One render thread is the service's own: no pool at all.
+    {
+        skysim::render::RenderService::Config one;
+        one.camera = cam;
+        one.scene = skysim::render::load_scene("", 1);
+        one.threads = 1;
+        skysim::render::RenderService service(one);
+        CHECK(service.threads() == 1);
+        skysim::render::RenderService::Pose pose;
+        pose.vehicle_id = 1;
+        pose.position_ned = pos;
+        service.publish_poses({pose});
+        CHECK(!service.frame(1, 0, std::chrono::milliseconds(2000)).jpeg.empty());
+    }
 
     std::filesystem::remove_all(dir);
     if (g_failures == 0) {

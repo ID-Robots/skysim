@@ -87,7 +87,7 @@ target_link_libraries(skysim_api PUBLIC skysim_vehicle skysim_radio Threads::Thr
 target_compile_options(skysim_api PRIVATE -Wall -Wextra -Wshadow)
 
 # --- core: Jolt world (the only Jolt consumer above tools/) ----------------------------------
-add_library(skysim_core STATIC src/core/world.cpp)
+add_library(skysim_core STATIC src/core/world.cpp src/core/cpus.cpp)
 target_include_directories(skysim_core PUBLIC src)
 target_link_libraries(skysim_core PRIVATE Jolt)
 target_compile_options(skysim_core PRIVATE -Wall -Wextra -Wshadow)
@@ -227,13 +227,18 @@ target_link_libraries(test_thread_pool PRIVATE Threads::Threads)
 target_compile_options(test_thread_pool PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME thread_pool COMMAND test_thread_pool)
 
+add_executable(test_cpus tests/test_cpus.cpp)
+target_link_libraries(test_cpus PRIVATE skysim_core)
+target_compile_options(test_cpus PRIVATE -Wall -Wextra -Wshadow)
+add_test(NAME cpus COMMAND test_cpus)
+
 add_executable(test_streamer tests/test_streamer.cpp)
 target_link_libraries(test_streamer PRIVATE skysim_terrain skysim_core)
 target_compile_options(test_streamer PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME streamer COMMAND test_streamer)
 
 set_tests_properties(
-    packets json frames quad world collision endpoint manager api radio radio_api thread_pool streamer still
+    packets json frames quad world collision endpoint manager api radio radio_api thread_pool streamer still cpus
     PROPERTIES LABELS "unit"
 )
 

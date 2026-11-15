@@ -121,7 +121,18 @@ core. Beyond that, shard. Re-measure with `world_bench` / `proto_bench` before t
 Two cameras draw the same static world, off the tick thread:
 
 - **Pilot camera** (`--camera-fps`, `RenderService`): a small frame (256x144) per vehicle at a
-  fixed rate on its own thread and pool, served as `camera.jpg` / `camera.mjpg`.
+  fixed rate on its own thread and pool, served as `camera.jpg` / `camera.mjpg`. Drawn on
+  demand: a vehicle is on the draw list only while somebody has asked for its picture within
+  the last 3 s (an open MJPEG stream asks continuously, each `camera.jpg` once), and with
+  nobody asking the render thread waits on a condition variable, not a timer. A vehicle whose
+  pose has not moved since its last frame (to within a nanometre: a parked quad is never put
+  to sleep and the contact solver jiggles it by ~1e-13 m) has that JPEG re-sent instead of
+  drawn again. `--camera-threads` is the total number of threads drawing a frame, the render
+  thread included, all at nice +10; its default is one less than `core::available_cpus()` —
+  the smallest of the online CPUs, the affinity mask and the cgroup CPU quota — clamped to
+  1..4, because an ECS task's `hardware_concurrency()` is the host's and a pool past the
+  quota gets the whole cgroup throttled, the tick thread with it. MJPEG routes block on the
+  next frame's sequence number (`FrameStore::wait_newer`) instead of polling the slot.
 - **Survey still** (`GET .../still.jpg`, `StillService`): one large frame on request. The HTTP
   route copies the vehicle out of the per-tick snapshot (position, attitude and sim time from
   the same tick — `VehicleInfo` carries all three) and hands it to the still service, which
@@ -169,3 +180,12 @@ Under a sustained burst of stills (two rendering, the rest turned away with 503)
 from 12.8 to 15.0 µs and the world kept 800 Hz. The pilot camera's 256x144 frame went from
 0.3 ms to about 2.5 ms on its four-thread pool with texture and shadows, which still holds
 10 fps for some 40 vehicles.
+
+The 640x360 pilot frame is ~55 ms on one core (Ryzen 7 5700X, demo city, 40 m up, pitch
+-15°), ~19 ms on two threads, plus ~3 ms of JPEG encode. Measured per stage: the procedural
+texture is ~60% of it (value noise and fbm, Voronoi land cover, windows), shadow rays ~15%,
+ray and footprint set-up ~10%. Cheap cuts that keep the picture as it is were tried and do
+not pay: a 2x coarser texture footprint saves 4%, `-O3` 4%, precomputing the shadow ray's
+direction-only Moller-Trumbore terms per triangle 1% (for 32 bytes a triangle). What does pay
+is not drawing: before on-demand rendering, an idle dev server with one never-connected
+vehicle slot spent ~1.2 cores here (95% of its 2-vCPU task) drawing frames for nobody.

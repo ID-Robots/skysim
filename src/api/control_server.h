@@ -3,6 +3,7 @@
 // thread never touches world state: writes go through the tick-boundary CommandQueue (promises
 // for replies), reads come from snapshots published once per tick (CLAUDE.md invariant 5).
 // WS /state lands at M6.
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <future>
@@ -38,6 +39,21 @@ struct VehicleInfo {
     double sim_time_s = 0.0;
 };
 
+// The pilot camera's achieved rate and cost (RenderService::Stats), so a laggy stream can be
+// read off /metrics instead of guessed at.
+struct CameraMetrics {
+    bool enabled = false; // --camera-fps given; the rest is meaningless without it
+    double target_fps = 0.0;
+    double fps = 0.0;  // frames per second each watched vehicle is getting
+    size_t watched = 0; // vehicles being drawn because somebody is asking for them
+    double render_ms = 0.0;
+    double render_ms_max = 0.0;
+    double encode_ms = 0.0;
+    int threads = 0;
+    uint64_t frames_drawn = 0;
+    uint64_t frames_reused = 0;
+};
+
 struct MetricsInfo {
     double tick_p50_us = 0.0;
     double tick_p99_us = 0.0;
@@ -47,6 +63,7 @@ struct MetricsInfo {
     double sim_time_s = 0.0;
     size_t vehicles = 0;
     size_t resident_tiles = 0; // streamed-in city tiles (M5 memory bound observable)
+    CameraMetrics camera;
 };
 
 struct SpawnCommand {
@@ -111,11 +128,15 @@ class ControlServer {
     struct Snapshots {
         std::function<std::vector<VehicleInfo>()> vehicles;
         std::function<MetricsInfo()> metrics;
-        // Latest camera frame for a vehicle as encoded JPEG, with the sim time it was drawn
-        // at; empty when the camera is off or that vehicle has not been rendered yet. The
-        // timestamp is what lets the MJPEG routes send a frame once instead of re-sending
-        // whatever is in the slot. Published by the tick thread like everything else here.
-        std::function<skysim::render::FrameStore::Frame(uint32_t)> camera_frame;
+        // Latest camera frame for a vehicle as encoded JPEG, with the sim time it was drawn at
+        // and its sequence number; empty when the camera is off or that vehicle has not been
+        // rendered yet. Asking is also what gets a vehicle drawn: the camera renders only the
+        // vehicles somebody is asking for. With a wait, blocks up to that long for a frame
+        // newer than after_seq — how an MJPEG route sends each frame once, as it lands, without
+        // polling the slot on a timer.
+        std::function<skysim::render::FrameStore::Frame(uint32_t id, uint64_t after_seq,
+                                                         std::chrono::milliseconds wait)>
+            camera_frame;
         // Survey still camera: render one frame from this vehicle's snapshot pose. Null when
         // the still camera is off, and the still routes answer 404. Called on an HTTP thread;
         // it must not touch world state (it gets everything it needs in the VehicleInfo).
