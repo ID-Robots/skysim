@@ -128,10 +128,11 @@ Two cameras draw the same static world, off the tick thread:
   pose has not moved since its last frame (to within a nanometre: a parked quad is never put
   to sleep and the contact solver jiggles it by ~1e-13 m) has that JPEG re-sent instead of
   drawn again. `--camera-threads` is the total number of threads drawing a frame, the render
-  thread included, all at nice +10; its default is one less than `core::available_cpus()` —
-  the smallest of the online CPUs, the affinity mask and the cgroup CPU quota — clamped to
-  1..4, because an ECS task's `hardware_concurrency()` is the host's and a pool past the
-  quota gets the whole cgroup throttled, the tick thread with it. MJPEG routes block on the
+  thread included, all at nice +10; its default is `core::available_cpus()` — the smallest
+  of the online CPUs, the affinity mask and the cgroup CPU quota — clamped to 1..4, because
+  an ECS task's `hardware_concurrency()` is the host's. The old fixed pool was five
+  un-niced threads on a 2-vCPU task; with three watched vehicles flying it took the tick
+  from 400 to 378 Hz, where two niced threads saturating the same quota leave it at 400. MJPEG routes block on the
   next frame's sequence number (`FrameStore::wait_newer`) instead of polling the slot.
 - **Survey still** (`GET .../still.jpg`, `StillService`): one large frame on request. The HTTP
   route copies the vehicle out of the per-tick snapshot (position, attitude and sim time from

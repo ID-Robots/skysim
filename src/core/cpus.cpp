@@ -158,6 +158,6 @@ int available_cpus() {
     return std::max(1, cpus);
 }
 
-int default_render_threads(int cpus) { return std::clamp(cpus - 1, 1, 4); }
+int default_render_threads(int cpus) { return std::clamp(cpus, 1, 4); }
 
 } // namespace skysim::core

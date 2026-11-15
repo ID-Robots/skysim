@@ -113,12 +113,12 @@ void test_available_and_default() {
                 cpus, hw, skysim::core::default_render_threads(cpus));
 
     using skysim::core::default_render_threads;
-    // Never more render threads than CPUs, one CPU left for the tick, never fewer than one.
+    // Never more render threads than CPUs, never more than four, never fewer than one.
     CHECK(default_render_threads(0) == 1);
     CHECK(default_render_threads(1) == 1);
-    CHECK(default_render_threads(2) == 1); // the 2-vCPU dev task
-    CHECK(default_render_threads(3) == 2);
-    CHECK(default_render_threads(4) == 3);
+    CHECK(default_render_threads(2) == 2); // the 2-vCPU dev task: two, not the old five
+    CHECK(default_render_threads(3) == 3);
+    CHECK(default_render_threads(4) == 4);
     CHECK(default_render_threads(5) == 4);
     CHECK(default_render_threads(64) == 4);
     for (int n = 1; n <= 64; ++n) {

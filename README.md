@@ -205,12 +205,13 @@ the camera endpoints serve nothing, whatever else is set. With it, `SKYSIM_CAMER
 `SKYSIM_CAMERA_FOV`, `SKYSIM_CAMERA_PITCH` and `SKYSIM_CAMERA_RANGE` apply.
 A vehicle is only drawn while somebody is asking for its picture — an open `camera.mjpg`,
 or a `camera.jpg` within the last 3 s — so a camera nobody watches costs nothing, however
-many vehicles there are. `SKYSIM_CAMERA_THREADS` is the number of threads drawing a frame;
-by default it is one less than the CPUs the container may use (its cgroup quota and
-affinity, not the host's core count), at most 4 and at least 1. A textured 640x360 frame is
-about 55 ms of one core, so a 2-vCPU task streams one watched vehicle at 15 fps and three at
-about 8. `GET /metrics` reports what the camera achieves (`camera.fps`, `camera.render_ms`)
-and the log carries the same every 10 s while frames are drawn:
+many vehicles there are, and a parked vehicle's frame is re-sent rather than redrawn.
+`SKYSIM_CAMERA_THREADS` is the number of threads drawing a frame (at background priority);
+by default it is the number of CPUs the container may use — its cgroup quota and affinity,
+not the host's core count — at most 4. A textured 640x360 frame of a flying vehicle is about
+75 ms of CPU in the image, so a 2-vCPU task streams one watched flying vehicle at 15 fps and
+three at about 9 fps each. `GET /metrics` reports what the camera achieves (`camera.fps`,
+`camera.render_ms`) and the log carries the same every 10 s while frames are drawn:
 
 ```bash
 docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \

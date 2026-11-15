@@ -31,10 +31,12 @@ double cgroup_v1_quota_cpus(long long quota_us, long long period_us);
 // the contents of /proc/self/cgroup, which name the process's cgroup under it.
 double cgroup_quota_cpus(const std::string &cgroup_root, const std::string &proc_cgroup);
 
-// The default number of pilot-camera render threads for `cpus` usable CPUs: one CPU is left
-// for the tick thread, the replies and the control plane — rendering is the one consumer here
-// that will take every core it is given — and four is enough for any frame size worth
-// streaming. Always at least 1.
+// The default number of pilot-camera render threads for `cpus` usable CPUs: one per CPU, at
+// most four (enough for any frame size worth streaming), at least one. No CPU needs leaving
+// free for the tick: the render threads run at nice +10, and measured on a 2-CPU quota with
+// three watched vehicles flying the tick held 400 Hz with two render threads saturating it,
+// where the old five un-niced threads had dropped it to 378 Hz. A spare CPU would only halve
+// the frame rate (8.8 -> 4.7 fps each).
 int default_render_threads(int cpus);
 
 } // namespace skysim::core

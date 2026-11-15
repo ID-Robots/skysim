@@ -90,7 +90,7 @@ struct Options {
     int camera_quality = 70;
     // Threads drawing a camera frame (SKYSIM_CAMERA_THREADS). They are outside the physics
     // tick and run at background priority, so this trades cores for frame rate. 0, the
-    // default, sizes it from the CPUs this process can really use (core/cpus.h): the old
+    // default, is one per CPU this process can really use, at most 4 (core/cpus.h): the old
     // fixed 4 was five threads on a 2-vCPU task, past its quota.
     int camera_threads = 0;
     // Texture of the rendered world (SKYSIM_TEXTURE_SEED): the same seed draws the same world
