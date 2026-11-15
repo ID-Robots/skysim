@@ -203,6 +203,22 @@ deadline, and while that no longer corrupts the flight it does cost wall-clock p
 the camera endpoints serve nothing, whatever else is set. With it, `SKYSIM_CAMERA_SIZE`
 (default `256x144`), `SKYSIM_CAMERA_QUALITY`, `SKYSIM_CAMERA_THREADS`,
 `SKYSIM_CAMERA_FOV`, `SKYSIM_CAMERA_PITCH` and `SKYSIM_CAMERA_RANGE` apply.
+A vehicle is only drawn while somebody is asking for its picture — an open `camera.mjpg`,
+or a `camera.jpg` within the last 3 s — so a camera nobody watches costs nothing, however
+many vehicles there are, and a parked vehicle's frame is re-sent rather than redrawn.
+`SKYSIM_CAMERA_THREADS` is the number of threads drawing a frame (at background priority);
+by default it is the number of CPUs the container may use — its cgroup quota and affinity,
+not the host's core count — at most 4. A textured 640x360 frame of a flying vehicle is about
+75 ms of CPU in the image, so a 2-vCPU task streams one watched flying vehicle at 15 fps and
+three at about 9 fps each. `GET /metrics` reports what the camera achieves (`camera.fps`,
+`camera.render_ms`) and the log carries the same every 10 s while frames are drawn:
+
+```bash
+docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
+  -v $(pwd)/build/city/tiles:/world:ro -e SKYSIM_TILES=/world \
+  -e SKYSIM_CAMERA_FPS=10 -e SKYSIM_CAMERA_SIZE=256x144 skysim
+# http://localhost:8642/instances/0/camera.mjpg
+```
 
 **The camera follows the vehicle's gimbal** when the vehicle drives one (TASK-2548): ArduPilot's
 mount pitch and yaw on servo outputs `SKYSIM_GIMBAL_PITCH_CHANNEL` (default 10, pitch -90..20
@@ -211,13 +227,6 @@ the BrushlessPWM mount (`MNT1_TYPE 7`) the SkyHub gateway builds every SITL with
 camera then looks along the heading plus the gimbal's yaw at the gimbal's pitch, stabilised;
 a vehicle with no pulse on that output keeps the fixed `SKYSIM_CAMERA_PITCH`, rigidly mounted.
 `SKYSIM_GIMBAL_PITCH_CHANNEL=0` never follows a gimbal.
-
-```bash
-docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
-  -v $(pwd)/build/city/tiles:/world:ro -e SKYSIM_TILES=/world \
-  -e SKYSIM_CAMERA_FPS=10 -e SKYSIM_CAMERA_SIZE=256x144 skysim
-# http://localhost:8642/instances/0/camera.mjpg
-```
 
 **Survey stills need no switch.** `GET /instances/<n>/still.jpg` renders one large, exactly
 posed frame on demand, whatever `SKYSIM_CAMERA_FPS` says, so it costs nothing until it is
@@ -234,7 +243,7 @@ camera feed alike — see [Survey stills](#survey-stills-and-the-reconstruction-
 | `POST /vehicles` `{"instance":N, "launch_process":true}` (both fields optional) | reserve a requested or next-free ArduPilot instance (optionally forks arducopter) → `{id, instance, json_port, mavlink_tcp}` |
 | `DELETE /vehicles/{id}` | despawn, release instance, kill managed process |
 | `GET /vehicles` | per-vehicle: connected, frozen, silent_ticks, pos_ned, `midair_collisions`, `building_contacts`; `radio` when a radio field is set |
-| `GET /metrics` | tick p50/p99 µs, straggler_events, freezes, resident_tiles |
+| `GET /metrics` | tick p50/p99 µs, straggler_events, freezes, resident_tiles; `camera` (`null` when off): `target_fps`, achieved `fps` per watched vehicle, `watched`, `render_ms` / `render_ms_max` / `encode_ms` per frame, `threads`, `frames_drawn`, `frames_reused` |
 | `POST /mission/check` `{"waypoints_ned":[[n,e,d],...], "clearance_m":1.0}` | sweep a planned route through loaded building geometry → `{checked, clear, hits}` |
 | `PUT` / `GET` / `DELETE /radio` | set, read or clear the simulated 4G radio field (carriers, towers, coverage holes) |
 | `GET /radio/sample?lat&lon&alt_amsl` | RSRP / RSRQ / SINR / RSSI, serving cell and link quality per carrier at a point |

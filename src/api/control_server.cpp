@@ -28,10 +28,20 @@ namespace {
 // plane, which must stay answerable while they run.
 constexpr size_t kWorkerThreads = 64;
 
-// How often an MJPEG stream looks for a newly drawn frame. Short relative to any render rate
-// worth watching, because it bounds how long a finished frame waits before it goes out; it does
-// not set the rate, since a frame is only written once (see write_mjpeg_part callers).
-constexpr auto kFramePoll = std::chrono::milliseconds(5);
+// How long an MJPEG stream blocks waiting for the next frame before it gives the server a turn
+// (a shutdown is noticed between waits). A frame goes out the moment it is published, so this
+// does not set the rate or the latency — the 5 ms poll it replaces did neither either, and it
+// copied the whole JPEG out of the slot two hundred times a second per viewer to find that out.
+constexpr auto kFrameWait = std::chrono::milliseconds(250);
+
+// When the wait came back with nothing new straight away — the vehicle is not in the fleet, or
+// the camera does not block — the stream sleeps this long before asking again.
+constexpr auto kFrameRetry = std::chrono::milliseconds(20);
+
+// How long camera.jpg waits for a first frame. Rendering is on demand, so the first request for
+// a vehicle nobody is watching finds no frame yet: it is what starts the drawing, and one frame
+// is tens of milliseconds away. Bounded so a camera that cannot keep up still answers.
+constexpr auto kFirstFrameWait = std::chrono::milliseconds(2000);
 
 // One multipart part: headers plus the JPEG.
 //
@@ -50,6 +60,24 @@ void write_mjpeg_part(httplib::DataSink &sink, const std::vector<uint8_t> &jpeg)
     sink.write(head, static_cast<size_t>(n));
     sink.write(reinterpret_cast<const char *>(jpeg.data()), jpeg.size());
     sink.write("\r\n", 2);
+}
+
+// One turn of an MJPEG stream: wait for the vehicle's next frame and write it, once. The wait is
+// also the stream's standing request for frames — the camera draws only what is being asked for.
+void stream_next_frame(const ControlServer::Snapshots &snapshots, uint32_t id, uint64_t &last_seq,
+                       httplib::DataSink &sink) {
+    const auto asked = std::chrono::steady_clock::now();
+    const auto frame =
+        id != 0 ? snapshots.camera_frame(id, last_seq, kFrameWait) : skysim::render::FrameStore::Frame{};
+    if (!frame.jpeg.empty() && frame.seq != last_seq) {
+        last_seq = frame.seq;
+        write_mjpeg_part(sink, frame.jpeg);
+        return;
+    }
+    const auto waited = std::chrono::steady_clock::now() - asked;
+    if (waited < kFrameRetry) {
+        std::this_thread::sleep_for(kFrameRetry - waited);
+    }
 }
 
 // {"launch_process":true} — absent key means false.
@@ -686,7 +714,7 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
             res.set_content("{\"error\":\"no such instance\"}", "application/json");
             return;
         }
-        std::vector<uint8_t> jpeg = snapshots.camera_frame(id).jpeg;
+        std::vector<uint8_t> jpeg = snapshots.camera_frame(id, 0, kFirstFrameWait).jpeg;
         if (jpeg.empty()) {
             res.status = 404;
             res.set_content("{\"error\":\"no frame\"}", "application/json");
@@ -705,17 +733,11 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
         }
         res.set_chunked_content_provider(
             "multipart/x-mixed-replace; boundary=skysimframe",
-            [snapshots, resolve_instance, instance, last_sent = -1.0](size_t,
-                                                                      httplib::DataSink &sink) mutable {
+            [snapshots, resolve_instance, instance, last_seq = uint64_t{0}](size_t,
+                                                                            httplib::DataSink &sink) mutable {
                 // Re-resolved per frame, so a skysim restart mid-recording picks
                 // the vehicle back up instead of streaming nothing forever.
-                const uint32_t id = resolve_instance(instance);
-                auto frame = id != 0 ? snapshots.camera_frame(id) : skysim::render::FrameStore::Frame{};
-                if (!frame.jpeg.empty() && frame.sim_time_s != last_sent) {
-                    last_sent = frame.sim_time_s;
-                    write_mjpeg_part(sink, frame.jpeg);
-                }
-                std::this_thread::sleep_for(kFramePoll);
+                stream_next_frame(snapshots, resolve_instance(instance), last_seq, sink);
                 return true;
             });
     });
@@ -730,9 +752,8 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
         // strtoul, not stoul: the route regex accepts any number of digits, and
         // stoul throws on a value too big for the type. Saturating is the same
         // answer as "no such vehicle" without the exception.
-        std::vector<uint8_t> jpeg =
-            snapshots.camera_frame(static_cast<uint32_t>(std::strtoul(req.matches[1].str().c_str(), nullptr, 10)))
-                .jpeg;
+        const auto id = static_cast<uint32_t>(std::strtoul(req.matches[1].str().c_str(), nullptr, 10));
+        std::vector<uint8_t> jpeg = snapshots.camera_frame(id, 0, kFirstFrameWait).jpeg;
         if (jpeg.empty()) {
             res.status = 404;
             res.set_content("{\"error\":\"no frame\"}", "application/json");
@@ -755,13 +776,8 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
         const auto id = static_cast<uint32_t>(std::strtoul(req.matches[1].str().c_str(), nullptr, 10));
         res.set_chunked_content_provider(
             "multipart/x-mixed-replace; boundary=skysimframe",
-            [snapshots, id, last_sent = -1.0](size_t /*offset*/, httplib::DataSink &sink) mutable {
-                auto frame = snapshots.camera_frame(id);
-                if (!frame.jpeg.empty() && frame.sim_time_s != last_sent) {
-                    last_sent = frame.sim_time_s;
-                    write_mjpeg_part(sink, frame.jpeg);
-                }
-                std::this_thread::sleep_for(kFramePoll);
+            [snapshots, id, last_seq = uint64_t{0}](size_t /*offset*/, httplib::DataSink &sink) mutable {
+                stream_next_frame(snapshots, id, last_seq, sink);
                 return true;
             });
     });
@@ -809,14 +825,26 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
 
     s.Get("/metrics", [snapshots](const httplib::Request &, httplib::Response &res) {
         const MetricsInfo m = snapshots.metrics();
-        char buf[512];
+        // The pilot camera's achieved rate and per-frame cost, or null when it is off.
+        char camera[384] = "null";
+        if (m.camera.enabled) {
+            const CameraMetrics &c = m.camera;
+            std::snprintf(camera, sizeof(camera),
+                          "{\"target_fps\":%.1f,\"fps\":%.2f,\"watched\":%zu,\"render_ms\":%.2f,"
+                          "\"render_ms_max\":%.2f,\"encode_ms\":%.2f,\"threads\":%d,\"frames_drawn\":%llu,"
+                          "\"frames_reused\":%llu}",
+                          c.target_fps, c.fps, c.watched, c.render_ms, c.render_ms_max, c.encode_ms, c.threads,
+                          static_cast<unsigned long long>(c.frames_drawn),
+                          static_cast<unsigned long long>(c.frames_reused));
+        }
+        char buf[1024];
         std::snprintf(buf, sizeof(buf),
                       "{\"tick\":%llu,\"sim_time_s\":%.3f,\"tick_p50_us\":%.1f,"
                       "\"tick_p99_us\":%.1f,\"straggler_events\":%llu,\"freezes\":%llu,"
-                      "\"vehicles\":%zu,\"resident_tiles\":%zu}",
+                      "\"vehicles\":%zu,\"resident_tiles\":%zu,\"camera\":%s}",
                       static_cast<unsigned long long>(m.tick), m.sim_time_s, m.tick_p50_us, m.tick_p99_us,
                       static_cast<unsigned long long>(m.straggler_events),
-                      static_cast<unsigned long long>(m.freezes), m.vehicles, m.resident_tiles);
+                      static_cast<unsigned long long>(m.freezes), m.vehicles, m.resident_tiles, camera);
         res.set_content(buf, "application/json");
     });
 
