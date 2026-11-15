@@ -57,6 +57,12 @@ class RenderService {
         // When the tick that produced this pose happened, carried through to the
         // frame so a consumer can tell a fresh picture from a stalled one.
         double sim_time_s{0.0};
+        // The vehicle's gimbal as its last servo frame drove it (TASK-2548). With one, the
+        // pilot camera looks where it points (stabilised: heading + yaw, its pitch, no roll)
+        // instead of along the nose at the fixed mount pitch.
+        bool gimbal{false};
+        double gimbal_pitch_deg{0.0};
+        double gimbal_yaw_deg{0.0};
     };
 
     explicit RenderService(const Config &cfg);

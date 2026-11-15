@@ -36,6 +36,10 @@ struct VehicleInfo {
     // with pos_ned, the exact pose a survey still is drawn from and stamped with.
     double quat_ned_frd[4] = {1.0, 0.0, 0.0, 0.0};
     double sim_time_s = 0.0;
+    // Its gimbal as the same tick's servo frame drove it (TASK-2548; vehicle/gimbal.h).
+    bool gimbal = false;
+    double gimbal_pitch_deg = 0.0;
+    double gimbal_yaw_deg = 0.0;
 };
 
 struct MetricsInfo {

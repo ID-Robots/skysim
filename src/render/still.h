@@ -37,6 +37,11 @@ Quat still_camera_attitude(const Quat &quat_ned_frd, const StillRequest &req, Ca
 
 CameraConfig still_camera_config(const StillRequest &req);
 
+// The request a still is drawn with (TASK-2548): ``req`` itself, unless it asks to follow the
+// gimbal and the vehicle has one, in which case the gimbal's pitch and yaw, stabilised.
+// ``followed`` says which.
+StillRequest gimbal_still_request(const StillPose &pose, const StillRequest &req, bool &followed);
+
 // Draw one still from an explicit camera pose. caller_runs as in Rasterizer::render.
 Image render_still(const RasterScene &scene, const Vec3 &position_ned, const Quat &camera_quat,
                    const StillRequest &req, core::ThreadPool *pool, bool caller_runs = true,

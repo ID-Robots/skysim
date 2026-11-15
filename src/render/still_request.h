@@ -37,6 +37,10 @@ struct StillRequest {
     double pitch_deg{kDefaultPitchDeg};
     double yaw_deg{0.0};  // relative to the vehicle's heading
     bool roll_stab{true}; // gimbal-stabilised: vehicle roll and pitch do not tilt the camera
+    // gimbal=1 (TASK-2548): look where the vehicle's own gimbal points — its pitch, and its yaw
+    // added to the heading, stabilised — and use pitch/yaw/roll_stab above only for a vehicle
+    // that has none. What a survey camera on a gimbal photographs.
+    bool follow_gimbal{false};
     double range_m{kDefaultRangeM};
     int quality{kDefaultQuality};
 
@@ -73,6 +77,11 @@ struct StillPose {
     std::array<double, 3> position_ned{0.0, 0.0, 0.0};
     std::array<double, 4> quat_ned_frd{1.0, 0.0, 0.0, 0.0}; // w, x, y, z; FRD -> NED
     double sim_time_s{0.0};
+    // The vehicle's gimbal in the same tick (vehicle/gimbal.h): earth-frame pitch, yaw
+    // relative to the heading. Absent on a vehicle that drives none.
+    bool gimbal{false};
+    double gimbal_pitch_deg{0.0};
+    double gimbal_yaw_deg{0.0};
 };
 
 // Camera axes as NED Euler angles (Z-Y-X), degrees: yaw 0..360 clockwise from north, pitch
@@ -94,6 +103,7 @@ struct StillFrame {
     Status status{Status::kDisabled};
     std::vector<uint8_t> jpeg;
     CameraAngles camera;
+    bool gimbal{false}; // drawn where the vehicle's gimbal points (X-Skysim-Gimbal)
     std::string error;
 };
 

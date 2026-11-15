@@ -84,6 +84,18 @@ Quat still_camera_attitude(const Quat &quat_ned_frd, const StillRequest &req, Ca
     return q;
 }
 
+StillRequest gimbal_still_request(const StillPose &pose, const StillRequest &req, bool &followed) {
+    followed = req.follow_gimbal && pose.gimbal;
+    if (!followed) {
+        return req;
+    }
+    StillRequest drawn = req;
+    drawn.pitch_deg = pose.gimbal_pitch_deg;
+    drawn.yaw_deg = pose.gimbal_yaw_deg;
+    drawn.roll_stab = true;
+    return drawn;
+}
+
 CameraConfig still_camera_config(const StillRequest &req) {
     CameraConfig cfg;
     cfg.width = req.width;
@@ -189,11 +201,14 @@ StillFrame StillService::render(Lease &lease, const StillPose &pose, const Still
         frame.status = StillFrame::Status::kInvalid;
         return frame;
     }
-    const Quat camera = still_camera_attitude(pose.quat_ned_frd, req, frame.camera);
+    // Validated as asked; drawn where the gimbal points when it was asked to follow one. The
+    // gimbal's own pitch is bounded by its range (vehicle/gimbal.h), not by the request's.
+    const StillRequest drawn = gimbal_still_request(pose, req, frame.gimbal);
+    const Quat camera = still_camera_attitude(pose.quat_ned_frd, drawn, frame.camera);
     core::ThreadPool *pool = pools_[static_cast<size_t>(lease.slot())].get();
     try {
         const Image image =
-            render_still(*scene_, pose.position_ned, camera, req, pool, /*caller_runs=*/false);
+            render_still(*scene_, pose.position_ned, camera, drawn, pool, /*caller_runs=*/false);
         // The encode is the other big cost of a frame; it runs on a worker too.
         pool->parallel_for(
             1, [&](size_t, size_t) { frame.jpeg = encode_jpeg(image, req.quality); }, /*caller_runs=*/false);

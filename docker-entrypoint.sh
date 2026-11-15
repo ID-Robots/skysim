@@ -71,6 +71,11 @@ fi
 # SKYSIM_TEXTURE_SEED picks the world's texture (default 1) for stills and camera alike.
 add_if_set SKYSIM_STILL_CONCURRENCY --still-concurrency
 add_if_set SKYSIM_TEXTURE_SEED --texture-seed
+# The servo outputs a vehicle drives its gimbal's pitch and yaw on (default 10 and 11, as the
+# SkyHub gateway builds SITLs; 0 = never follow a gimbal). With one, the pilot camera and a
+# still asked for with gimbal=1 look where it points (TASK-2548).
+add_if_set SKYSIM_GIMBAL_PITCH_CHANNEL --gimbal-pitch-channel
+add_if_set SKYSIM_GIMBAL_YAW_CHANNEL --gimbal-yaw-channel
 
 if [[ -n "${SKYSIM_EXTRA_ARGS:-}" ]]; then
     # shellcheck disable=SC2206 # deliberate word splitting: caller supplies flags

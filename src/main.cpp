@@ -34,6 +34,7 @@
 #include "render/still.h"
 #include "protocol/udp_endpoint.h"
 #include "terrain/tile_streamer.h"
+#include "vehicle/gimbal.h"
 #include "vehicle/manager.h"
 #include "vehicle/quad.h"
 
@@ -85,6 +86,11 @@ struct Options {
     int camera_height = 144;
     double camera_fov_deg = 78.0;
     double camera_pitch_deg = -15.0;
+    // The gimbal every vehicle's camera sits on, read from its servo outputs (TASK-2548,
+    // vehicle/gimbal.h): the 1-based outputs ArduPilot drives the mount's pitch and yaw on.
+    // A vehicle that drives none keeps the fixed camera_pitch_deg. 0 = never follow a gimbal.
+    int gimbal_pitch_channel = 10;
+    int gimbal_yaw_channel = 11;
     double camera_range_m = 350.0;
     int camera_quality = 70;
     // Worker threads for the render pass. They are outside the physics tick, so
@@ -195,6 +201,12 @@ Options parse_args(int argc, char **argv) {
             o.camera_fov_deg = std::atof(need_value("--camera-fov"));
         } else if (std::strcmp(argv[i], "--camera-pitch") == 0) {
             o.camera_pitch_deg = std::atof(need_value("--camera-pitch"));
+        } else if (std::strcmp(argv[i], "--gimbal-pitch-channel") == 0) {
+            o.gimbal_pitch_channel = static_cast<int>(
+                whole_number(need_value("--gimbal-pitch-channel"), "--gimbal-pitch-channel", 0, 32));
+        } else if (std::strcmp(argv[i], "--gimbal-yaw-channel") == 0) {
+            o.gimbal_yaw_channel = static_cast<int>(
+                whole_number(need_value("--gimbal-yaw-channel"), "--gimbal-yaw-channel", 0, 32));
         } else if (std::strcmp(argv[i], "--camera-range") == 0) {
             o.camera_range_m = std::atof(need_value("--camera-range"));
         } else if (std::strcmp(argv[i], "--camera-quality") == 0) {
@@ -371,6 +383,10 @@ struct VehicleSlot {
     // to be compiled in here quietly made every vehicle a 3S hobby quad regardless of what
     // airframe it was standing in for.
     skysim::vehicle::BatteryPack battery{};
+    // The gimbal as the frame last stepped drove it (TASK-2548), latched with the step so the
+    // pose and the gimbal a picture is drawn from are always one tick's: `pending` itself can
+    // already hold the next, unstepped frame while the world waits for the rest of the fleet.
+    skysim::vehicle::GimbalState gimbal{};
 
     VehicleSlot() = default;
     explicit VehicleSlot(int inst)
@@ -861,10 +877,31 @@ struct App {
         std::vector<skysim::render::RenderService::Pose> poses;
         poses.reserve(fleet.size());
         for (const auto &v : fleet) {
-            poses.push_back({v->vehicle_id, v->state.pos_ned, v->state.quat_ned_frd, now});
+            skysim::render::RenderService::Pose pose{v->vehicle_id, v->state.pos_ned, v->state.quat_ned_frd,
+                                                     now};
+            const auto g = gimbal_of(*v);
+            pose.gimbal = g.present;
+            pose.gimbal_pitch_deg = g.pitch_deg;
+            pose.gimbal_yaw_deg = g.yaw_deg;
+            poses.push_back(pose);
         }
         render_service->publish_poses(std::move(poses));
     }
+
+    // The gimbal as the frame just stepped drives it; called right after step_world, before
+    // any endpoint is polled for the next tick.
+    void latch_gimbals() {
+        skysim::vehicle::GimbalConfig cfg;
+        cfg.pitch_channel = opt.gimbal_pitch_channel;
+        cfg.yaw_channel = opt.gimbal_yaw_channel;
+        for (auto &v : fleet) {
+            v->gimbal = v->connected ? skysim::vehicle::gimbal_from_servos(cfg, v->pending.pwm,
+                                                                           v->pending.channel_count)
+                                     : skysim::vehicle::GimbalState{};
+        }
+    }
+
+    static const skysim::vehicle::GimbalState &gimbal_of(const VehicleSlot &v) { return v.gimbal; }
 
     void publish_snapshot() {
         std::vector<skysim::api::VehicleInfo> infos;
@@ -888,6 +925,10 @@ struct App {
                 info.quat_ned_frd[k] = v->state.quat_ned_frd[k];
             }
             info.sim_time_s = world ? world->now() : 0.0;
+            const auto g = gimbal_of(*v);
+            info.gimbal = g.present;
+            info.gimbal_pitch_deg = g.pitch_deg;
+            info.gimbal_yaw_deg = g.yaw_deg;
             infos.push_back(info);
         }
         skysim::api::MetricsInfo m;
@@ -973,6 +1014,7 @@ int run_strict(App &app, FILE *truth_log, FILE *record_log) {
 
         const auto t0 = clock::now();
         step_world(*app.world, app.fleet, app.opt.dt_s, truth_log, record_log);
+        app.latch_gimbals();
         app.metrics.record_us(house_us + std::chrono::duration<double, std::micro>(clock::now() - t0).count());
         if (const int rc =
                 send_replies(app.world.get(), app.fleet, app.opt, app.world->now(), app.io_pool.get())) {
@@ -1110,6 +1152,7 @@ int run_interactive(App &app, FILE *truth_log, FILE *record_log) {
 
         const auto t0 = clock::now();
         step_world(*app.world, app.fleet, app.opt.dt_s, truth_log, record_log);
+        app.latch_gimbals();
         app.metrics.record_us(house_us + std::chrono::duration<double, std::micro>(clock::now() - t0).count());
         if (const int rc =
                 send_replies(app.world.get(), app.fleet, app.opt, app.world->now(), app.io_pool.get())) {
@@ -1335,6 +1378,9 @@ int main(int argc, char **argv) {
                 pose.quat_ned_frd = {v.quat_ned_frd[0], v.quat_ned_frd[1], v.quat_ned_frd[2],
                                      v.quat_ned_frd[3]};
                 pose.sim_time_s = v.sim_time_s;
+                pose.gimbal = v.gimbal;
+                pose.gimbal_pitch_deg = v.gimbal_pitch_deg;
+                pose.gimbal_yaw_deg = v.gimbal_yaw_deg;
                 return app.still_service->render(pose, r);
             };
         }
