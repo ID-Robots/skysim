@@ -8,46 +8,47 @@
 
 namespace skysim::render {
 
-// What the world looks like, in one place.
+// What the light and the air look like, in one place.
 //
-// Two renderers draw this world — the rasteriser that ships, and the ray caster
-// the tests use as a reference — and a picture that changes depending on which
-// one drew it is worse than either. These constants were duplicated in both
-// files, in different types, kept equal by a comment saying they were equal.
-// They had already drifted.
+// Two renderers draw this world — the rasteriser that ships, and the ray caster the tests use
+// as a reference — and a picture that changes depending on which one drew it is worse than
+// either. What surfaces are made of lives in texture.h; how they are lit and hazed lives here.
 
-//: Late afternoon, high and off to one side, so vertical faces of a building are
-//: lit differently from each other and the block reads as solid rather than flat.
-//: Points from the surface towards the sun.
+//: Late afternoon, high and off to the south-west, so vertical faces of a building are lit
+//: differently from each other and every building throws a shadow to the north-east.
+//: Points from the surface towards the sun (not unit length; see sun_direction()).
 inline constexpr core::Vec3 kSunDirNed{-0.45, -0.35, -0.82};
+
+inline core::Vec3 sun_direction() {
+    const double n = std::sqrt(kSunDirNed[0] * kSunDirNed[0] + kSunDirNed[1] * kSunDirNed[1] +
+                               kSunDirNed[2] * kSunDirNed[2]);
+    return {kSunDirNed[0] / n, kSunDirNed[1] / n, kSunDirNed[2] / n};
+}
 
 inline constexpr double kSkyHorizon[3] = {0.72, 0.80, 0.90};
 inline constexpr double kSkyZenith[3] = {0.25, 0.47, 0.80};
-inline constexpr double kGround[3] = {0.35, 0.42, 0.27};
-inline constexpr double kBuilding[3] = {0.62, 0.60, 0.57};
 
-//: Light a surface gets regardless of which way it faces.
-inline constexpr double kAmbient = 0.42;
+//: Light every surface gets from the sky, shadowed or not. Bluish, as open shade is.
+inline constexpr double kSkyLight[3] = {0.36, 0.38, 0.44};
+//: Direct sun, scaled by how squarely a surface faces it. Warm, and together with the sky
+//: light it makes a sunlit field read as neutral rather than tinted.
+inline constexpr double kSunLight[3] = {0.78, 0.75, 0.70};
 
-//: Haze never fully erases a surface, so the far edge of the draw distance reads
-//: as far away rather than as blank sky.
+//: Haze never fully erases a surface, so the far edge of the draw distance reads as far away
+//: rather than as blank sky.
 inline constexpr double kMaxHaze = 0.82;
 
-inline uint8_t to_byte(double v) { return static_cast<uint8_t>(std::clamp(v, 0.0, 1.0) * 255.0 + 0.5); }
+// NaN maps to 0: std::clamp would pass it through to a cast that is undefined for it.
+inline uint8_t to_byte(double v) {
+    const double c = v > 0.0 ? (v < 1.0 ? v : 1.0) : 0.0;
+    return static_cast<uint8_t>(c * 255.0 + 0.5);
+}
 
 inline double mix(double a, double b, double t) { return a + (b - a) * t; }
 
-//: How lit a surface is. Two-sided: a tile's winding is not guaranteed to face
-//: the camera, and a building lit from the inside out looks like a hole.
-inline double shade_for_normal(const core::Vec3 &n) {
-    const double lambert =
-        std::abs(n[0] * kSunDirNed[0] + n[1] * kSunDirNed[1] + n[2] * kSunDirNed[2]);
-    return kAmbient + (1.0 - kAmbient) * std::clamp(lambert, 0.0, 1.0);
-}
-
-//: Sky colour for a ray direction. NED z is down, so a ray at the sky has z < 0.
-//: Biased towards the horizon colour so the band near eye level stays pale, which
-//: is what makes a horizon read as one.
+//: Sky colour for a ray direction. NED z is down, so a ray at the sky has z < 0. Biased
+//: towards the horizon colour so the band near eye level stays pale, which is what makes a
+//: horizon read as one.
 inline void sky_colour(const core::Vec3 &dir, double out[3]) {
     const double up = std::clamp(-dir[2], 0.0, 1.0);
     const double t = std::pow(up, 0.65);
@@ -56,22 +57,19 @@ inline void sky_colour(const core::Vec3 &dir, double out[3]) {
     }
 }
 
-//: How much haze sits between the camera and something this far away.
-//: Squared form, for callers that have a squared distance already. The rasteriser
-//: does: turning its camera-space depth into a true radial distance needs a square
-//: root per pixel, and haze only ever squares the ratio again.
-inline double haze_at_sq(double distance_sq, double max_range_sq) {
-    // A non-positive range would divide by zero, and the NaN survives clamp and
-    // min all the way to a cast that is undefined behaviour. Nothing is visible
-    // at zero range anyway, so everything is as hazy as it gets.
-    if (!(max_range_sq > 0.0)) {
+//: How much haze sits between the camera and something `distance_m` away, for a camera whose
+//: draw distance is `max_range_m` and whose haze starts `start` of the way out (0..1).
+//: Quadratic from the start to the full distance, capped at kMaxHaze.
+inline double haze_at(double distance_m, double max_range_m, double start = 0.0) {
+    // A non-positive range would divide by zero, and the NaN survives clamp and min all the
+    // way to a cast that is undefined behaviour. Nothing is visible at zero range anyway, so
+    // everything is as hazy as it gets.
+    if (!(max_range_m > 0.0)) {
         return kMaxHaze;
     }
-    return std::min(std::clamp(distance_sq / max_range_sq, 0.0, 1.0), kMaxHaze);
-}
-
-inline double haze_at(double distance_m, double max_range_m) {
-    return haze_at_sq(distance_m * distance_m, max_range_m * max_range_m);
+    const double s = std::clamp(start, 0.0, 0.99);
+    const double x = std::clamp((distance_m / max_range_m - s) / (1.0 - s), 0.0, 1.0);
+    return std::min(x * x, kMaxHaze);
 }
 
 } // namespace skysim::render

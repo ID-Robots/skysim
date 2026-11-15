@@ -51,6 +51,62 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   coverage holes) and skysim then serves the ground truth — `GET /radio/sample`,
   `GET /radio/grid`, and a `radio` object per vehicle in `GET /vehicles`. Model and API:
   [`docs/RADIO.md`](RADIO.md).
+- **[S5] Survey still camera** (done; 3D mapping contract, section 1):
+  `GET /instances/<n>/still.jpg` (or `/vehicles/<id>/still.jpg`) renders one frame on demand
+  from the vehicle's latest snapshot pose — independent of `SKYSIM_CAMERA_FPS`. Query (all
+  optional): `w` 1600 (64..4096), `h` 1200 (64..4096), `hfov` 73.7 (10..120), `pitch` -90
+  (-90..0), `yaw` 0 (relative to heading, ±360), `roll_stab` 1 (0 = rigid mount), `range` 600
+  (50..3000), `q` 90 (1..100). Response `image/jpeg` with `X-Skysim-Time-Usec`,
+  `X-Skysim-Lat`, `X-Skysim-Lon`, `X-Skysim-Alt-Amsl`, `X-Skysim-Alt-Rel`, `X-Skysim-Yaw`,
+  `X-Skysim-Pitch`, `X-Skysim-Roll` (camera axes, degrees) and `X-Skysim-Hfov` (also
+  `X-Skysim-Ned`, `-Vehicle`, `-Instance`). If `--spawn-home` did not parse (skysim warns at
+  startup) there is no earth position to give: `X-Skysim-Lat`, `-Lon` and `-Alt-Amsl` are left
+  out and `X-Skysim-Warning` says why. Errors are JSON: `400` for a bad query, `404` for an
+  unknown instance/vehicle or a still camera that is off, `503` + `Retry-After: 1` when
+  `SKYSIM_STILL_CONCURRENCY` (default 2) renders are already running, `500` if a render fails
+  (out of memory on a huge frame, say). `SKYSIM_TEXTURE_SEED`
+  (default 1) picks the world's texture. Meaning of the pose headers: docs/PROTOCOL.md.
+
+#### Using the still camera from a simulated survey (core, gateway)
+
+- **core `SurveyCaptureHandler`** (contract section 2): with `SKYSIM_URL` and
+  `SKYSIM_INSTANCE` set, fetch `{SKYSIM_URL}/instances/{SKYSIM_INSTANCE}/still.jpg?w=…&h=…&hfov=…&pitch=…`
+  per CAMERA_FEEDBACK, retrying a `503` after `Retry-After` a bounded number of times. Do not
+  draw on the frame — a banner breaks feature matching; mark it simulated in EXIF and the
+  sidecar instead.
+- **Which position geotags the frame.** A still is rendered from the vehicle's pose *when the
+  request is served*, and its `X-Skysim-*` headers are that pose exactly. A request sent as the
+  CAMERA_FEEDBACK arrives differs from the feedback by the distance flown in between (tens of
+  centimetres for tens of milliseconds at survey speed); one that waited out a `503` was
+  rendered further along the track (about 10 m after a 1 s retry at 10 m/s). Correlate the two before trusting the feedback for the
+  geotag: compare the frame's position (`X-Skysim-Lat` / `-Lon` / `-Alt-Amsl`) with the
+  feedback's. If they differ by more than the capture tolerance, geotag the simulated frame
+  with the pose headers (they are the truth for that picture) or drop the capture, and keep
+  the original CAMERA_FEEDBACK values in the sidecar either way. Compare positions, not
+  timestamps: `X-Skysim-Time-Usec` is skysim's world clock, while CAMERA_FEEDBACK's
+  `time_usec` is GPS epoch time (0 before a GPS time) or, with a feedback pin, the autopilot's
+  boot clock (docs/PROTOCOL.md). The feedback position is the EKF's estimate, so allow for its
+  error (well under a metre in SITL) in the tolerance.
+- **Capacity**: a 1600x1200 frame takes about 0.55 s of one core, ~0.3 s on the two
+  background-priority threads a render gets by default (`--still-threads`), so the default two
+  slots keep up with two vehicles triggering every 2 s with room to spare. Raise `SKYSIM_STILL_CONCURRENCY` for more
+  vehicles on a box with the cores for it; renders run at nice +10 and never slow the tick.
+- **gateway SITL camera model**: "skysim survey camera", 1600x1200, hfov 73.7° — a 24 mm
+  equivalent (36 mm film width), e.g. a 13.2 mm-wide sensor with an 8.81 mm lens (what
+  `tools/survey/survey_fixture.py` writes into EXIF).
+- **Reconstruction fixture**: `tools/survey/survey_fixture.py` renders a survey grid of the demo
+  city without ArduPilot, with EXIF GPS and an ODM `geo.txt`; see the README.
+- **ODM on simulated surveys** (gateway `odm` target, contract section 3): ODM 3.6's default
+  incremental SfM reconstructed a nadir grid plus one oblique grid of the demo city to 1-6 cm,
+  but on nadir + crosshatch (338 frames) it bootstrapped from two obliques seeing almost only
+  flat ground, took the wrong one of a plane homography's two solutions, and diverged (camera
+  positions ~100 m off, a scrambled orthophoto) — with or without GPS in the bundle, with fixed
+  intrinsics, with 0.2 m GPS accuracy. The demo city is ~84 % flat ground; a scanned city is
+  not. Expect a dev mapping run over the demo city to need either a scene with more relief or
+  a check of ODM's GPS errors in its report before showing the result (a failed run looked like
+  this: GPS errors ~100+ m, average GSD reported as 1 cm). Do not pass camera angles in
+  geo.txt for `--sfm-algorithm triangulation`: ODM 3.6 turns them into rotations tens of
+  degrees off at this latitude (`opendm/photo.py` compute_opk).
 
 ### 2. skyhub_core (`sitl/` image)
 - **[C1] `scripts/sitl.sh`**: no change needed for the model (env `SITL_MODEL` already

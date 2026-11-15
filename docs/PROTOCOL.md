@@ -148,6 +148,42 @@ Hard interop rules for our emitter:
 - Contact events must not produce NaN/Inf or multi-thousand-g spikes; clamp and smooth impulses
   (see DESIGN.md ground-contact notes) or the EKF diverges on landing.
 
+## Survey still pose headers (HTTP, not part of the wire protocol)
+
+`GET /instances/<n>/still.jpg` (docs/SKYHUB_INTEGRATION.md) stamps each frame with the pose it
+was rendered from, in this protocol's terms, so a frame can be lined up with what the autopilot
+saw:
+
+Verified against the Copter-4.7.0 tag:
+
+- `X-Skysim-Time-Usec` is the state JSON's `"timestamp"` (world physics time) in microseconds,
+  from the same tick as the position and attitude. It is no ArduPilot clock. SITL's boot clock
+  advances by the deltas of that field (`SIM_JSON.cpp:500-508`), so it runs from wherever that
+  SITL connected. CAMERA_FEEDBACK's `time_usec` is neither: without a feedback pin it is GPS
+  epoch time, `AP::gps().time_epoch_usec()`, which is 0 while there is no GPS time
+  (`AP_Camera/AP_Camera_Backend.cpp:449-457`), and with a pin it is the trigger time in boot
+  microseconds (`:410-421`). Match a frame to a trigger by position, not by timestamp.
+- The position is the `"position"` NED sent in that tick; `X-Skysim-Alt-Rel` is `-down`.
+- `X-Skysim-Lat` / `-Lon` / `-Alt-Amsl` are that NED position offset from `--spawn-home` (the
+  `--home` every managed SITL is given) the way ArduPilot turns `"position"` into its (simulated) GPS fix.
+  SITL sets `position = state.position + origin.get_distance_NE_double(home)`
+  (`SIM_JSON.cpp:401-403`) and then `location = origin; location.offset(position.x,
+  position.y)`, `alt = home.alt - position.z` (`SIM_Aircraft.cpp:161-166`). `offset_latlng()`
+  (`AP_Common/Location.cpp:480-487`) steps `dlat = north * LOCATION_SCALING_FACTOR_INV` and
+  `dlng = east * LOCATION_SCALING_FACTOR_INV / longitude_scale(lat + dlat/2)`, with
+  `LATLON_TO_M_INV = 89.83204953368922` (1e-7 deg per metre; `AP_Math/definitions.h:52-53`,
+  i.e. `RADIUS_OF_EARTH 6378100`, `:48`) and `longitude_scale()` = cos(lat), floored at 0.01
+  (`Location.cpp:528-532`). `src/core/geo.h` does the same from home in doubles. SITL also
+  re-bases `origin` on the vehicle once a second (`SIM_Aircraft.cpp:192-203`) and works in
+  integer 1e-7 degrees; over a survey block both differ from offsetting home directly by about a
+  centimetre, well under one pixel of a survey frame. CAMERA_FEEDBACK's position is the AHRS
+  estimate at the trigger (`AP_Camera_Backend.cpp:432-445`), so it matches these headers to
+  within the EKF's error, not exactly.
+- `X-Skysim-Yaw` / `-Pitch` / `-Roll` are the **camera's** axes (x along the optical axis, y to
+  the image's right, z to its bottom) as NED Z-Y-X Euler angles in degrees, yaw 0..360. With a
+  stabilised gimbal they are heading + requested yaw, requested pitch, 0; at pitch ±90 roll is
+  reported 0 and yaw is where the top of the image faces.
+
 ## Conformance
 
 `tools/harness/conformance.py` launches N real SITL instances against the sim and asserts:

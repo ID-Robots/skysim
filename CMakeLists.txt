@@ -98,9 +98,13 @@ add_library(skysim_render STATIC
     src/render/raster.cpp
     src/render/render_service.cpp
     src/render/jpeg.cpp
+    src/render/scene.cpp
+    src/render/still.cpp
+    src/render/texture.cpp
 )
 target_include_directories(skysim_render PUBLIC src)
-target_link_libraries(skysim_render PUBLIC skysim_core PRIVATE stb_image_write)
+target_link_libraries(skysim_render PUBLIC skysim_core Threads::Threads PRIVATE stb_image_write)
+target_compile_options(skysim_render PRIVATE -Wall -Wextra -Wshadow)
 
 add_library(skysim_terrain STATIC
     src/terrain/cook.cpp
@@ -133,6 +137,12 @@ target_compile_options(reply_bench PRIVATE -Wall -Wextra -Wshadow)
 add_executable(render_probe tools/render_probe/main.cpp)
 target_include_directories(render_probe PRIVATE src)
 target_link_libraries(render_probe PRIVATE skysim_render skysim_core)
+
+# --- survey stills without a simulator (tools/survey/survey_fixture.py drives it) -------------
+add_executable(survey_still tools/survey/survey_still.cpp)
+target_include_directories(survey_still PRIVATE src)
+target_link_libraries(survey_still PRIVATE skysim_render skysim_core)
+target_compile_options(survey_still PRIVATE -Wall -Wextra -Wshadow)
 
 add_executable(tile_cooker tools/cooker/main.cpp)
 target_include_directories(tile_cooker PRIVATE src)
@@ -177,6 +187,12 @@ target_link_libraries(test_render PRIVATE skysim_render skysim_core skysim_terra
 target_compile_options(test_render PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME render COMMAND test_render)
 
+add_executable(test_still tests/test_still.cpp)
+target_link_libraries(test_still PRIVATE skysim_render skysim_core skysim_terrain skysim_api httplib::httplib
+                                         stb_image_write)
+target_compile_options(test_still PRIVATE -Wall -Wextra -Wshadow)
+add_test(NAME still COMMAND test_still)
+
 add_executable(test_endpoint tests/test_endpoint.cpp)
 target_link_libraries(test_endpoint PRIVATE skysim_protocol)
 target_compile_options(test_endpoint PRIVATE -Wall -Wextra -Wshadow)
@@ -217,7 +233,7 @@ target_compile_options(test_streamer PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME streamer COMMAND test_streamer)
 
 set_tests_properties(
-    packets json frames quad world collision endpoint manager api radio radio_api thread_pool streamer
+    packets json frames quad world collision endpoint manager api radio radio_api thread_pool streamer still
     PROPERTIES LABELS "unit"
 )
 
@@ -232,7 +248,11 @@ if(Python3_FOUND)
                      --cycles 100
                      --api-port 18645
                      --base-instance 96)
-    set_tests_properties(app_smoke app_churn PROPERTIES
+    # The reconstruction fixture (tools/survey): frame count, geotags and determinism.
+    add_test(NAME survey_fixture
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/survey_fixture_smoke.py
+                     $<TARGET_FILE:survey_still> $<TARGET_FILE:tile_cooker>)
+    set_tests_properties(app_smoke app_churn survey_fixture PROPERTIES
         LABELS "happy-path"
         TIMEOUT 180
         RUN_SERIAL TRUE

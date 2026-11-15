@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 
 SIM = sys.argv[1]
@@ -44,6 +45,17 @@ def api(port: int, method: str, path: str, body: bytes | None = None):
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=body, method=method)
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode() or "{}")
+
+
+def listed(port: int, count: int) -> list:
+    """GET /vehicles once it lists `count` vehicles: POST /vehicles answers when the tick thread
+    has spawned the vehicle, but the snapshot GET reads is published at the end of that tick."""
+    deadline = time.time() + 5
+    vehicles = api(port, "GET", "/vehicles")
+    while len(vehicles) < count and time.time() < deadline:
+        time.sleep(0.02)
+        vehicles = api(port, "GET", "/vehicles")
+    return vehicles
 
 
 def case_replay(tmp: str) -> None:
@@ -124,14 +136,38 @@ def case_rest() -> None:
         check(v1["instance"] == 93, "spawn allocates base instance")
         v2 = api(port, "POST", "/vehicles", b"{\"launch_process\":true}")  # /bin/true exits: ok
         check(v2["instance"] == 94, "second spawn next instance")
-        listing = api(port, "GET", "/vehicles")
+        listing = listed(port, 2)
         check(len(listing) == 2, "list shows both")
         m = api(port, "GET", "/metrics")
         check(m["vehicles"] == 2 and m["tick"] > 0, "metrics live")
+        case_still(port, v1)
         check(api(port, "DELETE", f"/vehicles/{v1['id']}")["ok"], "despawn ok")
         check(len(api(port, "GET", "/vehicles")) == 1, "list after despawn")
     finally:
         check(stop(proc) == 0, "rest clean shutdown")
+
+
+def case_still(port: int, vehicle: dict) -> None:
+    """GET .../still.jpg on the real binary: no tiles, so a textured ground plane; pose headers."""
+    url = f"http://127.0.0.1:{port}/instances/{vehicle['instance']}/still.jpg?w=320&h=240&pitch=-60"
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        body = resp.read()
+        headers = resp.headers
+    check(resp.status == 200 and headers.get("Content-Type") == "image/jpeg", "still served as JPEG")
+    check(body[:2] == b"\xff\xd8" and len(body) > 2000, "still is a real, textured JPEG")
+    check(headers.get("X-Skysim-Pitch") == "-60.0000" and headers.get("X-Skysim-Hfov") == "73.7000",
+          "still pose headers")
+    check(abs(float(headers.get("X-Skysim-Lat", "0")) - 42.1403890) < 1e-3, "still geotag from --spawn-home")
+    check(int(headers.get("X-Skysim-Time-Usec", "-1")) >= 0, "still sim time")
+    by_id = f"http://127.0.0.1:{port}/vehicles/{vehicle['id']}/still.jpg?w=320&h=240&pitch=-60"
+    with urllib.request.urlopen(by_id, timeout=30) as resp:
+        check(resp.status == 200, "still by vehicle id")
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/instances/{vehicle['instance']}/still.jpg?w=5000",
+                               timeout=30)
+        check(False, "oversized still rejected")
+    except urllib.error.HTTPError as err:
+        check(err.code == 400 and b"w must be" in err.read(), "oversized still rejected with JSON")
 
 
 def case_radio(tmp: str) -> None:
@@ -145,7 +181,7 @@ def case_radio(tmp: str) -> None:
     try:
         check(api(port, "GET", "/radio")["radio"]["seed"] == 7, "radio spec loaded at startup")
         api(port, "POST", "/vehicles", b"{}")
-        vehicle = api(port, "GET", "/vehicles")[0]
+        vehicle = listed(port, 1)[0]
         cell = vehicle["radio"]["cell"]
         check(cell["source"] == "sim" and cell["operator"] == "SimTel A", "vehicle carries the primary modem")
         check(abs(vehicle["radio"]["lat"] - 47.0) < 1e-4, "vehicle radio sampled at its truth position")
@@ -164,7 +200,7 @@ def case_radio(tmp: str) -> None:
     time.sleep(1)
     try:
         api(port, "POST", "/vehicles", b"{}")
-        check("radio" not in api(port, "GET", "/vehicles")[0], "no radio without a usable home")
+        check("radio" not in listed(port, 1)[0], "no radio without a usable home")
     finally:
         check(stop(proc) == 0, "bad-home clean shutdown")
     err = proc.stderr.read() if proc.stderr else ""
@@ -202,7 +238,9 @@ def case_strict_abort() -> None:
 
 def case_bad_args() -> None:
     for args in (["--wind", "garbage"], ["--gust", "x"], ["--time-mode", "warp"],
-                 ["--vehicles", "-1"], ["--unknown-flag"], ["--dt"]):
+                 ["--vehicles", "-1"], ["--unknown-flag"], ["--dt"],
+                 ["--still-concurrency", "17"], ["--still-threads", "0"], ["--texture-seed", "-1"],
+                 ["--texture-seed", "2x"]):
         rc = subprocess.run([SIM, *args], capture_output=True, timeout=30)
         check(rc.returncode == 2, f"bad args rejected: {args}")
     rc = subprocess.run([SIM, "--tiles", "/nonexistent"], capture_output=True, timeout=60)

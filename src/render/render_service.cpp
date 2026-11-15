@@ -8,27 +8,15 @@
 namespace skysim::render {
 
 RenderService::RenderService(const Config &cfg) : cfg_(cfg) {
-    core::WorldConfig wcfg;
-    // This world is never stepped, so its timestep is irrelevant; it exists only
-    // to hold static geometry that rays can be cast at.
-    wcfg.dt_s = 1.0 / 800.0;
-    wcfg.worker_threads = 0;
-    world_ = std::make_unique<core::World>(wcfg);
-    world_->add_ground_plane();
-    if (!cfg_.tiles_dir.empty()) {
-        tiles_loaded_ = world_->load_tiles(cfg_.tiles_dir);
+    // The geometry is pulled out once. The static world does not change under this service —
+    // it loads its own tiles and never streams — so the per-frame cost is transforming what
+    // is in shot, not walking the world again.
+    if (cfg_.scene) {
+        scene_ = cfg_.scene;
+        tiles_loaded_ = cfg_.scene_tiles;
+    } else {
+        scene_ = load_scene(cfg_.tiles_dir, cfg_.texture_seed, &tiles_loaded_);
     }
-
-    // Pull the geometry out once. The static world does not change under this
-    // service — it loads its own tiles and never streams — so the per-frame cost
-    // is transforming what is in shot, not walking the world again.
-    scene_.build(world_->collect_static_triangles());
-
-    // The physics world was scaffolding: it parsed the tiles so the triangles
-    // could be lifted out. Nothing raycasts it once the rasteriser has the
-    // geometry, and keeping a second Jolt world alive costs ~10 MB for the life
-    // of the process.
-    world_.reset();
 
     rasterizer_ = std::make_unique<Rasterizer>(cfg_.camera);
     pool_ = std::make_unique<core::ThreadPool>(cfg_.threads);
@@ -75,7 +63,7 @@ void RenderService::run() {
                 break;
             }
             const Camera camera(cfg_.camera, pose.position_ned, pose.quat_ned_frd);
-            const Image image = rasterizer_->render(scene_, camera, pool_.get());
+            const Image image = rasterizer_->render(*scene_, camera, pool_.get());
             auto jpeg = encode_jpeg(image, cfg_.quality);
             if (!jpeg.empty()) {
                 frames_.publish(pose.vehicle_id, std::move(jpeg), pose.sim_time_s);

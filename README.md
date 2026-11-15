@@ -186,7 +186,8 @@ docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
 `docker-entrypoint.sh` turns `SKYSIM_*` variables into flags: `SKYSIM_API_BIND`,
 `SKYSIM_API_PORT`, `SKYSIM_VEHICLES`, `SKYSIM_TILES`, `SKYSIM_STREAM_RADIUS`,
 `SKYSIM_STREAM_MAX`, `SKYSIM_DT`, `SKYSIM_TIME_MODE`, `SKYSIM_SPAWN_HOME`,
-`SKYSIM_RADIO_SPEC`, and `SKYSIM_EXTRA_ARGS` for anything not listed.
+`SKYSIM_RADIO_SPEC`, `SKYSIM_STILL_CONCURRENCY`, `SKYSIM_TEXTURE_SEED`, and
+`SKYSIM_EXTRA_ARGS` for anything not listed.
 
 **Set `SKYSIM_TIME_MODE=interactive` on a long-lived server.** The default is `strict`,
 which is what determinism and CI replays need — a barrier every tick, and an abort when
@@ -210,6 +211,12 @@ docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
 # http://localhost:8642/instances/0/camera.mjpg
 ```
 
+**Survey stills need no switch.** `GET /instances/<n>/still.jpg` renders one large, exactly
+posed frame on demand, whatever `SKYSIM_CAMERA_FPS` says, so it costs nothing until it is
+asked for. `SKYSIM_STILL_CONCURRENCY` (default `2`; `0` turns the route off) caps renders in
+flight, and `SKYSIM_TEXTURE_SEED` (default `1`) picks the world's texture for stills and the
+camera feed alike — see [Survey stills](#survey-stills-and-the-reconstruction-fixture).
+
 ---
 
 ## Control plane (`--api-port`)
@@ -224,6 +231,8 @@ docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
 | `PUT` / `GET` / `DELETE /radio` | set, read or clear the simulated 4G radio field (carriers, towers, coverage holes) |
 | `GET /radio/sample?lat&lon&alt_amsl` | RSRP / RSRQ / SINR / RSSI, serving cell and link quality per carrier at a point |
 | `GET /radio/grid?bbox&alt_rel&step_m&carrier` | the same as a ground-truth raster over an area (≤ 250 000 cells) |
+| `GET /instances/{n}/still.jpg`, `GET /vehicles/{id}/still.jpg` | one survey still, rendered on demand from the vehicle's pose; query `w h hfov pitch yaw roll_stab range q`, pose in `X-Skysim-*` headers |
+| `GET /instances/{n}/camera.jpg` / `.mjpg` (and by `/vehicles/{id}`) | the pilot camera feed (`--camera-fps`) |
 
 All mutations execute at tick boundaries; reads come from per-tick snapshots. The SkyHub
 gateway polls `GET /vehicles` and, on a collision-counter increase, emits a crash alert to
@@ -233,6 +242,78 @@ The radio field is a deterministic LTE model — path loss that eases with altit
 and vertical antenna patterns, correlated shadowing, coverage holes, same-carrier
 interference — for developing network-quality surveys in simulation. Model, spec format and
 API: [`docs/RADIO.md`](docs/RADIO.md).
+
+## Survey stills and the reconstruction fixture
+
+A simulated mapping mission needs photos that photogrammetry can reconstruct, so skysim has a
+survey still camera beside the small pilot feed:
+
+![A nadir and a -60 degree oblique survey still of the demo city, from the reconstruction fixture](.github/assets/skysim-survey-stills.jpg)
+
+```bash
+curl -o frame.jpg -D - "http://127.0.0.1:8642/instances/0/still.jpg?w=1600&h=1200&pitch=-90"
+# X-Skysim-Time-Usec, X-Skysim-Lat, X-Skysim-Lon, X-Skysim-Alt-Amsl, X-Skysim-Alt-Rel,
+# X-Skysim-Yaw, X-Skysim-Pitch, X-Skysim-Roll (camera axes, degrees), X-Skysim-Hfov
+```
+
+| Query | Default | Range | Meaning |
+|---|---|---|---|
+| `w`, `h` | 1600, 1200 | 64..4096 | frame size, pixels |
+| `hfov` | 73.7 | 10..120 | horizontal field of view, degrees (73.7 = a 24 mm-equivalent lens) |
+| `pitch` | -90 | -90..0 | camera pitch, degrees; -90 is straight down |
+| `yaw` | 0 | -360..360 | camera yaw relative to the vehicle's heading, degrees |
+| `roll_stab` | 1 | 0, 1 | 1: gimbal-stabilised, airframe roll and pitch do not tilt the camera; 0: rigid mount |
+| `range` | 600 | 50..3000 | draw distance for buildings, metres |
+| `q` | 90 | 1..100 | JPEG quality |
+
+The frame is drawn from one consistent snapshot of the vehicle's pose (position, attitude and
+sim time from the same tick), on background-priority worker threads, and never waits on or
+slows the physics tick. At most `SKYSIM_STILL_CONCURRENCY` render at once; past that the
+answer is `503` with `Retry-After: 1`. Every input is bounded and every error is JSON. Lat/lon
+come from `--spawn-home` by ArduPilot's own flat-earth conversion, so they match the GPS the
+autopilot reports (if `--spawn-home` is not `lat,lon[,alt,yaw]` they are left out and an
+`X-Skysim-Warning` header says so).
+
+The world is textured for structure from motion: roads with lane markings, crossings and
+manholes, kerbs and paved sidewalks, patches of grass, dry grass, gravel, soil and paving with
+shrubs, and per-building wall and roof materials and colours, windows, plinths, cornices,
+parapets and rooftop plant, with detail down to about a centimetre. All of it is a pure
+function of the world position and `--texture-seed` — the same point has the same colour in
+every photo of it — filtered to each pixel's footprint like a real lens, lit by a sun to the
+south-west, with cast shadows. Where no tile is loaded the ground still renders. The pilot
+camera uses the same scene and shading.
+
+`tools/survey/survey_fixture.py` flies a virtual camera over the demo city on a survey grid
+without ArduPilot and writes frames with EXIF GPS plus an OpenDroneMap `geo.txt` — the
+reconstruction fixture:
+
+```bash
+cmake --build build --target survey_still tile_cooker
+# 300 x 200 m block, 100 m up, 80/70 % overlap, nadir plus a crosshatch at -60 (338 frames):
+tools/survey/survey_fixture.py --out build/odm/images --crosshatch -60
+docker run --rm -v $(pwd)/build:/datasets opendronemap/odm --project-path /datasets odm \
+  --geo /datasets/odm/images/geo.txt
+```
+
+Reconstructed with OpenDroneMap 3.6 (orthophoto, 10 cm; textured mesh):
+
+![ODM orthophoto of the fixture block](.github/assets/skysim-odm-orthophoto.jpg)
+![ODM textured mesh of the fixture block](.github/assets/skysim-odm-mesh.jpg)
+
+The frames hold up to the geometry: ODM's own structure from motion puts the nadir grid plus
+either oblique grid within 1-6 cm of the geotags, the cameras within 0.01 degrees of their true
+pointing, and self-calibrates the focal length to the exact one. One caveat, about ODM rather
+than the frames: on the full nadir + crosshatch set its default incremental SfM can bootstrap
+from two obliques that see almost only flat ground (the demo city is ~84 % ground), and a
+plane-based start has two valid solutions — it took the wrong one and the model diverged. The
+images above come from the two cm-accurate partial models merged, all tracks triangulated with
+`opensfm reconstruct_from_prior`, then ODM's dense, mesh, texture and orthophoto stages as
+usual. Do not feed ODM camera angles in `geo.txt` for `--sfm-algorithm triangulation`: ODM 3.6
+converts them through a frame that is not local level away from the equator.
+
+A 1600x1200 nadir frame of the demo city renders in about 0.55 s on one core, 0.27 s on the
+two threads a still gets by default, and 0.15–0.2 s on four (Ryzen 7 5700X), plus ~40 ms of
+JPEG encode.
 
 ## Useful flags
 
@@ -247,6 +328,9 @@ API: [`docs/RADIO.md`](docs/RADIO.md).
 | `--io-threads` | Fan the reply path across cores (helps past ~48 vehicles) |
 | `--canned` | M1 protocol-debug mode |
 | `--radio-spec field.json` | Start with a simulated radio field ([`docs/RADIO.md`](docs/RADIO.md)); `PUT /radio` can replace it |
+| `--still-concurrency N` | Survey stills rendering at once (2; 0 = still route off); more get `503` + `Retry-After` |
+| `--still-threads N` | Background-priority worker threads per still render (2) |
+| `--texture-seed N` | Seed of the world's procedural texture (1): same seed, same world, every run |
 
 Live acceptance harnesses (need `ARDUPILOT_ROOT`; use `--base-instance 1`+ if something
 already owns the instance-0 SITL ports):
@@ -298,6 +382,7 @@ tools/cooker/   pretile.py (demo city) + osm_buildings.py (real city) + tile_coo
 tools/bench/    gated world, protocol, and UDP reply-path performance benchmarks
 tools/harness/  conformance / determinism / straggler / churn / collision / corridor
 tools/render_probe/  render one frame from a given camera pose, to a JPEG
+tools/survey/   survey_still (stills from poses, no simulator) + survey_fixture.py (ODM fixture)
 tools/getting_started.sh  build + cook + render the demo city (see "Getting started")
 tests/          unit tests + app_smoke.py driving the real binary
 ```

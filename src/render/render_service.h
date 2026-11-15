@@ -4,8 +4,9 @@
 #include "core/world.h"
 #include "render/camera.h"
 #include "render/frame_store.h"
-#include "render/raster.h"
 #include "render/image.h"
+#include "render/raster.h"
+#include "render/scene.h"
 
 #include <atomic>
 #include <memory>
@@ -25,10 +26,11 @@ namespace skysim::render {
 // a tick) had skysim freezing and thawing the vehicle tens of thousands of times
 // while ArduPilot refused to arm for "Main loop slow".
 //
-// So this owns a second World, built from the same tile directory. Buildings and
-// ground are static geometry loaded from files, so a private copy is not a copy
-// of anything that changes — and it can be raycast freely while the real world
-// steps, with no lock between them and no way for a slow frame to slow a vehicle.
+// So this draws from its own copy of the static world (a RasterScene, built from the same
+// tile directory, or shared with the survey still camera). Buildings and ground are static
+// geometry loaded from files, so a private copy is not a copy of anything that changes —
+// and it can be read freely while the real world steps, with no lock between them and no
+// way for a slow frame to slow a vehicle.
 //
 // The cost is that other vehicles do not appear in the picture. That is the whole
 // trade: ground, sky and buildings, drawn without ever touching the simulation.
@@ -36,7 +38,12 @@ class RenderService {
   public:
     struct Config {
         CameraConfig camera;
+        // The scene to draw. When null the service loads its own from tiles_dir, textured
+        // with texture_seed; when shared, scene_tiles says how many tiles it holds.
+        std::shared_ptr<const RasterScene> scene;
+        size_t scene_tiles{0};
         std::string tiles_dir;
+        uint32_t texture_seed{1};
         double fps{10.0};
         int quality{70};
         int threads{4};
@@ -66,15 +73,14 @@ class RenderService {
     FrameStore::Frame frame(uint32_t vehicle_id) const { return frames_.get(vehicle_id); }
 
     size_t tiles_loaded() const { return tiles_loaded_; }
-    size_t triangle_count() const { return scene_.triangle_count(); }
+    size_t triangle_count() const { return scene_->triangle_count(); }
 
   private:
     void run();
 
     Config cfg_;
-    std::unique_ptr<core::World> world_;
     std::unique_ptr<Rasterizer> rasterizer_;
-    RasterScene scene_;
+    std::shared_ptr<const RasterScene> scene_;
     std::unique_ptr<core::ThreadPool> pool_;
     FrameStore frames_;
     size_t tiles_loaded_{0};
