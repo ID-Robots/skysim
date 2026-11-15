@@ -1,6 +1,8 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <iterator>
 #include <mutex>
@@ -23,13 +25,21 @@ class FrameStore {
     struct Frame {
         std::vector<uint8_t> jpeg;
         double sim_time_s{0.0};
+        // Which publish this was, counted across the store from 1 (0: no frame). A viewer that
+        // remembers the last one it sent can wait for the next without re-reading the slot on a
+        // timer, and tell a new frame from an old one even while sim time stands still.
+        uint64_t seq{0};
     };
 
     void publish(uint32_t vehicle_id, std::vector<uint8_t> jpeg, double sim_time_s) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        Frame &slot = frames_[vehicle_id];
-        slot.jpeg = std::move(jpeg);
-        slot.sim_time_s = sim_time_s;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            Frame &slot = frames_[vehicle_id];
+            slot.jpeg = std::move(jpeg);
+            slot.sim_time_s = sim_time_s;
+            slot.seq = ++seq_;
+        }
+        published_.notify_all();
     }
 
     // Empty if that vehicle has never had a frame rendered.
@@ -40,6 +50,20 @@ class FrameStore {
             return {};
         }
         return it->second;
+    }
+
+    // The vehicle's frame as soon as it is newer than `after_seq`, or whatever the slot holds
+    // (possibly nothing) once `deadline` passes. The JPEG is copied once, when it is returned.
+    Frame wait_newer(uint32_t vehicle_id, uint64_t after_seq,
+                     std::chrono::steady_clock::time_point deadline) const {
+        std::unique_lock<std::mutex> lock(mutex_);
+        const auto newer = [&] {
+            auto it = frames_.find(vehicle_id);
+            return it != frames_.end() && it->second.seq > after_seq;
+        };
+        published_.wait_until(lock, deadline, newer);
+        auto it = frames_.find(vehicle_id);
+        return it == frames_.end() ? Frame{} : it->second;
     }
 
     void erase(uint32_t vehicle_id) {
@@ -62,7 +86,9 @@ class FrameStore {
 
   private:
     mutable std::mutex mutex_;
+    mutable std::condition_variable published_;
     std::unordered_map<uint32_t, Frame> frames_;
+    uint64_t seq_{0};
 };
 
 } // namespace skysim::render

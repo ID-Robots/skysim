@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "api/control_server.h"
+#include "core/cpus.h"
 #include "core/metrics.h"
 #include "core/thread_pool.h"
 #include "core/world.h"
@@ -87,9 +88,11 @@ struct Options {
     double camera_pitch_deg = -15.0;
     double camera_range_m = 350.0;
     int camera_quality = 70;
-    // Worker threads for the render pass. They are outside the physics tick, so
-    // this trades cores for frame rate and nothing else.
-    int camera_threads = 4;
+    // Threads drawing a camera frame (SKYSIM_CAMERA_THREADS). They are outside the physics
+    // tick and run at background priority, so this trades cores for frame rate. 0, the
+    // default, is one per CPU this process can really use, at most 4 (core/cpus.h): the old
+    // fixed 4 was five threads on a 2-vCPU task, past its quota.
+    int camera_threads = 0;
     // Texture of the rendered world (SKYSIM_TEXTURE_SEED): the same seed draws the same world
     // in every run, the pilot camera and the survey stills alike.
     uint32_t texture_seed = 1;
@@ -200,7 +203,8 @@ Options parse_args(int argc, char **argv) {
         } else if (std::strcmp(argv[i], "--camera-quality") == 0) {
             o.camera_quality = std::atoi(need_value("--camera-quality"));
         } else if (std::strcmp(argv[i], "--camera-threads") == 0) {
-            o.camera_threads = std::atoi(need_value("--camera-threads"));
+            o.camera_threads =
+                static_cast<int>(whole_number(need_value("--camera-threads"), "--camera-threads", 0, 64));
         } else if (std::strcmp(argv[i], "--texture-seed") == 0) {
             o.texture_seed = static_cast<uint32_t>(
                 whole_number(need_value("--texture-seed"), "--texture-seed", 0, 4294967295ULL));
@@ -251,10 +255,6 @@ Options parse_args(int argc, char **argv) {
     // an out-of-range value does not announce itself: a negative thread count is
     // an undefined pool size, a grace above 1 stretches every tick past its
     // period, and stb quietly reads quality 0 as 90.
-    if (o.camera_threads < 1) {
-        std::fprintf(stderr, "skysim: --camera-threads must be at least 1\n");
-        std::exit(2);
-    }
     if (o.camera_quality < 1 || o.camera_quality > 100) {
         std::fprintf(stderr, "skysim: --camera-quality must be 1-100\n");
         std::exit(2);
@@ -1243,10 +1243,16 @@ int main(int argc, char **argv) {
         rcfg.scene_tiles = render_tiles;
         rcfg.fps = opt.camera_fps;
         rcfg.quality = opt.camera_quality;
-        rcfg.threads = opt.camera_threads;
+        const int cpus = skysim::core::available_cpus();
+        rcfg.threads = opt.camera_threads > 0 ? opt.camera_threads : skysim::core::default_render_threads(cpus);
+        // A line every ten seconds while frames are being drawn — achieved fps against the
+        // target, and what a frame costs — so a laggy stream is diagnosable from the log.
+        rcfg.log_every_s = 10.0;
         app.render_service = std::make_unique<skysim::render::RenderService>(rcfg);
-        std::printf("skysim: camera %dx%d @ %.1f fps on %d render thread(s)\n", opt.camera_width,
-                    opt.camera_height, opt.camera_fps, opt.camera_threads);
+        std::printf("skysim: camera %dx%d @ %.1f fps on %d render thread(s) (%s; %d CPU(s) available), "
+                    "drawn only while somebody is watching\n",
+                    opt.camera_width, opt.camera_height, opt.camera_fps, app.render_service->threads(),
+                    opt.camera_threads > 0 ? "--camera-threads" : "default", cpus);
     }
 
     if (stills_on) {
@@ -1319,11 +1325,31 @@ int main(int argc, char **argv) {
             return app.vehicle_snapshot;
         };
         snaps.metrics = [&app] {
-            std::lock_guard<std::mutex> lock(app.snapshot_mutex);
-            return app.metrics_snapshot;
+            skysim::api::MetricsInfo m;
+            {
+                std::lock_guard<std::mutex> lock(app.snapshot_mutex);
+                m = app.metrics_snapshot;
+            }
+            // Read when asked rather than copied every tick: the render thread keeps these.
+            if (app.render_service) {
+                const auto s = app.render_service->stats();
+                m.camera.enabled = true;
+                m.camera.target_fps = s.target_fps;
+                m.camera.fps = s.fps;
+                m.camera.watched = s.watched;
+                m.camera.render_ms = s.render_ms;
+                m.camera.render_ms_max = s.render_ms_max;
+                m.camera.encode_ms = s.encode_ms;
+                m.camera.threads = s.threads;
+                m.camera.frames_drawn = s.frames_drawn;
+                m.camera.frames_reused = s.frames_reused;
+            }
+            return m;
         };
-        snaps.camera_frame = [&app](uint32_t id) {
-            return app.render_service ? app.render_service->frame(id) : skysim::render::FrameStore::Frame{};
+        // Asking is what gets a vehicle drawn: RenderService::frame puts it on the draw list.
+        snaps.camera_frame = [&app](uint32_t id, uint64_t after_seq, std::chrono::milliseconds wait) {
+            return app.render_service ? app.render_service->frame(id, after_seq, wait)
+                                      : skysim::render::FrameStore::Frame{};
         };
         if (app.still_service) {
             // The pose comes from the snapshot the route already read: position, attitude and

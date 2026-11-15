@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """App-level smoke of the skysim binary (ctest 'app_smoke'): exercises main.cpp's replay,
-canned, strict-physics, REST, radio field, strict-abort, and bad-args paths without any real SITL.
+canned, strict-physics, REST, radio field, idle camera, strict-abort, and bad-args paths without any
+real SITL.
 
-Usage: app_smoke.py <path-to-skysim>   (instances 91..95, 97 / ports 189xx: far from live use)
+Usage: app_smoke.py <path-to-skysim>   (instances 91..95, 97, 98 / ports 189xx: far from live use)
 """
 from __future__ import annotations
 
@@ -214,6 +215,68 @@ def case_radio(tmp: str) -> None:
         check(rc.returncode == 2 and "--radio-spec" in rc.stderr, f"bad radio spec rejected: {path}")
 
 
+def process_cpu_s(pid: int) -> float:
+    """CPU seconds (user + system, all threads) a process has used, from /proc."""
+    with open(f"/proc/{pid}/stat") as f:
+        fields = f.read().rsplit(")", 1)[1].split()
+    return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+
+
+def case_camera_idle(tmp: str) -> None:
+    """The dev deployment's camera (640x360 at 15 fps, interactive, 400 Hz) with one vehicle slot
+    nobody watches must sit near idle: it used to draw that slot regardless, ~1.2 cores here and
+    95% of a 2-vCPU task. Then a viewer must still get frames, and /metrics must say how fast."""
+    port = 18653
+    out_path = os.path.join(tmp, "camera_idle.log")
+    with open(out_path, "w") as out:
+        proc = subprocess.Popen([SIM, "--vehicles", "1", "--base-instance", "98", "--time-mode", "interactive",
+                                 "--dt", "0.0025", "--api-port", str(port), "--camera-fps", "15",
+                                 "--camera-size", "640x360"], stdout=out, stderr=subprocess.STDOUT)
+    try:
+        deadline = time.time() + 10
+        metrics = None
+        while metrics is None and time.time() < deadline:
+            try:
+                metrics = api(port, "GET", "/metrics")
+            except (urllib.error.URLError, ConnectionError):
+                time.sleep(0.1)
+        check(metrics is not None, "camera server up")
+        vehicle = listed(port, 1)[0]
+        time.sleep(1.0)
+        cpu0, wall0 = process_cpu_s(proc.pid), time.monotonic()
+        time.sleep(3.0)
+        idle_pct = 100.0 * (process_cpu_s(proc.pid) - cpu0) / (time.monotonic() - wall0)
+        print(f"app_smoke: idle camera server with one unwatched vehicle: {idle_pct:.1f}% of a core")
+        check(idle_pct < 25.0, f"idle camera server near idle ({idle_pct:.1f}% of a core)")
+        camera = api(port, "GET", "/metrics")["camera"]
+        check(camera["frames_drawn"] == 0 and camera["watched"] == 0, "nothing drawn while nobody watches")
+        check(1 <= camera["threads"] <= len(os.sched_getaffinity(0)), "render threads within the CPUs")
+        check(camera["target_fps"] == 15.0, "camera target fps reported")
+
+        # A single request is a viewer: it gets a frame, drawn for it, without polling.
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/vehicles/{vehicle['id']}/camera.jpg",
+                                    timeout=15) as resp:
+            body = resp.read()
+            check(resp.status == 200 and body[:2] == b"\xff\xd8", "camera.jpg serves a drawn frame")
+        # A stream gets frame after frame.
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/instances/{vehicle['instance']}/camera.mjpg",
+                                    timeout=15) as resp:
+            got = b""
+            stream_deadline = time.time() + 10
+            while got.count(b"--skysimframe") < 3 and time.time() < stream_deadline:
+                got += resp.read1(65536)
+            check(got.count(b"--skysimframe") >= 3, "camera.mjpg streams frames")
+            time.sleep(2.5)  # a full stats window with the stream open
+            camera = api(port, "GET", "/metrics")["camera"]
+        check(camera["watched"] == 1 and camera["fps"] > 1.0, f"metrics report the achieved fps ({camera})")
+        check(camera["frames_drawn"] >= 1 and camera["render_ms"] > 0.0, "metrics report render ms per frame")
+    finally:
+        check(stop(proc) == 0, "camera clean shutdown")
+    with open(out_path) as f:
+        log = f.read()
+    check("drawn only while somebody is watching" in log, "camera startup line says it draws on demand")
+
+
 def case_strict_abort() -> None:
     proc = subprocess.Popen([SIM, "--vehicles", "2", "--base-instance", "94",
                              "--strict-timeout", "1"],
@@ -240,7 +303,7 @@ def case_bad_args() -> None:
     for args in (["--wind", "garbage"], ["--gust", "x"], ["--time-mode", "warp"],
                  ["--vehicles", "-1"], ["--unknown-flag"], ["--dt"],
                  ["--still-concurrency", "17"], ["--still-threads", "0"], ["--texture-seed", "-1"],
-                 ["--texture-seed", "2x"]):
+                 ["--texture-seed", "2x"], ["--camera-threads", "-1"], ["--camera-threads", "2x"]):
         rc = subprocess.run([SIM, *args], capture_output=True, timeout=30)
         check(rc.returncode == 2, f"bad args rejected: {args}")
     rc = subprocess.run([SIM, "--tiles", "/nonexistent"], capture_output=True, timeout=60)
@@ -251,6 +314,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="skysim_smoke_") as tmp:
         case_replay(tmp)
         case_radio(tmp)
+        case_camera_idle(tmp)
     case_canned()
     case_physics_udp()
     case_rest()

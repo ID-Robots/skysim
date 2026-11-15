@@ -266,12 +266,12 @@ int main() {
         // whether those bytes decode is test_render's business.
         const std::vector<uint8_t> kCanned{0xFF, 0xD8, 'p', 'i', 'x', 0xFF, 0xD9};
         ControlServer::Snapshots with_camera = snaps;
-        with_camera.camera_frame = [kCanned](uint32_t id) {
-            // sim_time_s advances per call so the MJPEG routes see each poll as a new frame;
-            // they now send a frame once and skip repeats.
-            static double t = 0.0;
-            t += 0.1;
-            return id == 1 ? skysim::render::FrameStore::Frame{kCanned, t}
+        with_camera.camera_frame = [kCanned](uint32_t id, uint64_t /*after_seq*/, std::chrono::milliseconds) {
+            // The sequence number advances per call so the MJPEG routes see each one as a new
+            // frame; they send a frame once and skip repeats.
+            static std::atomic<uint64_t> seq{0};
+            const uint64_t n = ++seq;
+            return id == 1 ? skysim::render::FrameStore::Frame{kCanned, 0.1 * static_cast<double>(n), n}
                            : skysim::render::FrameStore::Frame{};
         };
 
