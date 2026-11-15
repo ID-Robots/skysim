@@ -92,6 +92,19 @@ void RenderService::publish_poses(std::vector<Pose> poses) {
 
 FrameStore::Frame RenderService::frame(uint32_t vehicle_id, uint64_t after_seq, std::chrono::milliseconds wait) {
     const auto now = Clock::now();
+    bool in_fleet = false;
+    {
+        std::lock_guard<std::mutex> lock(poses_mutex_);
+        in_fleet = std::any_of(poses_.begin(), poses_.end(),
+                               [vehicle_id](const Pose &p) { return p.vehicle_id == vehicle_id; });
+    }
+    // Only a vehicle in the fleet goes on the draw list. Anything else would never be drawn,
+    // and recording it would let requests for made-up ids grow the list and wake the render
+    // thread at whatever rate they arrive. A stream opened before its vehicle spawns keeps
+    // asking, so it is on the list within one wait of the spawn.
+    if (!in_fleet) {
+        return frames_.get(vehicle_id);
+    }
     bool fresh_demand = false;
     {
         std::lock_guard<std::mutex> lock(demand_mutex_);
@@ -108,15 +121,6 @@ FrameStore::Frame RenderService::frame(uint32_t vehicle_id, uint64_t after_seq, 
     if (wait.count() <= 0) {
         return frames_.get(vehicle_id);
     }
-    bool in_fleet = false;
-    {
-        std::lock_guard<std::mutex> lock(poses_mutex_);
-        in_fleet = std::any_of(poses_.begin(), poses_.end(),
-                               [vehicle_id](const Pose &p) { return p.vehicle_id == vehicle_id; });
-    }
-    if (!in_fleet) {
-        return frames_.get(vehicle_id);
-    }
     return frames_.wait_newer(vehicle_id, after_seq, now + wait);
 }
 
@@ -125,30 +129,42 @@ RenderService::Stats RenderService::stats() const {
     return stats_;
 }
 
+double RenderService::Window::fps() const {
+    return active_s > 0.0 ? static_cast<double>(intervals) / active_s : 0.0;
+}
+
 void RenderService::record_pass(const Window &pass, Clock::time_point now) {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     stats_.frames_drawn += pass.drawn;
     stats_.frames_reused += pass.reused;
     stats_.watched = pass.watched;
+    // The rate is passes per second of drawing: the time from one pass's start to the next,
+    // within a run of passes. Idle gaps between runs are not part of it, so a viewer that comes
+    // and goes is reported at the rate it saw, not diluted by the time nobody was looking.
+    const double step_s = in_burst_ ? std::chrono::duration<double>(pass.started - burst_prev_).count() : 0.0;
     for (Window *w : {&stats_window_, &log_window_}) {
         if (w->passes == 0) {
             w->started = pass.started;
         }
         w->passes += pass.passes;
+        if (in_burst_) {
+            ++w->intervals;
+            w->active_s += step_s;
+        }
         w->drawn += pass.drawn;
         w->reused += pass.reused;
         w->render_ms_sum += pass.render_ms_sum;
         w->render_ms_max = std::max(w->render_ms_max, pass.render_ms_max);
         w->encode_ms_sum += pass.encode_ms_sum;
-        w->watched = pass.watched;
-        w->last_started = pass.started;
+        w->watched = std::max(w->watched, pass.watched);
     }
+    in_burst_ = true;
+    burst_prev_ = pass.started;
+    idle_line_pending_ = false;
     if (now - stats_window_.started >= kStatsWindow) {
         const Window &w = stats_window_;
-        // Passes per second between the first pass's start and the last one's: every watched
-        // vehicle gets one frame a pass, so this is the rate each stream sees.
-        const double span_s = std::chrono::duration<double>(w.last_started - w.started).count();
-        stats_.fps = w.passes > 1 && span_s > 0.0 ? static_cast<double>(w.passes - 1) / span_s : 0.0;
+        // Every watched vehicle gets one frame a pass, so this is the rate each stream sees.
+        stats_.fps = w.fps();
         if (w.drawn > 0) {
             stats_.render_ms = w.render_ms_sum / static_cast<double>(w.drawn);
             stats_.render_ms_max = w.render_ms_max;
@@ -156,44 +172,74 @@ void RenderService::record_pass(const Window &pass, Clock::time_point now) {
         }
         stats_window_ = Window{};
     }
-    if (cfg_.log_every_s > 0.0 &&
-        now - log_window_.started >= std::chrono::duration<double>(cfg_.log_every_s)) {
+    if (cfg_.log_every_s > 0.0 && now - log_window_.started >= log_period() &&
+        now - last_log_ >= log_period()) {
         log_window(log_window_);
         last_log_ = now;
         log_window_ = Window{};
     }
 }
 
-void RenderService::go_idle(Clock::time_point now) {
+RenderService::Clock::duration RenderService::log_period() const {
+    return std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(cfg_.log_every_s));
+}
+
+void RenderService::go_idle() {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     // Nothing is being drawn now. The cost of the last frames stays readable, the rate does not.
     stats_.fps = 0.0;
     stats_.watched = 0;
     stats_window_ = Window{};
-    // At most one camera line per log period: a viewer polling camera.jpg every few seconds
-    // takes the camera in and out of idle each time, and must not fill the log doing it.
-    if (cfg_.log_every_s > 0.0 && now - last_log_ >= std::chrono::duration<double>(cfg_.log_every_s)) {
-        last_log_ = now;
-        if (log_window_.passes > 0) {
-            log_window(log_window_);
-        }
-        std::printf("skysim: camera: idle, nobody watching (%llu frame(s) drawn, %llu re-sent so far)\n",
-                    static_cast<unsigned long long>(stats_.frames_drawn),
-                    static_cast<unsigned long long>(stats_.frames_reused));
-        std::fflush(stdout);
+    in_burst_ = false;
+    // The frames drawn since the last log line, and the fact that drawing stopped, are logged
+    // by flush_idle_log once a log period has passed since that line — at most one camera line
+    // per period, however often a viewer polling camera.jpg takes the camera in and out of idle.
+    idle_line_pending_ = cfg_.log_every_s > 0.0;
+}
+
+RenderService::Clock::time_point RenderService::idle_log_due() const {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    return idle_line_pending_ ? last_log_ + log_period() : Clock::time_point::max();
+}
+
+void RenderService::flush_idle_log(Clock::time_point now) {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    if (!idle_line_pending_) {
+        return;
+    }
+    idle_line_pending_ = false;
+    last_log_ = now;
+    if (log_window_.passes > 0) {
+        log_window(log_window_);
     }
     log_window_ = Window{};
+    char line[160];
+    std::snprintf(line, sizeof(line),
+                  "skysim: camera: idle, nobody watching (%llu frame(s) drawn, %llu re-sent so far)",
+                  static_cast<unsigned long long>(stats_.frames_drawn),
+                  static_cast<unsigned long long>(stats_.frames_reused));
+    emit(line);
+}
+
+void RenderService::emit(const char *line) const {
+    if (cfg_.log_sink) {
+        cfg_.log_sink(line);
+        return;
+    }
+    std::printf("%s\n", line);
+    std::fflush(stdout);
 }
 
 void RenderService::log_window(const Window &w) const {
-    const double span_s = std::chrono::duration<double>(w.last_started - w.started).count();
-    const double fps = w.passes > 1 && span_s > 0.0 ? static_cast<double>(w.passes - 1) / span_s : 0.0;
     const double drawn = static_cast<double>(std::max<uint64_t>(w.drawn, 1));
-    std::printf("skysim: camera: %zu vehicle(s) watched, %.1f fps each (target %.1f), render %.1f ms/frame "
-                "(max %.1f), encode %.1f ms, %llu drawn + %llu re-sent, %d thread(s)\n",
-                w.watched, fps, cfg_.fps, w.render_ms_sum / drawn, w.render_ms_max, w.encode_ms_sum / drawn,
-                static_cast<unsigned long long>(w.drawn), static_cast<unsigned long long>(w.reused), threads_);
-    std::fflush(stdout);
+    char line[256];
+    std::snprintf(line, sizeof(line),
+                  "skysim: camera: %zu vehicle(s) watched, %.1f fps each (target %.1f), render %.1f ms/frame "
+                  "(max %.1f), encode %.1f ms, %llu drawn + %llu re-sent, %d thread(s)",
+                  w.watched, w.fps(), cfg_.fps, w.render_ms_sum / drawn, w.render_ms_max,
+                  w.encode_ms_sum / drawn, static_cast<unsigned long long>(w.drawn),
+                  static_cast<unsigned long long>(w.reused), threads_);
+    emit(line);
 }
 
 void RenderService::run() {
@@ -267,18 +313,26 @@ void RenderService::run() {
         if (wanted.empty()) {
             if (drawing) {
                 drawing = false;
-                go_idle(started);
+                go_idle();
+            }
+            const auto log_due = idle_log_due();
+            if (log_due <= started) {
+                flush_idle_log(started);
             }
             // Nothing to draw: sleep until somebody asks. With nobody asking at all that is an
-            // untimed wait — the whole idle cost of the camera. A request for a vehicle that is
-            // not in the fleet (yet: a stream opened before its spawn) looks again at the camera
-            // rate until it lapses.
+            // untimed wait — the whole idle cost of the camera — or one that ends when the idle
+            // log line is due. A vehicle asked for that has since left the fleet is looked at
+            // again at the camera rate until its demand lapses.
             std::unique_lock<std::mutex> lock(demand_mutex_);
             const auto woken = [&] { return stop_.load(std::memory_order_relaxed) || demand_epoch_ != seen_epoch; };
-            if (demand_.empty()) {
+            auto deadline = log_due > started ? log_due : Clock::time_point::max();
+            if (!demand_.empty()) {
+                deadline = std::min(deadline, started + period);
+            }
+            if (deadline == Clock::time_point::max()) {
                 wake_.wait(lock, woken);
             } else {
-                wake_.wait_for(lock, period, woken);
+                wake_.wait_until(lock, deadline, woken);
             }
             continue;
         }

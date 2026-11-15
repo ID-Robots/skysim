@@ -5,14 +5,17 @@
 // Asserting on pixels rather than on "it produced bytes" is the point: a renderer
 // that silently draws a blank frame, or draws the world upside down, still
 // produces a valid JPEG.
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "core/world.h"
 #include "render/frame_store.h"
@@ -64,6 +67,13 @@ struct Px {
 Px pixel(const skysim::render::Image &img, int x, int y) {
     const size_t i = (static_cast<size_t>(y) * img.width + x) * 3;
     return {img.rgb[i], img.rgb[i + 1], img.rgb[i + 2]};
+}
+
+// CPU time the calling thread has used, in seconds.
+double thread_cpu_s() {
+    timespec ts{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) * 1e-9;
 }
 
 // CPU time this process has used, all threads, in seconds.
@@ -369,19 +379,114 @@ int main() {
         CHECK(service.frame(99, 0, 2000ms).jpeg.empty());
         CHECK(Clock::now() - asked < 500ms);
 
+        // A stream watching for a couple of seconds sees the camera rate, and /metrics says so.
+        const auto watch_until = Clock::now() + 2300ms;
+        while (Clock::now() < watch_until) {
+            seq = service.frame(7, seq, 2000ms).seq;
+        }
+        const auto watched = service.stats();
+        std::printf("test_render: watched at %.1f fps (target 50), render %.2f ms, encode %.2f ms\n",
+                    watched.fps, watched.render_ms, watched.encode_ms);
+        CHECK(watched.watched == 1);
+        CHECK(watched.fps > 10.0 && watched.fps < 60.0);
+        CHECK(watched.render_ms > 0.0 && watched.render_ms_max >= watched.render_ms);
+
         // Stop asking: within the demand window the service stops drawing, reports idle,
         // drops the frame (it is no longer the camera's view) and goes back to costing nothing.
         std::this_thread::sleep_for(800ms);
         const auto lapsed = service.stats();
         CHECK(lapsed.watched == 0 && lapsed.fps == 0.0);
+        // Requests for vehicles that are not in the fleet go nowhere: not on the draw list, not
+        // waking the render thread. 20000 made-up ids used to be 20000 wake-ups, each scanning
+        // a draw list as long as the ids so far.
         cpu0 = process_cpu_s();
+        const double caller0 = thread_cpu_s();
+        for (uint32_t id = 1000; id < 21000; ++id) {
+            (void)service.frame(id);
+        }
         std::this_thread::sleep_for(400ms);
-        const double after_cpu = process_cpu_s() - cpu0;
+        const double after_cpu = (process_cpu_s() - cpu0) - (thread_cpu_s() - caller0);
         const auto still_lapsed = service.stats();
         CHECK(still_lapsed.frames_drawn == lapsed.frames_drawn);
         CHECK(still_lapsed.frames_reused == lapsed.frames_reused);
         CHECK(after_cpu < 0.05);
         CHECK(service.frame(7).jpeg.empty()); // asking again restarts it, but there is no stale frame
+    }
+
+    // The "camera:" log: a line a period while drawing, none while idle, and a viewer that
+    // comes and goes neither floods it nor loses what it watched.
+    {
+        using namespace std::chrono_literals;
+        using Clock = std::chrono::steady_clock;
+        std::mutex lines_mutex;
+        std::vector<std::pair<Clock::time_point, std::string>> lines;
+        skysim::render::RenderService::Config lcfg;
+        lcfg.camera = cam;
+        lcfg.scene = skysim::render::load_scene("", 1);
+        lcfg.fps = 50.0;
+        lcfg.threads = 1;
+        lcfg.demand_window_s = 0.2;
+        lcfg.log_every_s = 0.8;
+        lcfg.log_sink = [&](const char *line) {
+            std::lock_guard<std::mutex> lock(lines_mutex);
+            lines.emplace_back(Clock::now(), line);
+        };
+        skysim::render::RenderService service(lcfg);
+        skysim::render::RenderService::Pose pose;
+        pose.vehicle_id = 4;
+        pose.position_ned = pos;
+        service.publish_poses({pose});
+        std::this_thread::sleep_for(300ms);
+        {
+            std::lock_guard<std::mutex> lock(lines_mutex);
+            CHECK(lines.empty()); // nothing drawn, nothing to say
+        }
+
+        // Four short looks, each well under the log period, then nobody for two periods.
+        for (int look = 0; look < 4; ++look) {
+            uint64_t seq = 0;
+            const auto until = Clock::now() + 150ms;
+            while (Clock::now() < until) {
+                seq = service.frame(4, seq, 1000ms).seq;
+            }
+            std::this_thread::sleep_for(350ms); // past the demand window: idle again
+        }
+        std::this_thread::sleep_for(1700ms);
+        const auto totals = service.stats();
+
+        std::lock_guard<std::mutex> lock(lines_mutex);
+        std::printf("test_render: camera log lines:\n");
+        for (const auto &[at, line] : lines) {
+            std::printf("  %s\n", line.c_str());
+        }
+        // Never more than one log event a period: a summary and the idle line right behind it
+        // are one event; anything else is a period apart (less a little scheduling slack).
+        size_t events = 0;
+        unsigned long long summarised = 0;
+        for (size_t i = 0; i < lines.size(); ++i) {
+            const bool idle = lines[i].second.find("idle, nobody watching") != std::string::npos;
+            const bool paired = idle && i > 0 && lines[i].first - lines[i - 1].first < 20ms &&
+                                lines[i - 1].second.find("fps each") != std::string::npos;
+            if (!paired) {
+                if (events > 0) {
+                    CHECK(lines[i].first - lines[i - 1].first > 700ms);
+                }
+                ++events;
+            }
+            unsigned long long drawn = 0, resent = 0;
+            const size_t at = lines[i].second.find(" drawn + ");
+            if (at != std::string::npos) {
+                const size_t num = lines[i].second.rfind(", ", at);
+                std::sscanf(lines[i].second.c_str() + num + 2, "%llu drawn + %llu re-sent", &drawn, &resent);
+                summarised += drawn + resent;
+            }
+        }
+        // Nothing the viewer watched went unreported: the summaries add up to every frame, and
+        // the last thing said is that the camera went idle.
+        CHECK(summarised == totals.frames_drawn + totals.frames_reused);
+        CHECK(totals.frames_drawn + totals.frames_reused > 4);
+        CHECK(events >= 2 && events <= 4);
+        CHECK(!lines.empty() && lines.back().second.find("idle, nobody watching") != std::string::npos);
     }
 
     // One render thread is the service's own: no pool at all.

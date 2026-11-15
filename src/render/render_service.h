@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -65,9 +66,13 @@ class RenderService {
         // Run the render thread and its workers at nice +10, as the still camera's are: on a
         // box short of cores the physics tick then wins every contest for a CPU.
         bool background_priority{true};
-        // Seconds between "camera:" log lines while frames are being drawn (and one line when
-        // drawing stops); 0 = never.
+        // Seconds between "camera:" log lines while frames are being drawn. When drawing stops,
+        // the frames since the last line and an "idle" line follow once that long has passed
+        // since it (so never more than one line a period); 0 = never.
         double log_every_s{0.0};
+        // Where those lines go, one call per line without the newline; stdout when unset.
+        // Called on the render thread.
+        std::function<void(const char *line)> log_sink;
     };
 
     // One vehicle's pose, as the tick thread last published it.
@@ -122,21 +127,31 @@ class RenderService {
 
     // Running totals for one pass, or for one stats or log window of passes.
     struct Window {
-        Clock::time_point started{};      // the first pass's start
-        Clock::time_point last_started{}; // the latest pass's start
+        Clock::time_point started{}; // the first pass's start
         uint64_t passes{0};
+        // Pass-to-pass steps within runs of drawing, and the seconds they took: the rate is
+        // intervals / active_s, so idle gaps between viewers do not dilute it.
+        uint64_t intervals{0};
+        double active_s{0.0};
         uint64_t drawn{0};
         uint64_t reused{0};
         double render_ms_sum{0.0};
         double render_ms_max{0.0};
         double encode_ms_sum{0.0};
-        size_t watched{0};
+        size_t watched{0}; // the most watched at once
+        double fps() const;
     };
 
     void run();
     void record_pass(const Window &pass, Clock::time_point now);
-    void go_idle(Clock::time_point now);
+    void go_idle();
+    Clock::duration log_period() const;
+    // When the deferred "camera: idle" line (with the frames since the last line) is due;
+    // time_point::max() when there is none.
+    Clock::time_point idle_log_due() const;
+    void flush_idle_log(Clock::time_point now);
     void log_window(const Window &w) const;
+    void emit(const char *line) const;
 
     Config cfg_;
     int threads_{1};
@@ -162,6 +177,9 @@ class RenderService {
     Window stats_window_;
     Window log_window_;
     Clock::time_point last_log_{}; // the last "camera:" line, to keep them a log period apart
+    Clock::time_point burst_prev_{}; // the latest pass's start, while drawing continues
+    bool in_burst_{false};
+    bool idle_line_pending_{false};
 
     std::thread thread_;
 };
