@@ -1,6 +1,7 @@
 #include "core/cpus.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -88,7 +89,88 @@ double cgroup_v1_quota_cpus(long long quota_us, long long period_us) {
     return static_cast<double>(quota_us) / static_cast<double>(period_us);
 }
 
-double cgroup_quota_cpus(const std::string &cgroup_root, const std::string &proc_cgroup) {
+std::vector<CgroupMount> cgroup_mounts(const std::string &mountinfo) {
+    // mountinfo escapes space, tab, newline and backslash in paths as \ooo.
+    const auto unescape = [](const std::string &in) {
+        std::string out;
+        for (size_t i = 0; i < in.size(); ++i) {
+            const auto digit = [&in](size_t k) {
+                return std::isdigit(static_cast<unsigned char>(in[k])) != 0;
+            };
+            if (in[i] == '\\' && i + 3 < in.size() && digit(i + 1) && digit(i + 2) && digit(i + 3)) {
+                out.push_back(static_cast<char>(std::strtol(in.substr(i + 1, 3).c_str(), nullptr, 8)));
+                i += 3;
+            } else {
+                out.push_back(in[i]);
+            }
+        }
+        return out;
+    };
+    std::vector<CgroupMount> mounts;
+    std::istringstream lines(mountinfo);
+    std::string line;
+    while (std::getline(lines, line)) {
+        // id parent major:minor root mount-point options [optional...] - fstype source super-options
+        std::istringstream in(line);
+        std::vector<std::string> fields;
+        for (std::string f; in >> f;) {
+            fields.push_back(f);
+        }
+        size_t sep = 6;
+        while (sep < fields.size() && fields[sep] != "-") {
+            ++sep;
+        }
+        if (sep + 1 >= fields.size()) {
+            continue; // no "- fstype ..." part: not a line this can read
+        }
+        const std::string &fstype = fields[sep + 1];
+        if (fstype != "cgroup2" && fstype != "cgroup") {
+            continue;
+        }
+        CgroupMount m;
+        m.root = unescape(fields[3]);
+        m.mount_point = unescape(fields[4]);
+        m.v2 = fstype == "cgroup2";
+        if (!m.v2 && sep + 3 < fields.size()) {
+            std::istringstream opts(fields[sep + 3]);
+            for (std::string o; std::getline(opts, o, ',');) {
+                m.has_cpu = m.has_cpu || o == "cpu";
+            }
+        }
+        mounts.push_back(std::move(m));
+    }
+    return mounts;
+}
+
+namespace {
+
+// The directories under a mount that hold cgroup `path` and each of its ancestors, the
+// process's own cgroup first and the mount point last. `path` names the cgroup from the
+// hierarchy's root, but a mount can show only a subtree (its mountinfo root): the cgroup
+// /tenant/app under a mount of /tenant is <mount>/app, not <mount>/tenant/app. A cgroup outside
+// the subtree a mount shows (a container's view of a host path, a cgroup namespace's "/..")
+// has only the mount's own root visible, which is then the tightest limit there is to read.
+std::vector<std::string> visible_dirs(const CgroupMount &m, const std::string &path) {
+    std::string root = m.root;
+    while (!root.empty() && root.back() == '/') {
+        root.pop_back();
+    }
+    std::string rel;
+    if (root.empty()) {
+        rel = path;
+    } else if (path == root || path.rfind(root + "/", 0) == 0) {
+        rel = path.substr(root.size());
+    }
+    std::vector<std::string> dirs;
+    for (const std::string &dir : self_and_ancestors(rel)) {
+        dirs.push_back(m.mount_point + dir);
+    }
+    return dirs;
+}
+
+} // namespace
+
+double cgroup_quota_cpus(const std::vector<CgroupMount> &mounts, const std::string &proc_cgroup) {
     double best = 0.0;
     std::istringstream lines(proc_cgroup);
     std::string line;
@@ -103,30 +185,33 @@ double cgroup_quota_cpus(const std::string &cgroup_root, const std::string &proc
         const std::string path = line.substr(b + 1);
         if (controllers.empty()) {
             // cgroup v2: one unified tree, cpu.max at every level that sets one.
-            for (const std::string &dir : self_and_ancestors(path)) {
-                best = tighter(best, cgroup_v2_quota_cpus(read_file(cgroup_root + dir + "/cpu.max")));
+            for (const CgroupMount &m : mounts) {
+                if (m.v2) {
+                    for (const std::string &dir : visible_dirs(m, path)) {
+                        best = tighter(best, cgroup_v2_quota_cpus(read_file(dir + "/cpu.max")));
+                    }
+                }
             }
             continue;
         }
-        // cgroup v1: only the hierarchy carrying the cpu controller. It is mounted under its
-        // controller list ("cpu,cpuacct") and usually also linked as "cpu". Inside a container
-        // the mount's root is the container's own cgroup, so the host path in /proc/self/cgroup
-        // does not exist under it — walking up to the mount root still finds the quota.
+        // cgroup v1: only the hierarchy carrying the cpu controller.
         std::istringstream names(controllers);
-        std::string name;
         bool has_cpu = false;
-        while (std::getline(names, name, ',')) {
+        for (std::string name; std::getline(names, name, ',');) {
             has_cpu = has_cpu || name == "cpu";
         }
         if (!has_cpu) {
             continue;
         }
-        for (const std::string &mount : {cgroup_root + "/" + controllers, cgroup_root + "/cpu"}) {
-            for (const std::string &dir : self_and_ancestors(path)) {
+        for (const CgroupMount &m : mounts) {
+            if (m.v2 || !m.has_cpu) {
+                continue;
+            }
+            for (const std::string &dir : visible_dirs(m, path)) {
                 long long quota = 0;
                 long long period = 0;
-                if (read_number(mount + dir + "/cpu.cfs_quota_us", quota) &&
-                    read_number(mount + dir + "/cpu.cfs_period_us", period)) {
+                if (read_number(dir + "/cpu.cfs_quota_us", quota) &&
+                    read_number(dir + "/cpu.cfs_period_us", period)) {
                     best = tighter(best, cgroup_v1_quota_cpus(quota, period));
                 }
             }
@@ -149,7 +234,14 @@ int available_cpus() {
             cpus = std::min(cpus, allowed);
         }
     }
-    const double quota = cgroup_quota_cpus("/sys/fs/cgroup", read_file("/proc/self/cgroup"));
+    std::vector<CgroupMount> mounts = cgroup_mounts(read_file("/proc/self/mountinfo"));
+    if (mounts.empty()) {
+        // No mountinfo to go by: the usual places, each showing its whole hierarchy.
+        mounts = {{"/sys/fs/cgroup", "/", true, true},
+                  {"/sys/fs/cgroup/cpu", "/", false, true},
+                  {"/sys/fs/cgroup/cpu,cpuacct", "/", false, true}};
+    }
+    const double quota = cgroup_quota_cpus(mounts, read_file("/proc/self/cgroup"));
     if (quota > 0.0) {
         // Rounded down, with a little slack so a quota of exactly 2.0 read as 1.9999999 is 2.
         cpus = std::min(cpus, std::max(1, static_cast<int>(std::floor(quota + 1e-6))));

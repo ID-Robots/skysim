@@ -410,7 +410,12 @@ int main() {
         CHECK(still_lapsed.frames_drawn == lapsed.frames_drawn);
         CHECK(still_lapsed.frames_reused == lapsed.frames_reused);
         CHECK(after_cpu < 0.05);
-        CHECK(service.frame(7).jpeg.empty()); // asking again restarts it, but there is no stale frame
+        // Asking again restarts the drawing, but never serves the stale frame: what comes back is
+        // nothing yet, or (if the renderer was quick) a frame of the pose published now.
+        pose.sim_time_s = 9.0;
+        service.publish_poses({pose});
+        const auto again = service.frame(7);
+        CHECK(again.jpeg.empty() || again.sim_time_s == 9.0);
     }
 
     // The "camera:" log: a line a period while drawing, none while idle, and a viewer that
