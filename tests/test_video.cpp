@@ -12,6 +12,7 @@
 #include "rtsp_test_client.h"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -259,6 +260,23 @@ void test_rtp() {
     CHECK(depack.frames.size() == 1 && depack.frames[0].nals[0] == au.nals[0] &&
           depack.frames[0].nals[1] == au.nals[2]);
     CHECK(rtp.octets() == 100 + 4999 + 4 * 2);
+
+    // Trailing empty entries do not take the marker with them, single NAL or FU-A.
+    for (const size_t size : {50, 3000}) {
+        AccessUnit trailing;
+        trailing.nals.push_back(std::vector<uint8_t>(size, 0x41));
+        trailing.nals.push_back({});
+        trailing.nals.push_back({});
+        RtpPacketizer one(7, 0);
+        std::vector<std::vector<uint8_t>> out;
+        one.packetize(trailing, 0, [&](const uint8_t *p, size_t n) { out.emplace_back(p, p + n); });
+        CHECK(!out.empty() && (out.back()[1] & 0x80) != 0);
+        size_t marked = 0;
+        for (const auto &p : out) {
+            marked += (p[1] & 0x80) != 0 ? 1 : 0;
+        }
+        CHECK(marked == 1);
+    }
 
     // A tiny MTU still fragments correctly (floored at 16 bytes of payload).
     RtpPacketizer tiny(1, 0, 4);
@@ -660,6 +678,26 @@ void test_rtsp_server() {
         // Silence on a connection with no session closes it after 1.5 timeouts.
         rtsp_test::Client c(port);
         CHECK(c.closed_by_peer(3000));
+    }
+
+    // A peer that pipelines requests and never reads the answers is dropped once its unread
+    // responses pass the bound, instead of growing them without limit.
+    {
+        RtspServer::Config tight = cfg;
+        tight.max_backlog_bytes = 1000; // response bound: 2 * 1000 + 64 KiB
+        RtspServer bounded(tight, hooks);
+        rtsp_test::Client c(bounded.port(), "127.0.0.1", AF_INET, 4096);
+        std::string burst;
+        for (int i = 0; i < 600; ++i) {
+            burst += "OPTIONS * RTSP/1.0\r\n\r\n";
+        }
+        bool closed = false;
+        for (int round = 0; round < 400 && !closed; ++round) {
+            closed = ::send(c.fd(), burst.data(), burst.size(), MSG_NOSIGNAL | MSG_DONTWAIT) < 0 &&
+                     errno != EAGAIN && errno != EWOULDBLOCK;
+            std::this_thread::sleep_for(3ms);
+        }
+        CHECK(closed || c.closed_by_peer(3000));
     }
 
     // At most max_connections at once: the one past it is closed straight away.

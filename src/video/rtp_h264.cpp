@@ -42,12 +42,18 @@ void RtpPacketizer::send(const uint8_t *head, size_t head_size, const uint8_t *b
 }
 
 void RtpPacketizer::packetize(const AccessUnit &au, uint32_t timestamp, const Emit &emit) {
+    // The marker goes on the last packet of the last NAL that is sent, so a trailing empty
+    // entry cannot leave the access unit unterminated.
+    size_t last = au.nals.size();
+    while (last > 0 && au.nals[last - 1].empty()) {
+        --last;
+    }
     for (size_t n = 0; n < au.nals.size(); ++n) {
         const std::vector<uint8_t> &nal = au.nals[n];
         if (nal.empty()) {
             continue;
         }
-        const bool last_nal = n + 1 == au.nals.size();
+        const bool last_nal = n + 1 == last;
         if (nal.size() <= max_payload_) {
             send(nal.data(), 0, nal.data(), nal.size(), last_nal, timestamp, emit);
             continue;

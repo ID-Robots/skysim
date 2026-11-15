@@ -653,7 +653,18 @@ bool RtspServer::Impl::flush(Connection &c, Clock::time_point now) {
 }
 
 void RtspServer::Impl::handle_requests(Connection &c) {
+    // Responses are bounded too, not only media: a peer that pipelines requests and does not
+    // read the answers is dropped once its backlog passes what a playing TCP receiver can have
+    // (max_backlog_bytes plus a frame, well under twice that).
+    const size_t max_pending = 2 * cfg.max_backlog_bytes + 64 * 1024;
     while (!c.in.empty() && !c.closing) {
+        if (c.pending() > max_pending) {
+            c.out.clear();
+            c.out_off = 0;
+            c.in.clear();
+            c.closing = true; // nothing pending: closed by the poll loop straight away
+            return;
+        }
         if (c.in[0] == '$') {
             // Interleaved binary data from the receiver (its RTCP over TCP): skipped whole.
             if (c.in.size() < 4) {

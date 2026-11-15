@@ -49,7 +49,7 @@ target_include_directories(stb_image_write SYSTEM INTERFACE ${stb_SOURCE_DIR})
 # Built from a pinned upstream commit into a static library linked into skysim, so the runtime
 # image needs no codec package. Constrained Baseline at a pilot camera's sizes needs nothing
 # but libx264 itself: no ffmpeg, no GStreamer. GPL-2.0-or-later, compatible with skysim's GPL-3.0.
-# Its assembly (several times faster) needs nasm >= 2.13; without one it is built in plain C
+# Its x86 assembly (several times faster) needs nasm >= 2.13; without one it is built in plain C
 # with a warning — fine for tests, not for a deployment (the Dockerfile installs nasm).
 include(ExternalProject)
 include(ProcessorCount)
@@ -65,26 +65,32 @@ else()
     endif()
 endif()
 set(SKYSIM_X264_JOBS ${_x264_jobs_default} CACHE STRING "make -j for the x264 build")
-find_program(SKYSIM_NASM nasm)
-if(SKYSIM_NASM)
-    # x264's configure refuses anything older than 2.13 outright; treat that like no nasm.
-    execute_process(COMMAND ${SKYSIM_NASM} -v OUTPUT_VARIABLE _nasm_v ERROR_QUIET)
-    string(REGEX MATCH "version ([0-9]+\\.[0-9]+)" _nasm_match "${_nasm_v}")
-    if(NOT CMAKE_MATCH_1 OR CMAKE_MATCH_1 VERSION_LESS 2.13)
-        message(STATUS "skysim: ${SKYSIM_NASM} is not nasm >= 2.13 ('${_nasm_v}'), not using it for x264")
-        set(SKYSIM_NASM "")
-    endif()
-endif()
+# nasm is x264's assembler on x86 only. On ARM64 its assembly goes through the C compiler, and
+# handing it nasm as AS would make its configure fail, so there nothing is overridden.
+set(_x264_env CC=${CMAKE_C_COMPILER})
 set(_x264_asm_flags "")
 if(SKYSIM_X264_ASM STREQUAL "OFF")
     set(_x264_asm_flags --disable-asm)
-elseif(NOT SKYSIM_NASM)
-    if(SKYSIM_X264_ASM STREQUAL "ON")
-        message(FATAL_ERROR "SKYSIM_X264_ASM=ON but nasm >= 2.13 was not found")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|i[3-6]86|x86)$")
+    find_program(SKYSIM_NASM nasm)
+    if(SKYSIM_NASM)
+        # x264's configure refuses anything older than 2.13 outright; treat that like no nasm.
+        execute_process(COMMAND ${SKYSIM_NASM} -v OUTPUT_VARIABLE _nasm_v ERROR_QUIET)
+        string(REGEX MATCH "version ([0-9]+\\.[0-9]+)" _nasm_match "${_nasm_v}")
+        if(NOT CMAKE_MATCH_1 OR CMAKE_MATCH_1 VERSION_LESS 2.13)
+            message(STATUS "skysim: ${SKYSIM_NASM} is not nasm >= 2.13 ('${_nasm_v}'), not using it for x264")
+            set(SKYSIM_NASM "")
+        endif()
     endif()
-    message(WARNING "nasm not found: x264 is built without assembly, several times slower. Install nasm "
-                    "for a deployment build (or pass -DSKYSIM_X264_ASM=OFF to silence this).")
-    set(_x264_asm_flags --disable-asm)
+    if(SKYSIM_NASM)
+        list(APPEND _x264_env AS=${SKYSIM_NASM})
+    elseif(SKYSIM_X264_ASM STREQUAL "ON")
+        message(FATAL_ERROR "SKYSIM_X264_ASM=ON but nasm >= 2.13 was not found")
+    else()
+        message(WARNING "nasm not found: x264 is built without assembly, several times slower. Install "
+                        "nasm for a deployment build (or pass -DSKYSIM_X264_ASM=OFF to silence this).")
+        set(_x264_asm_flags --disable-asm)
+    endif()
 endif()
 set(SKYSIM_X264_PREFIX ${CMAKE_BINARY_DIR}/x264)
 file(MAKE_DIRECTORY ${SKYSIM_X264_PREFIX}/include)
@@ -94,7 +100,7 @@ ExternalProject_Add(x264_build
     GIT_SHALLOW       OFF
     UPDATE_DISCONNECTED ON
     PREFIX            ${CMAKE_BINARY_DIR}/x264-build
-    CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env CC=${CMAKE_C_COMPILER} AS=${SKYSIM_NASM}
+    CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ${_x264_env}
                       <SOURCE_DIR>/configure --prefix=${SKYSIM_X264_PREFIX} --enable-static --enable-pic
                       --disable-cli --disable-opencl --disable-avs --disable-swscale --disable-lavf
                       --disable-ffms --disable-gpac --disable-lsmash --bit-depth=8 --chroma-format=420
