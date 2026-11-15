@@ -184,6 +184,72 @@ Verified against the Copter-4.7.0 tag:
   stabilised gimbal they are heading + requested yaw, requested pitch, 0; at pitch ±90 roll is
   reported 0 and yaw is where the top of the image faces.
 
+## Pilot camera video (RTSP / RTP, not part of the wire protocol)
+
+`rtsp://<host>:8554/instances/<n>/main.264` (TASK-2561; docs/SKYHUB_INTEGRATION.md, [S6]) — the
+SIYI ZR30's own `rtsp://<cam>:8554/main.264`, prefixed by the instance. `src/video/`, written
+against RFC 2326 (RTSP 1.0), RFC 6184 (RTP payload for H.264) and RFC 3550 (RTP/RTCP); checked
+with ffprobe and a stdlib RTSP client in tests/rtsp_smoke.py, and by hand with GStreamer
+(`gst-discoverer-1.0`, `rtspsrc ! rtph264depay ! avdec_h264`).
+
+- **RTSP**: `OPTIONS`, `DESCRIBE`, `SETUP`, `PLAY`, `PAUSE`, `TEARDOWN`, and `GET_PARAMETER` /
+  `SET_PARAMETER` as keep-alives; no authentication. One session per connection, ended by
+  `TEARDOWN` or by closing the connection; `Session: <16 hex digits>;timeout=60`. A connection
+  that is not playing over TCP and sends nothing — no request, no RTCP to the server pair — for
+  90 s is closed, as is one whose receiver takes no data for 60 s. Errors: `404` unknown path or
+  instance, `454` wrong `Session`, `455` `PLAY` before `SETUP` or `SETUP` while playing, `461`
+  no transport this server offers, `400` a malformed request, `501` any other method.
+- **SDP** (`DESCRIBE`, `Content-Type: application/sdp`, `Content-Base: <url>/`):
+
+  ```
+  v=0
+  o=- <id> 1 IN IP4 <server address>
+  s=skysim instance <n> camera
+  c=IN IP4 0.0.0.0
+  t=0 0
+  a=tool:skysim
+  a=type:broadcast
+  a=control:*
+  a=range:npt=0-
+  m=video 0 RTP/AVP 96
+  b=AS:1200
+  a=rtpmap:96 H264/90000
+  a=fmtp:96 packetization-mode=1;profile-level-id=42e01f;sprop-parameter-sets=<SPS>,<PPS>
+  a=framerate:10
+  a=x-dimensions:256,144
+  a=control:trackID=0
+  ```
+- **Transports**: `RTP/AVP/TCP;unicast;interleaved=a-b` — RTP on channel a and RTCP on b,
+  `$`-framed on the RTSP connection — or `RTP/AVP[/UDP];unicast;client_port=a-b`: RTP to port a
+  and RTCP to b of the RTSP peer's own address (a `destination=` is ignored, so the server
+  cannot be pointed at a third party), sent from the `server_port=` pair, an even/odd ephemeral
+  pair chosen at startup. The first transport of a `SETUP`'s list this server offers wins;
+  multicast is never offered.
+- **RTP**: V=2, payload type 96, SSRC and first sequence number random per session. The
+  timestamp is the steady clock at the moment the picture was drawn, at 90 kHz (plus a random
+  offset per session), the same on every packet of a frame; the marker bit is set on a frame's
+  last packet. A NAL unit of up to 1400 bytes goes as a single NAL unit packet, a larger one as
+  FU-A fragments; STAP-A is not used. The `PLAY` reply's `RTP-Info` carries the next sequence
+  number and the RTP time of the reply.
+- **RTCP**: a sender report with SDES CNAME `skysim` before a session's first frame and every
+  5 s after it, pairing an NTP wall-clock time with the RTP time of the same instant — what
+  lets a receiver turn a frame's timestamp into the wall-clock time it was drawn. Receiver
+  reports are only taken as a sign of life.
+- **H.264**: `profile_idc` 66 with `constraint_set0/1/2` set (`42e0`). x264 writes Baseline as
+  `42c0`; constraint_set2 is raised because the stream also meets the Extended profile's
+  constraints — progressive with `direct_8x8_inference_flag` = 1 (ITU-T H.264 A.2.3) — which
+  makes it the `42e01f` WebRTC offers. `level_idc` 31 unless the frame size and rate need more
+  (Table A-1). No B-frames, one reference frame, CAVLC. Every IDR access unit is SPS, PPS, IDR
+  slice (the first also carries x264's version SEI); the SDP's `sprop-parameter-sets` are the
+  same SPS and PPS. A receiver's stream starts at an IDR: nothing before one is sent to it, and
+  the encoder is asked for one when it starts playing. VUI: timing at the nominal frame rate
+  (`time_scale / (2 * num_units_in_tick)`), colour primaries / transfer / matrix 6 (BT.601),
+  limited range — what the RGB→YUV conversion produces.
+- **`camera.mjpg` parts** (HTTP, the legacy feed) carry `X-Skysim-Time-Usec`, the state JSON
+  `"timestamp"` of the pose in microseconds as on a survey still, and
+  `X-Skysim-Capture-Unix-Usec`, the wall-clock time the picture was drawn — the same instant an
+  RTP timestamp names, so the two feeds' latencies can be compared.
+
 ## Conformance
 
 `tools/harness/conformance.py` launches N real SITL instances against the sim and asserts:

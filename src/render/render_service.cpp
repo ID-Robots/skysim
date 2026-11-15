@@ -93,25 +93,18 @@ void RenderService::publish_poses(std::vector<Pose> poses) {
     poses_ = std::move(poses);
 }
 
-FrameStore::Frame RenderService::frame(uint32_t vehicle_id, uint64_t after_seq, std::chrono::milliseconds wait) {
-    const auto now = Clock::now();
-    bool in_fleet = false;
-    {
-        std::lock_guard<std::mutex> lock(poses_mutex_);
-        in_fleet = std::any_of(poses_.begin(), poses_.end(),
-                               [vehicle_id](const Pose &p) { return p.vehicle_id == vehicle_id; });
-    }
-    // Only a vehicle in the fleet goes on the draw list. Anything else would never be drawn,
-    // and recording it would let requests for made-up ids grow the list and wake the render
-    // thread at whatever rate they arrive. A stream opened before its vehicle spawns keeps
-    // asking, so it is on the list within one wait of the spawn.
-    if (!in_fleet) {
-        return frames_.get(vehicle_id);
-    }
+bool RenderService::in_fleet(uint32_t vehicle_id) const {
+    std::lock_guard<std::mutex> lock(poses_mutex_);
+    return std::any_of(poses_.begin(), poses_.end(),
+                       [vehicle_id](const Pose &p) { return p.vehicle_id == vehicle_id; });
+}
+
+void RenderService::note_demand(std::unordered_map<uint32_t, Clock::time_point> &demand, uint32_t vehicle_id,
+                                Clock::time_point now) {
     bool fresh_demand = false;
     {
         std::lock_guard<std::mutex> lock(demand_mutex_);
-        auto [it, inserted] = demand_.try_emplace(vehicle_id, now);
+        auto [it, inserted] = demand.try_emplace(vehicle_id, now);
         it->second = now;
         if (inserted) {
             ++demand_epoch_;
@@ -121,6 +114,27 @@ FrameStore::Frame RenderService::frame(uint32_t vehicle_id, uint64_t after_seq, 
     if (fresh_demand) {
         wake_.notify_all();
     }
+}
+
+bool RenderService::want_video(uint32_t vehicle_id) {
+    if (!in_fleet(vehicle_id)) {
+        return false;
+    }
+    note_demand(video_demand_, vehicle_id, Clock::now());
+    return true;
+}
+
+FrameStore::Frame RenderService::frame(uint32_t vehicle_id, uint64_t after_seq,
+                                       std::chrono::milliseconds wait) {
+    const auto now = Clock::now();
+    // Only a vehicle in the fleet goes on the draw list. Anything else would never be drawn,
+    // and recording it would let requests for made-up ids grow the list and wake the render
+    // thread at whatever rate they arrive. A stream opened before its vehicle spawns keeps
+    // asking, so it is on the list within one wait of the spawn.
+    if (!in_fleet(vehicle_id)) {
+        return frames_.get(vehicle_id);
+    }
+    note_demand(demand_, vehicle_id, now);
     if (wait.count() <= 0) {
         return frames_.get(vehicle_id);
     }
@@ -159,6 +173,7 @@ void RenderService::record_pass(const Window &pass, Clock::time_point now) {
         w->render_ms_sum += pass.render_ms_sum;
         w->render_ms_max = std::max(w->render_ms_max, pass.render_ms_max);
         w->encode_ms_sum += pass.encode_ms_sum;
+        w->encoded += pass.encoded;
         w->watched = std::max(w->watched, pass.watched);
     }
     in_burst_ = true;
@@ -171,7 +186,9 @@ void RenderService::record_pass(const Window &pass, Clock::time_point now) {
         if (w.drawn > 0) {
             stats_.render_ms = w.render_ms_sum / static_cast<double>(w.drawn);
             stats_.render_ms_max = w.render_ms_max;
-            stats_.encode_ms = w.encode_ms_sum / static_cast<double>(w.drawn);
+        }
+        if (w.encoded > 0) {
+            stats_.encode_ms = w.encode_ms_sum / static_cast<double>(w.encoded);
         }
         stats_window_ = Window{};
     }
@@ -235,12 +252,13 @@ void RenderService::emit(const char *line) const {
 
 void RenderService::log_window(const Window &w) const {
     const double drawn = static_cast<double>(std::max<uint64_t>(w.drawn, 1));
+    const double encoded = static_cast<double>(std::max<uint64_t>(w.encoded, 1));
     char line[256];
     std::snprintf(line, sizeof(line),
                   "skysim: camera: %zu vehicle(s) watched, %.1f fps each (target %.1f), render %.1f ms/frame "
                   "(max %.1f), encode %.1f ms, %llu drawn + %llu re-sent, %d thread(s)",
                   w.watched, w.fps(), cfg_.fps, w.render_ms_sum / drawn, w.render_ms_max,
-                  w.encode_ms_sum / drawn, static_cast<unsigned long long>(w.drawn),
+                  w.encode_ms_sum / encoded, static_cast<unsigned long long>(w.drawn),
                   static_cast<unsigned long long>(w.reused), threads_);
     emit(line);
 }
@@ -254,15 +272,24 @@ void RenderService::run() {
     const auto window = std::chrono::duration_cast<Clock::duration>(
         std::chrono::duration<double>(std::max(cfg_.demand_window_s, 0.0)));
 
-    // The last frame drawn per vehicle and the pose it was drawn from.
+    // The last picture drawn per vehicle, the pose it was drawn from, and its JPEG once one has
+    // been made (only a JPEG viewer needs it).
     struct Drawn {
         Pose pose;
+        std::shared_ptr<const Image> image;
         std::vector<uint8_t> jpeg;
+    };
+    // A vehicle on this pass's draw list, and who wants it.
+    struct Wanted {
+        const Pose *pose;
+        bool jpeg;
+        bool video;
     };
     std::unordered_map<uint32_t, Drawn> last;
     std::vector<uint32_t> live;
     std::vector<uint32_t> lapsed;
-    std::vector<const Pose *> wanted;
+    std::vector<uint32_t> lapsed_video;
+    std::vector<Wanted> wanted;
     bool drawing = false;
 
     while (!stop_.load(std::memory_order_relaxed)) {
@@ -290,27 +317,52 @@ void RenderService::run() {
         // the list and its frame goes with it.
         uint64_t seen_epoch = 0;
         lapsed.clear();
+        lapsed_video.clear();
         wanted.clear();
+        bool any_demand = false;
         {
             std::lock_guard<std::mutex> lock(demand_mutex_);
-            for (auto it = demand_.begin(); it != demand_.end();) {
-                if (started - it->second >= window) {
-                    lapsed.push_back(it->first);
-                    it = demand_.erase(it);
-                } else {
-                    ++it;
+            const auto expire = [&](std::unordered_map<uint32_t, Clock::time_point> &demand,
+                                    std::vector<uint32_t> &out) {
+                for (auto it = demand.begin(); it != demand.end();) {
+                    if (started - it->second >= window) {
+                        out.push_back(it->first);
+                        it = demand.erase(it);
+                    } else {
+                        ++it;
+                    }
                 }
-            }
+            };
+            expire(demand_, lapsed);
+            expire(video_demand_, lapsed_video);
             for (const Pose &pose : poses) {
-                if (demand_.count(pose.vehicle_id) != 0) {
-                    wanted.push_back(&pose);
+                const bool jpeg = demand_.count(pose.vehicle_id) != 0;
+                const bool video = video_demand_.count(pose.vehicle_id) != 0;
+                if (jpeg || video) {
+                    wanted.push_back({&pose, jpeg, video});
                 }
             }
+            any_demand = !demand_.empty() || !video_demand_.empty();
             seen_epoch = demand_epoch_;
+            // A lapsed JPEG demand takes the vehicle's JPEG with it; the picture goes once
+            // nobody wants the vehicle at all.
+            for (const uint32_t id : lapsed) {
+                if (video_demand_.count(id) == 0) {
+                    last.erase(id);
+                }
+            }
+            for (const uint32_t id : lapsed_video) {
+                if (demand_.count(id) == 0) {
+                    last.erase(id);
+                }
+            }
         }
         for (const uint32_t id : lapsed) {
             frames_.erase(id);
-            last.erase(id);
+            auto it = last.find(id);
+            if (it != last.end()) {
+                it->second.jpeg.clear();
+            }
         }
 
         if (wanted.empty()) {
@@ -329,7 +381,7 @@ void RenderService::run() {
             std::unique_lock<std::mutex> lock(demand_mutex_);
             const auto woken = [&] { return stop_.load(std::memory_order_relaxed) || demand_epoch_ != seen_epoch; };
             auto deadline = log_due > started ? log_due : Clock::time_point::max();
-            if (!demand_.empty()) {
+            if (any_demand) {
                 deadline = std::min(deadline, started + period);
             }
             if (deadline == Clock::time_point::max()) {
@@ -344,34 +396,48 @@ void RenderService::run() {
         Window pass;
         pass.started = started;
         pass.watched = wanted.size();
-        for (const Pose *pose : wanted) {
+        for (const Wanted &w : wanted) {
             if (stop_.load(std::memory_order_relaxed)) {
                 break;
             }
+            const Pose *pose = w.pose;
             Drawn &d = last[pose->vehicle_id];
-            if (!d.jpeg.empty() && same_pose(d.pose, *pose)) {
-                frames_.publish(pose->vehicle_id, d.jpeg, pose->sim_time_s);
+            if (d.image && same_pose(d.pose, *pose)) {
                 ++pass.reused;
-                continue;
-            }
-            const auto t0 = Clock::now();
-            const Camera camera = pose->gimbal
-                                      ? Camera::on_gimbal(cfg_.camera, pose->position_ned, pose->quat_ned_frd,
-                                                          pose->gimbal_yaw_rad, pose->gimbal_pitch_rad)
-                                      : Camera(cfg_.camera, pose->position_ned, pose->quat_ned_frd);
-            const Image image = rasterizer_->render(*scene_, camera, pool_.get());
-            const auto t1 = Clock::now();
-            std::vector<uint8_t> jpeg = encode_jpeg(image, cfg_.quality);
-            const auto t2 = Clock::now();
-            const double render_ms = ms_between(t0, t1);
-            ++pass.drawn;
-            pass.render_ms_sum += render_ms;
-            pass.render_ms_max = std::max(pass.render_ms_max, render_ms);
-            pass.encode_ms_sum += ms_between(t1, t2);
-            if (!jpeg.empty()) {
+            } else {
+                const auto t0 = Clock::now();
+                const Camera camera =
+                    pose->gimbal ? Camera::on_gimbal(cfg_.camera, pose->position_ned, pose->quat_ned_frd,
+                                                     pose->gimbal_yaw_rad, pose->gimbal_pitch_rad)
+                                 : Camera(cfg_.camera, pose->position_ned, pose->quat_ned_frd);
+                d.image = std::make_shared<const Image>(rasterizer_->render(*scene_, camera, pool_.get()));
                 d.pose = *pose;
-                d.jpeg = jpeg;
-                frames_.publish(pose->vehicle_id, std::move(jpeg), pose->sim_time_s);
+                d.jpeg.clear();
+                const double render_ms = ms_between(t0, Clock::now());
+                ++pass.drawn;
+                pass.render_ms_sum += render_ms;
+                pass.render_ms_max = std::max(pass.render_ms_max, render_ms);
+            }
+            const auto drawn_at = Clock::now();
+            if (w.jpeg) {
+                if (d.jpeg.empty()) {
+                    d.jpeg = encode_jpeg(*d.image, cfg_.quality);
+                    ++pass.encoded;
+                    pass.encode_ms_sum += ms_between(drawn_at, Clock::now());
+                }
+                if (!d.jpeg.empty()) {
+                    // Stamped with the moment the picture was ready, before its JPEG was made —
+                    // the instant an H.264 frame's RTP timestamp names — so the two feeds'
+                    // latencies are measured from the same point.
+                    const auto unix_us =
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::system_clock::now().time_since_epoch() - (Clock::now() - drawn_at))
+                            .count();
+                    frames_.publish(pose->vehicle_id, d.jpeg, pose->sim_time_s, unix_us);
+                }
+            }
+            if (w.video && cfg_.video_sink && !d.image->empty()) {
+                cfg_.video_sink(pose->vehicle_id, d.image, pose->sim_time_s, drawn_at);
             }
         }
         pass.passes = 1;

@@ -97,7 +97,8 @@ tools/getting_started.sh
 ![Four views of the demo city rendered by skysim](.github/assets/skysim-getting-started.jpg)
 
 Images land in `build/getting_started/`. Needs the build tools, Python 3, and — on a
-clean checkout — network access, because CMake fetches JoltPhysics, cpp-httplib and stb.
+clean checkout — network access, because CMake fetches JoltPhysics, cpp-httplib, stb and x264
+(install `nasm` too, or x264 is built without its assembly and encodes several times slower).
 It does **not** need ArduPilot or a running simulator, which is the point: you can see
 the thing work before committing to the half hour the autopilot build takes.
 
@@ -107,6 +108,7 @@ city and serve its camera live:
 ```bash
 ARDUPILOT_ROOT=~/ardupilot tools/getting_started.sh --fly
 # then open http://127.0.0.1:8642/instances/0/camera.mjpg
+# or, as H.264 the way a real camera streams it: ffplay rtsp://127.0.0.1:8554/instances/0/main.264
 ```
 
 ## Quick start
@@ -203,8 +205,8 @@ deadline, and while that no longer corrupts the flight it does cost wall-clock p
 the camera endpoints serve nothing, whatever else is set. With it, `SKYSIM_CAMERA_SIZE`
 (default `256x144`), `SKYSIM_CAMERA_QUALITY`, `SKYSIM_CAMERA_THREADS`,
 `SKYSIM_CAMERA_FOV`, `SKYSIM_CAMERA_PITCH` and `SKYSIM_CAMERA_RANGE` apply.
-A vehicle is only drawn while somebody is asking for its picture — an open `camera.mjpg`,
-or a `camera.jpg` within the last 3 s — so a camera nobody watches costs nothing, however
+A vehicle is only drawn while somebody is asking for its picture — an open `camera.mjpg` or
+RTSP stream, or a `camera.jpg` within the last 3 s — so a camera nobody watches costs nothing, however
 many vehicles there are, and a parked vehicle's frame is re-sent rather than redrawn.
 `SKYSIM_CAMERA_THREADS` is the number of threads drawing a frame (at background priority);
 by default it is the number of CPUs the container may use — its cgroup quota and affinity,
@@ -214,11 +216,24 @@ three at about 9 fps each. `GET /metrics` reports what the camera achieves (`cam
 `camera.render_ms`) and the log carries the same every 10 s while frames are drawn:
 
 ```bash
-docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
+docker run --rm -p 8642:8642 -p 8554:8554 -p 9002-9202:9002-9202/udp \
   -v $(pwd)/build/city/tiles:/world:ro -e SKYSIM_TILES=/world \
   -e SKYSIM_CAMERA_FPS=10 -e SKYSIM_CAMERA_SIZE=256x144 skysim
 # http://localhost:8642/instances/0/camera.mjpg
+# rtsp://localhost:8554/instances/0/main.264  (ffplay -rtsp_transport tcp ...)
 ```
+
+**The camera is also H.264 over RTSP** (TASK-2561), the way the SIYI ZR30 on Observer 1 serves
+it: `rtsp://<host>:8554/instances/<n>/main.264`, Constrained Baseline (`profile-level-id
+42e01f`), no B-frames, zerolatency, SPS/PPS on every IDR, 1200 kbit/s and an IDR every second
+by default, at the camera's size and rate — what a browser or a Janus H.264 room takes without
+transcoding. A stream is encoded only while somebody plays it, on encoder threads of its own
+(`SKYSIM_VIDEO_THREADS`), never on the physics tick. `SKYSIM_RTSP_PORT` (default `8554`, `0` =
+off) and `SKYSIM_RTSP_BIND` place the server; `POST /instances/<n>/camera/encoder` changes a
+stream's bitrate, fps and keyframe interval live and `POST /instances/<n>/camera/keyframe` asks
+for an IDR. `SKYSIM_CAMERA_MJPEG=0` retires `camera.mjpg` once nothing reads it. Details:
+[docs/SKYHUB_INTEGRATION.md](docs/SKYHUB_INTEGRATION.md) ([S6]) and
+[docs/PROTOCOL.md](docs/PROTOCOL.md#pilot-camera-video-rtsp--rtp-not-part-of-the-wire-protocol).
 
 **The camera follows the vehicle's gimbal** when the vehicle drives one (TASK-2548): ArduPilot's
 mount pitch and yaw on servo outputs `SKYSIM_GIMBAL_PITCH_CHANNEL` (default 10, pitch -90..20
@@ -243,13 +258,15 @@ camera feed alike — see [Survey stills](#survey-stills-and-the-reconstruction-
 | `POST /vehicles` `{"instance":N, "launch_process":true}` (both fields optional) | reserve a requested or next-free ArduPilot instance (optionally forks arducopter) → `{id, instance, json_port, mavlink_tcp}` |
 | `DELETE /vehicles/{id}` | despawn, release instance, kill managed process |
 | `GET /vehicles` | per-vehicle: connected, frozen, silent_ticks, pos_ned, `midair_collisions`, `building_contacts`; `radio` when a radio field is set |
-| `GET /metrics` | tick p50/p99 µs, straggler_events, freezes, resident_tiles; `camera` (`null` when off): `target_fps`, achieved `fps` per watched vehicle, `watched`, `render_ms` / `render_ms_max` / `encode_ms` per frame, `threads`, `frames_drawn`, `frames_reused` |
+| `GET /metrics` | tick p50/p99 µs, straggler_events, freezes, resident_tiles; `camera` (`null` when off): `target_fps`, achieved `fps` per watched vehicle, `watched`, `render_ms` / `render_ms_max` / `encode_ms` per frame, `threads`, `frames_drawn`, `frames_reused`; `video` (`null` when RTSP is off): `rtsp_port`, `streams`, `clients`, `threads`, `encode_ms`, `frames_encoded`, `frames_dropped`, `keyframes`, `bytes_sent` |
 | `POST /mission/check` `{"waypoints_ned":[[n,e,d],...], "clearance_m":1.0}` | sweep a planned route through loaded building geometry → `{checked, clear, hits}` |
 | `PUT` / `GET` / `DELETE /radio` | set, read or clear the simulated 4G radio field (carriers, towers, coverage holes) |
 | `GET /radio/sample?lat&lon&alt_amsl` | RSRP / RSRQ / SINR / RSSI, serving cell and link quality per carrier at a point |
 | `GET /radio/grid?bbox&alt_rel&step_m&carrier` | the same as a ground-truth raster over an area (≤ 250 000 cells) |
 | `GET /instances/{n}/still.jpg`, `GET /vehicles/{id}/still.jpg` | one survey still, rendered on demand from the vehicle's pose; query `w h hfov pitch yaw roll_stab range q`, pose in `X-Skysim-*` headers |
-| `GET /instances/{n}/camera.jpg` / `.mjpg` (and by `/vehicles/{id}`) | the pilot camera feed (`--camera-fps`) |
+| `GET /instances/{n}/camera.jpg` / `.mjpg` (and by `/vehicles/{id}`) | the pilot camera feed (`--camera-fps`); `.mjpg` off with `--camera-mjpeg 0` |
+| `GET` / `POST /instances/{n}/camera/encoder` `{"bitrate_kbps","fps","keyframe_interval_s"}` | the H.264 encoder behind `rtsp://<host>:8554/instances/{n}/main.264`; POST answers with the values applied (clamped) |
+| `POST /instances/{n}/camera/keyframe` | the stream's next frame is an IDR |
 
 All mutations execute at tick boundaries; reads come from per-tick snapshots. The SkyHub
 gateway polls `GET /vehicles` and, on a collision-counter increase, emits a crash alert to

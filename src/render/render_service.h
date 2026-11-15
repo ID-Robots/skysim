@@ -44,6 +44,11 @@ namespace skysim::render {
 // and with nobody asking the render thread sleeps on a condition variable rather than a timer.
 // Drawing every vehicle whether or not anyone looked is what had an idle dev server, with one
 // parked vehicle slot and no viewer, burning two vCPU on textured 640x360 frames.
+//
+// Two kinds of asking, each with its own demand window: frame() for JPEGs (the MJPEG and
+// camera.jpg routes) and want_video() for pictures handed to video_sink (the H.264 encoders,
+// video/video_service.h). A vehicle is drawn once a pass if either wants it; the JPEG is made
+// only for the first kind, so a vehicle watched only over RTSP costs no JPEG encode.
 class RenderService {
   public:
     struct Config {
@@ -73,6 +78,13 @@ class RenderService {
         // Where those lines go, one call per line without the newline; stdout when unset.
         // Called on the render thread.
         std::function<void(const char *line)> log_sink;
+        // Where pictures go for a vehicle somebody's video stream asked for (want_video): the
+        // RGB picture itself, shared rather than copied, with the sim time of its pose and the
+        // moment it was drawn (or re-sent unchanged). Called on the render thread, once per pass
+        // per vehicle; it must hand the picture off and return, never encode it there.
+        std::function<void(uint32_t vehicle_id, std::shared_ptr<const Image> image, double sim_time_s,
+                           std::chrono::steady_clock::time_point drawn)>
+            video_sink;
     };
 
     // One vehicle's pose, as the tick thread last published it.
@@ -101,7 +113,7 @@ class RenderService {
         double render_ms_max{0.0}; // the slowest frame
         double encode_ms{0.0};     // mean JPEG encode per frame
         uint64_t frames_drawn{0};  // since start
-        uint64_t frames_reused{0}; // since start: the pose had not moved, so the last JPEG was re-sent
+        uint64_t frames_reused{0}; // since start: the pose had not moved, so the last picture was re-sent
     };
 
     explicit RenderService(const Config &cfg);
@@ -121,6 +133,12 @@ class RenderService {
     // from minutes ago is not the camera's view).
     FrameStore::Frame frame(uint32_t vehicle_id, uint64_t after_seq = 0,
                             std::chrono::milliseconds wait = std::chrono::milliseconds(0));
+
+    // A request for a vehicle's pictures on behalf of a video stream: like frame() it puts the
+    // vehicle on the draw list for demand_window_s, but what is drawn goes to Config::video_sink
+    // as a picture, and no JPEG is made for it unless frame() is asking too. Returns at once;
+    // false (and nothing recorded) for a vehicle that is not in the fleet.
+    bool want_video(uint32_t vehicle_id);
 
     Stats stats() const;
     int threads() const { return threads_; }
@@ -144,7 +162,8 @@ class RenderService {
         double render_ms_sum{0.0};
         double render_ms_max{0.0};
         double encode_ms_sum{0.0};
-        size_t watched{0}; // the most watched at once
+        uint64_t encoded{0}; // JPEGs made (a re-sent picture can need one for a new viewer)
+        size_t watched{0};   // the most watched at once
         double fps() const;
     };
 
@@ -158,6 +177,10 @@ class RenderService {
     void flush_idle_log(Clock::time_point now);
     void log_window(const Window &w) const;
     void emit(const char *line) const;
+    bool in_fleet(uint32_t vehicle_id) const;
+    // Records a request in `demand` (under demand_mutex_), waking the render thread for a new one.
+    void note_demand(std::unordered_map<uint32_t, Clock::time_point> &demand, uint32_t vehicle_id,
+                     Clock::time_point now);
 
     Config cfg_;
     int threads_{1};
@@ -174,7 +197,8 @@ class RenderService {
     // wakes the render thread if it is waiting for work.
     std::mutex demand_mutex_;
     std::condition_variable wake_;
-    std::unordered_map<uint32_t, Clock::time_point> demand_;
+    std::unordered_map<uint32_t, Clock::time_point> demand_;       // JPEG: camera.jpg / .mjpg
+    std::unordered_map<uint32_t, Clock::time_point> video_demand_; // pictures: video streams
     uint64_t demand_epoch_{0};
     std::atomic<bool> stop_{false}; // set under demand_mutex_, so a waiter cannot miss it
 

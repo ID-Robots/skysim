@@ -6,7 +6,7 @@
 # addressed over 127.0.0.1 within the task's network namespace.
 #
 # Build:  docker build -t skyhub-skysim:local .
-# Run:    docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp skyhub-skysim:local
+# Run:    docker run --rm -p 8642:8642 -p 8554:8554 -p 9002-9202:9002-9202/udp skyhub-skysim:local
 #
 # The tile set is NOT baked in: worlds are cooked separately (tools/cooker) and
 # mounted or synced to SKYSIM_TILES so the image does not have to be rebuilt for
@@ -18,6 +18,8 @@ FROM ubuntu:22.04 AS build
 ENV DEBIAN_FRONTEND=noninteractive
 
 # cmake >= 3.24 is required; 22.04 ships 3.22, so take it from Kitware's repo.
+# nasm is for x264's assembly (the camera's H.264 encoder, built from source and linked in
+# statically): build stage only, the runtime image gains no codec package.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -26,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ninja-build \
         g++ \
         make \
+        nasm \
     && curl -fsSL https://apt.kitware.com/keys/kitware-archive-latest.asc \
         | gpg --dearmor -o /usr/share/keyrings/kitware-archive-keyring.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ jammy main" \
@@ -39,8 +42,9 @@ COPY src/ ./src/
 COPY tools/ ./tools/
 COPY tests/ ./tests/
 
-# Jolt and httplib are pulled by FetchContent during configure
-RUN cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+# Jolt and httplib are pulled by FetchContent during configure, x264 by ExternalProject during
+# the build; SKYSIM_X264_ASM=ON fails the build rather than ship a C-only (slow) encoder.
+RUN cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSKYSIM_X264_ASM=ON \
     && cmake --build build -j "$(nproc)" --target skysim tile_cooker
 
 # --------------------------------------------------------------- runtime stage
@@ -68,9 +72,13 @@ ENV SKYSIM_API_BIND=0.0.0.0 \
     SKYSIM_STREAM_RADIUS=1500 \
     SKYSIM_STREAM_MAX=128 \
     SKYSIM_VEHICLES=0 \
+    SKYSIM_RTSP_PORT=8554 \
     SKYSIM_EXTRA_ARGS=""
 
 EXPOSE 8642
+# The camera as H.264 over RTSP (with SKYSIM_CAMERA_FPS): rtsp://<host>:8554/instances/<n>/main.264.
+# RTP goes over this connection (TCP interleaved) or, for UDP clients, from an ephemeral port pair.
+EXPOSE 8554
 # ArduPilot json physics: 9002 + 10*instance, one per vehicle
 EXPOSE 9002-9202/udp
 

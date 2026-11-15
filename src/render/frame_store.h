@@ -29,15 +29,21 @@ class FrameStore {
         // remembers the last one it sent can wait for the next without re-reading the slot on a
         // timer, and tell a new frame from an old one even while sim time stands still.
         uint64_t seq{0};
+        // Wall-clock time the picture was drawn (or re-sent unchanged), microseconds since the
+        // Unix epoch; 0 when unknown. What an MJPEG part's X-Skysim-Capture-Unix-Usec carries,
+        // so a receiver can measure the feed's latency.
+        int64_t captured_unix_us{0};
     };
 
-    void publish(uint32_t vehicle_id, std::vector<uint8_t> jpeg, double sim_time_s) {
+    void publish(uint32_t vehicle_id, std::vector<uint8_t> jpeg, double sim_time_s,
+                 int64_t captured_unix_us = 0) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             Frame &slot = frames_[vehicle_id];
             slot.jpeg = std::move(jpeg);
             slot.sim_time_s = sim_time_s;
             slot.seq = ++seq_;
+            slot.captured_unix_us = captured_unix_us;
         }
         published_.notify_all();
     }

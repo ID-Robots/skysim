@@ -51,14 +51,21 @@ constexpr auto kFirstFrameWait = std::chrono::milliseconds(2000);
 // 59% repeats and 37 KB/s of them. Worse than the waste, it feeds a consumer faster than the
 // content arrives, and the excess lands in socket and queue buffers as latency the viewer sees
 // as lag. FrameStore drops rather than queues for exactly this reason; this route was undoing it.
-void write_mjpeg_part(httplib::DataSink &sink, const std::vector<uint8_t> &jpeg) {
-    char head[128];
-    const int n = std::snprintf(head, sizeof(head),
-                                "--skysimframe\r\nContent-Type: image/jpeg\r\n"
-                                "Content-Length: %zu\r\n\r\n",
-                                jpeg.size());
+//
+// Each part says when its picture was taken: X-Skysim-Time-Usec is the sim time of the pose (as
+// on a survey still), X-Skysim-Capture-Unix-Usec the wall clock when it was drawn or re-sent.
+// Multipart readers (GStreamer's multipartdemux, ffmpeg's mpjpeg) skip headers they do not know.
+void write_mjpeg_part(httplib::DataSink &sink, const skysim::render::FrameStore::Frame &frame) {
+    char head[256];
+    const int n =
+        std::snprintf(head, sizeof(head),
+                      "--skysimframe\r\nContent-Type: image/jpeg\r\n"
+                      "Content-Length: %zu\r\nX-Skysim-Time-Usec: %lld\r\n"
+                      "X-Skysim-Capture-Unix-Usec: %lld\r\n\r\n",
+                      frame.jpeg.size(), static_cast<long long>(std::llround(frame.sim_time_s * 1e6)),
+                      static_cast<long long>(frame.captured_unix_us));
     sink.write(head, static_cast<size_t>(n));
-    sink.write(reinterpret_cast<const char *>(jpeg.data()), jpeg.size());
+    sink.write(reinterpret_cast<const char *>(frame.jpeg.data()), frame.jpeg.size());
     sink.write("\r\n", 2);
 }
 
@@ -71,7 +78,7 @@ void stream_next_frame(const ControlServer::Snapshots &snapshots, uint32_t id, u
         id != 0 ? snapshots.camera_frame(id, last_seq, kFrameWait) : skysim::render::FrameStore::Frame{};
     if (!frame.jpeg.empty() && frame.seq != last_seq) {
         last_seq = frame.seq;
-        write_mjpeg_part(sink, frame.jpeg);
+        write_mjpeg_part(sink, frame);
         return;
     }
     const auto waited = std::chrono::steady_clock::now() - asked;
@@ -441,6 +448,69 @@ void reply_still(const ControlServer::Snapshots &snapshots, const std::optional<
     res.set_content(reinterpret_cast<const char *>(frame.jpeg.data()), frame.jpeg.size(), "image/jpeg");
 }
 
+// The vehicle at an instance named in a route, or null: the whole number in the path, as the
+// still route reads it (no wrap onto another vehicle for a number too big for the type).
+const VehicleInfo *find_instance(const std::vector<VehicleInfo> &vehicles, const std::string &key) {
+    uint64_t number = 0;
+    const auto parsed = std::from_chars(key.data(), key.data() + key.size(), number);
+    if (parsed.ec != std::errc() || parsed.ptr != key.data() + key.size() || number > 0x7FFFFFFFULL) {
+        return nullptr;
+    }
+    for (const auto &v : vehicles) {
+        if (static_cast<uint64_t>(v.instance) == number) {
+            return &v;
+        }
+    }
+    return nullptr;
+}
+
+// A POST /camera/encoder body: a JSON object whose bitrate_kbps, fps and keyframe_interval_s,
+// when present, are numbers. Other members are ignored, so a client can send back what GET
+// gave it with one field changed. An empty body changes nothing.
+bool parse_encoder_patch(const std::string &body, EncoderPatch &patch, std::string &error) {
+    if (body.find_first_not_of(" \t\r\n") == std::string::npos) {
+        return true;
+    }
+    std::string parse_error;
+    const auto doc = radio::json::parse(body, parse_error);
+    if (!doc) {
+        error = "invalid JSON: " + parse_error;
+        return false;
+    }
+    if (!doc->is_object()) {
+        error = "body must be a JSON object";
+        return false;
+    }
+    const std::pair<const char *, std::optional<double> *> fields[] = {
+        {"bitrate_kbps", &patch.bitrate_kbps},
+        {"fps", &patch.fps},
+        {"keyframe_interval_s", &patch.keyframe_interval_s}};
+    for (const auto &[name, out] : fields) {
+        const radio::json::Value *v = doc->find(name);
+        if (v == nullptr) {
+            continue;
+        }
+        if (!v->is_number() || !std::isfinite(v->number)) {
+            error = std::string(name) + " must be a number";
+            return false;
+        }
+        *out = v->number;
+    }
+    return true;
+}
+
+std::string encoder_json(const EncoderState &e) {
+    std::string out = "{\"bitrate_kbps\":" + std::to_string(e.bitrate_kbps) + ",\"fps\":";
+    radio::json::append_number(out, e.fps);
+    out += ",\"keyframe_interval_s\":";
+    radio::json::append_number(out, e.keyframe_interval_s);
+    out +=
+        ",\"width\":" + std::to_string(e.width) + ",\"height\":" + std::to_string(e.height) + ",\"max_fps\":";
+    radio::json::append_number(out, e.max_fps);
+    out += ",\"clients\":" + std::to_string(e.clients) + "}";
+    return out;
+}
+
 } // namespace
 
 struct ControlServer::Impl {
@@ -731,6 +801,12 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
             res.set_content("{\"error\":\"camera disabled\"}", "application/json");
             return;
         }
+        if (!snapshots.mjpeg) {
+            reply_error(res, 404,
+                        "mjpeg disabled (--camera-mjpeg 0): the camera is on RTSP at /instances/" + instance +
+                            "/main.264");
+            return;
+        }
         res.set_chunked_content_provider(
             "multipart/x-mixed-replace; boundary=skysimframe",
             [snapshots, resolve_instance, instance, last_seq = uint64_t{0}](size_t,
@@ -773,6 +849,12 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
             res.set_content("{\"error\":\"camera disabled\"}", "application/json");
             return;
         }
+        if (!snapshots.mjpeg) {
+            reply_error(
+                res, 404,
+                "mjpeg disabled (--camera-mjpeg 0): the camera is on RTSP at /instances/<n>/main.264");
+            return;
+        }
         const auto id = static_cast<uint32_t>(std::strtoul(req.matches[1].str().c_str(), nullptr, 10));
         res.set_chunked_content_provider(
             "multipart/x-mixed-replace; boundary=skysimframe",
@@ -781,6 +863,54 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
                 return true;
             });
     });
+
+    // The H.264 encoder behind rtsp://<host>:8554/instances/<n>/main.264 (TASK-2561): read its
+    // settings, change some of them (clamped; the reply is what was applied), or force an IDR.
+    // By instance only, like the RTSP URL.
+    const auto encoder_route = [snapshots](const httplib::Request &req, httplib::Response &res, bool post) {
+        if (!snapshots.camera_encoder || !snapshots.vehicles) {
+            reply_error(res, 404, "rtsp video disabled");
+            return;
+        }
+        EncoderPatch patch;
+        std::string error;
+        if (post && !parse_encoder_patch(req.body, patch, error)) {
+            reply_error(res, 400, error);
+            return;
+        }
+        const std::vector<VehicleInfo> vehicles = snapshots.vehicles();
+        const VehicleInfo *v = find_instance(vehicles, req.matches[1].str());
+        if (v == nullptr) {
+            reply_error(res, 404, "no such instance");
+            return;
+        }
+        res.set_content(encoder_json(snapshots.camera_encoder(*v, post ? &patch : nullptr)),
+                        "application/json");
+    };
+    s.Get(R"(/instances/(\d+)/camera/encoder)",
+          [encoder_route](const httplib::Request &req, httplib::Response &res) {
+              encoder_route(req, res, false);
+          });
+    s.Post(R"(/instances/(\d+)/camera/encoder)",
+           [encoder_route](const httplib::Request &req, httplib::Response &res) {
+               encoder_route(req, res, true);
+           });
+    s.Post(R"(/instances/(\d+)/camera/keyframe)",
+           [snapshots](const httplib::Request &req, httplib::Response &res) {
+               if (!snapshots.camera_keyframe || !snapshots.vehicles) {
+                   reply_error(res, 404, "rtsp video disabled");
+                   return;
+               }
+               const std::vector<VehicleInfo> vehicles = snapshots.vehicles();
+               const VehicleInfo *v = find_instance(vehicles, req.matches[1].str());
+               if (v == nullptr) {
+                   reply_error(res, 404, "no such instance");
+                   return;
+               }
+               const size_t clients = snapshots.camera_keyframe(*v);
+               res.set_content("{\"keyframe\":true,\"clients\":" + std::to_string(clients) + "}",
+                               "application/json");
+           });
 
     // Survey still camera (docs/SKYHUB_INTEGRATION.md, "Survey stills"): one frame rendered on
     // demand, at the size, field of view and gimbal angle asked for, from the vehicle's pose in
@@ -837,14 +967,28 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
                           static_cast<unsigned long long>(c.frames_drawn),
                           static_cast<unsigned long long>(c.frames_reused));
         }
-        char buf[1024];
+        // The H.264/RTSP streams, or null when RTSP video is off.
+        char video[384] = "null";
+        if (m.video.enabled) {
+            const VideoMetrics &v = m.video;
+            std::snprintf(
+                video, sizeof(video),
+                "{\"rtsp_port\":%d,\"streams\":%zu,\"clients\":%zu,\"threads\":%d,\"encode_ms\":%.2f,"
+                "\"frames_encoded\":%llu,\"frames_dropped\":%llu,\"keyframes\":%llu,\"bytes_sent\":%llu}",
+                v.rtsp_port, v.streams, v.clients, v.threads, v.encode_ms,
+                static_cast<unsigned long long>(v.frames_encoded),
+                static_cast<unsigned long long>(v.frames_dropped),
+                static_cast<unsigned long long>(v.keyframes), static_cast<unsigned long long>(v.bytes_sent));
+        }
+        char buf[1536];
         std::snprintf(buf, sizeof(buf),
                       "{\"tick\":%llu,\"sim_time_s\":%.3f,\"tick_p50_us\":%.1f,"
                       "\"tick_p99_us\":%.1f,\"straggler_events\":%llu,\"freezes\":%llu,"
-                      "\"vehicles\":%zu,\"resident_tiles\":%zu,\"camera\":%s}",
+                      "\"vehicles\":%zu,\"resident_tiles\":%zu,\"camera\":%s,\"video\":%s}",
                       static_cast<unsigned long long>(m.tick), m.sim_time_s, m.tick_p50_us, m.tick_p99_us,
                       static_cast<unsigned long long>(m.straggler_events),
-                      static_cast<unsigned long long>(m.freezes), m.vehicles, m.resident_tiles, camera);
+                      static_cast<unsigned long long>(m.freezes), m.vehicles, m.resident_tiles, camera,
+                      video);
         res.set_content(buf, "application/json");
     });
 
