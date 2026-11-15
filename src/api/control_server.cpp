@@ -1002,6 +1002,7 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     std::printf("skysim: control plane on http://%s:%d\n", bind_addr.c_str(), port);
+    std::fflush(stdout); // a log read through a pipe (a container, a test) sees it now, not later
 }
 
 ControlServer::~ControlServer() {

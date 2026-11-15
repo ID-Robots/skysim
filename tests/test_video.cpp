@@ -685,17 +685,20 @@ void test_rtsp_server() {
     {
         RtspServer::Config tight = cfg;
         tight.max_backlog_bytes = 1000; // response bound: 2 * 1000 + 64 KiB
+        tight.session_timeout_s = 60;   // so only the bound can end it within the test
+        // Requests go in rounds of 2.4 KB, far under the 64 KiB input bound per read, each read
+        // and answered before the next: without the response bound this connection stays open.
         RtspServer bounded(tight, hooks);
         rtsp_test::Client c(bounded.port(), "127.0.0.1", AF_INET, 4096);
         std::string burst;
-        for (int i = 0; i < 600; ++i) {
+        for (int i = 0; i < 100; ++i) {
             burst += "OPTIONS * RTSP/1.0\r\n\r\n";
         }
         bool closed = false;
-        for (int round = 0; round < 400 && !closed; ++round) {
+        for (int round = 0; round < 600 && !closed; ++round) {
             closed = ::send(c.fd(), burst.data(), burst.size(), MSG_NOSIGNAL | MSG_DONTWAIT) < 0 &&
                      errno != EAGAIN && errno != EWOULDBLOCK;
-            std::this_thread::sleep_for(3ms);
+            std::this_thread::sleep_for(2ms);
         }
         CHECK(closed || c.closed_by_peer(3000));
     }

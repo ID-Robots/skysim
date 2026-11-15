@@ -154,6 +154,8 @@ class MjpegViewer(Viewer):
             captured = int(headers.get("x-skysim-capture-unix-usec", "0")) / 1e6
             self.frames.append((now, captured, len(body)))
         conn.close()
+        if not self.stop:
+            raise RuntimeError(f"instance {self.instance}: camera.mjpg ended before the phase did")
 
 
 class RtspViewer(Viewer):
@@ -205,6 +207,15 @@ def measure_transcode(sim: subprocess.Popen, instances: list[int], seconds: floa
     with contextlib.ExitStack() as stack:
         procs: list[subprocess.Popen] = []
         logs = []
+
+        def stop(p: subprocess.Popen) -> None:
+            if p.poll() is None:
+                p.send_signal(signal.SIGINT)
+            try:
+                p.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                p.kill()
+
         for i in instances:
             logs.append(stack.enter_context(tempfile.TemporaryFile()))
             procs.append(stack.enter_context(subprocess.Popen(
@@ -212,18 +223,9 @@ def measure_transcode(sim: subprocess.Popen, instances: list[int], seconds: floa
                  f"http://127.0.0.1:{API_PORT}/instances/{i}/camera.mjpg", "-c:v", "libx264", "-preset",
                  "veryfast", "-tune", "zerolatency", "-profile:v", "baseline", "-b:v", "1200k", "-threads", "1",
                  "-f", "null", "-"], stdout=subprocess.DEVNULL, stderr=logs[-1])))
-
-        def stop_all() -> None:  # runs before each Popen's own exit, which waits for it
-            for p in procs:
-                if p.poll() is None:
-                    p.send_signal(signal.SIGINT)
-            for p in procs:
-                try:
-                    p.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    p.kill()
-
-        stack.callback(stop_all)
+            # Registered right after each process, so it runs before that Popen's exit waits on it,
+            # however the block is left.
+            stack.callback(stop, procs[-1])
 
         def check_transcoders(when: str) -> None:
             dead = [(k, p.returncode) for k, p in enumerate(procs) if p.poll() is not None]
@@ -273,17 +275,24 @@ def main() -> int:
            "--camera-size", args.size, "--rtsp-port", str(RTSP_PORT), "--rtsp-bind", "127.0.0.1"]
     if args.cpus:
         cmd = ["taskset", "-c", args.cpus, *cmd]
-    sim = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    log = tempfile.NamedTemporaryFile(prefix="camera_bench_", suffix=".log")  # noqa: SIM115 - lives for main()
+    sim = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
     results: list[dict] = []
     try:
-        for _ in range(100):
+        # Ready when this child says it bound both ports — its own log, so a server that took a
+        # port after the probe above cannot pass for it.
+        bound = (f"control plane on http://127.0.0.1:{API_PORT}", f"on rtsp://127.0.0.1:{RTSP_PORT}/")
+        deadline = time.monotonic() + 15
+        while True:
             if sim.poll() is not None:
                 raise RuntimeError(f"skysim exited during startup (rc {sim.returncode})")
-            try:
-                api("/metrics")
+            with open(log.name, errors="replace") as f:
+                text = f.read()
+            if all(b in text for b in bound):
                 break
-            except OSError:
-                time.sleep(0.1)
+            if time.monotonic() > deadline:
+                raise RuntimeError("skysim did not report binding its API and RTSP ports")
+            time.sleep(0.1)
         vehicles = api("/vehicles")
         instances = [v["instance"] for v in vehicles]
         sitl = FakeSitl(instances, round(1 / dt), args.pwm)
@@ -332,6 +341,7 @@ def main() -> int:
             sim.wait(timeout=20)
         except subprocess.TimeoutExpired:
             sim.kill()
+        log.close()
     if args.json:
         with open(args.json, "w") as f:
             json.dump({"vehicles": args.vehicles, "size": args.size, "fps": args.fps, "cpus": args.cpus,
