@@ -701,6 +701,8 @@ void test_rtsp_server() {
             std::this_thread::sleep_for(2ms);
         }
         CHECK(closed || c.closed_by_peer(3000));
+        // ...and closed by that bound, not by the input one or a timeout.
+        CHECK(bounded.stats().closed_not_reading == 1 && bounded.stats().closed_flooding == 0);
     }
 
     // At most max_connections at once: the one past it is closed straight away.

@@ -70,6 +70,10 @@ class RtspServer {
         uint64_t frames_sent{0};    // access units, counted once per receiver
         uint64_t frames_dropped{0}; // access units a receiver could not take
         uint64_t bytes_sent{0};     // RTP and RTCP, all receivers
+        // Connections closed for misbehaving: requests piling up unanswered faster than they
+        // could be read (input past 64 KiB), or answers piling up unread (see handle_requests).
+        uint64_t closed_flooding{0};
+        uint64_t closed_not_reading{0};
     };
 
     // Binds and starts serving. Throws std::runtime_error when the address cannot be bound.

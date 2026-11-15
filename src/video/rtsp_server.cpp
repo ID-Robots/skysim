@@ -343,6 +343,8 @@ struct RtspServer::Impl {
     std::atomic<uint64_t> stat_frames_sent{0};
     std::atomic<uint64_t> stat_frames_dropped{0};
     std::atomic<uint64_t> stat_bytes_sent{0};
+    std::atomic<uint64_t> stat_closed_flooding{0};
+    std::atomic<uint64_t> stat_closed_not_reading{0};
 
     ~Impl() {
         for (const int fd : {listen_fd, wake_fd, rtp_fd, rtcp_fd}) {
@@ -617,6 +619,7 @@ bool RtspServer::Impl::read_from(Connection &c, Clock::time_point now) {
             c.in.append(buf, static_cast<size_t>(n));
             c.last_heard = now;
             if (c.in.size() > 4 * kMaxRequestBytes) {
+                stat_closed_flooding.fetch_add(1, std::memory_order_relaxed);
                 return false;
             }
             continue;
@@ -659,6 +662,7 @@ void RtspServer::Impl::handle_requests(Connection &c) {
     const size_t max_pending = 2 * cfg.max_backlog_bytes + 64 * 1024;
     while (!c.in.empty() && !c.closing) {
         if (c.pending() > max_pending) {
+            stat_closed_not_reading.fetch_add(1, std::memory_order_relaxed);
             c.out.clear();
             c.out_off = 0;
             c.in.clear();
@@ -1037,6 +1041,8 @@ RtspServer::Stats RtspServer::stats() const {
     s.frames_sent = impl_->stat_frames_sent.load(std::memory_order_relaxed);
     s.frames_dropped = impl_->stat_frames_dropped.load(std::memory_order_relaxed);
     s.bytes_sent = impl_->stat_bytes_sent.load(std::memory_order_relaxed);
+    s.closed_flooding = impl_->stat_closed_flooding.load(std::memory_order_relaxed);
+    s.closed_not_reading = impl_->stat_closed_not_reading.load(std::memory_order_relaxed);
     return s;
 }
 
