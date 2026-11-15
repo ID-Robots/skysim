@@ -67,6 +67,47 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   `SKYSIM_STILL_CONCURRENCY` (default 2) renders are already running, `500` if a render fails
   (out of memory on a huge frame, say). `SKYSIM_TEXTURE_SEED`
   (default 1) picks the world's texture. Meaning of the pose headers: docs/PROTOCOL.md.
+- **[S6] Pilot camera as H.264 over RTSP** (done; TASK-2561): each vehicle's camera streams like
+  the SIYI ZR30 on Observer 1 (`rtsp://<cam>:8554/main.264`), at
+  `rtsp://<skysim>:8554/instances/<n>/main.264` — `<n>` is the instance, as in `camera.mjpg`.
+  The SITL core can hand it to the browser / Janus H.264 room as it is, instead of decoding the
+  MJPEG feed and encoding it again. Wire details (RTSP methods, SDP, RTP, RTCP):
+  [`docs/PROTOCOL.md`](PROTOCOL.md#pilot-camera-video-rtsp--rtp-not-part-of-the-wire-protocol).
+  - **Stream**: RTP/H.264 (RFC 6184, `packetization-mode=1`) over RTSP, TCP interleaved
+    (`RTP/AVP/TCP`) or UDP unicast. Constrained Baseline — `profile-level-id=42e01f` for sizes up
+    to 1280x720 at 30 fps; larger frames raise only the level (`42e028` for 1080p30) — no
+    B-frames, x264 `zerolatency` (no lookahead: one picture in, one frame out), SPS and PPS in
+    front of every IDR (and in the SDP's `sprop-parameter-sets`), 4:2:0 BT.601 limited range.
+    ABR at 1200 kbit/s with a one-second VBV, an IDR every 1 s, picture size and rate from
+    `SKYSIM_CAMERA_SIZE` / `SKYSIM_CAMERA_FPS`. RTP timestamps are the moment each picture was
+    drawn (90 kHz); RTCP sender reports map them to wall-clock time.
+  - **Encoder control** (control plane): `GET /instances/<n>/camera/encoder` →
+    `{"bitrate_kbps":1200,"fps":10,"keyframe_interval_s":1,"width":256,"height":144,"max_fps":10,"clients":0}`;
+    `POST` the same path with any of `bitrate_kbps` (64..8000), `fps` (1..`max_fps`, the camera
+    rate) and `keyframe_interval_s` (0.1..10) → the values applied, after clamping; other fields
+    are ignored, so a GET body can be sent back changed. A bitrate or keyframe interval change
+    takes effect on the next frame; a new fps restarts the encoder (the next frame is an IDR,
+    with new SPS/PPS). `POST /instances/<n>/camera/keyframe` → `{"keyframe":true,"clients":N}`
+    makes the next frame an IDR. Settings belong to the vehicle: the next vehicle spawned at the
+    instance starts from the defaults. `404` for an unknown instance or with RTSP off, `400`
+    for a body that is not a JSON object or a field that is not a number.
+  - **Cost**: a stream is encoded only while an RTSP session plays it; with none, nothing asks
+    the renderer for that vehicle, which stops drawing it 3 s later (the same demand window as
+    MJPEG) and frees its encoder after 30 s. Encoding runs on its own worker threads at
+    background priority, never on the physics tick or the render thread: a picture the encoder
+    has not taken yet is replaced by the next one (`/metrics` `video.frames_dropped`), and a
+    receiver too slow for its stream loses frames up to the next IDR, not the connection.
+  - **Flags / env**: `--rtsp-port` / `SKYSIM_RTSP_PORT` (8554; `0` = off), `--rtsp-bind` /
+    `SKYSIM_RTSP_BIND` (default: the API bind), `--video-threads` / `SKYSIM_VIDEO_THREADS`
+    (default one per four usable CPUs, 1..4). RTSP needs the camera (`SKYSIM_CAMERA_FPS`) and
+    the control plane; a port that cannot be bound stops startup. `--camera-mjpeg` /
+    `SKYSIM_CAMERA_MJPEG` (default `1`) keeps serving `camera.mjpg` beside it until the core
+    reads RTSP; `0` turns both `.mjpg` routes into `404`s that name the RTSP path
+    (`camera.jpg` stays). Each MJPEG part now carries `X-Skysim-Time-Usec` (sim time) and
+    `X-Skysim-Capture-Unix-Usec` (wall clock when the picture was drawn).
+  - `GET /metrics` has a `video` object (`null` when off): `rtsp_port`, `streams` and
+    `clients` playing, encoder `threads`, mean `encode_ms`, `frames_encoded`,
+    `frames_dropped`, `keyframes`, `bytes_sent`.
 
 #### Using the still camera from a simulated survey (core, gateway)
 
@@ -116,6 +157,17 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
 - **[C2] `config/skysim.parm`** (mounted like the logging parm): `SIM_RATE_HZ 800`
   (ArduPilot's prearm requires gyro rate ≥ 1.8× the 400 Hz copter loop; 800 pairs with
   skysim `--dt 1/800`). Optional: `RNGFND1_TYPE 100` etc. for rangefinder-equipped sims.
+
+- **[C3] Camera from RTSP** (TASK-2561): pull `rtsp://$SKYSIM_HOST:8554/instances/$SITL_INSTANCE/main.264`
+  over TCP (`rtspsrc protocols=tcp latency=0 ! rtph264depay ! h264parse ! ...`, or
+  `ffmpeg -rtsp_transport tcp -i ... -c copy`) and forward it without transcoding, exactly as
+  for the real camera; set the bitrate the link allows with `POST /instances/<n>/camera/encoder`
+  and ask for an IDR with `POST /instances/<n>/camera/keyframe` when a viewer joins. Once no
+  image reads `camera.mjpg` any more, deploy skysim with `SKYSIM_CAMERA_MJPEG=0`.
+- **[C4] Infrastructure** (terraform): the skysim task must accept **TCP 8554** from the core
+  and Janus tasks (security group ingress + container port mapping). TCP interleaved is the
+  transport to use between tasks; UDP RTP leaves skysim from an ephemeral port pair, so the
+  receiver's security group would have to admit UDP from skysim on its own client ports.
 
 ### 3. skyhub_gateway_service
 - **[G1] Settings**: `SKYSIM_ENABLED`, `SKYSIM_URL` (default `http://127.0.0.1:8642`),

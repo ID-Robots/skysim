@@ -33,6 +33,7 @@
 #include "render/render_service.h"
 #include "render/scene.h"
 #include "render/still.h"
+#include "video/video_service.h"
 #include "protocol/udp_endpoint.h"
 #include "terrain/tile_streamer.h"
 #include "vehicle/gimbal.h"
@@ -106,6 +107,16 @@ struct Options {
     // 0 = off), and worker threads per render. Independent of the camera feed above.
     int still_concurrency = 2;
     int still_threads = 2;
+    // The camera as H.264 over RTSP (TASK-2561): rtsp://<host>:<rtsp_port>/instances/<n>/main.264,
+    // the SIYI ZR30's URL layout. On with the camera (--camera-fps) and the control plane, which
+    // resolves instances; 0 = off. rtsp_bind defaults to --api-bind.
+    int rtsp_port = 8554;
+    std::string rtsp_bind;
+    // H.264 encoder threads (SKYSIM_VIDEO_THREADS); 0 = one per four CPUs this process can use,
+    // 1 to 4. A stream at the camera's sizes costs a millisecond or two a frame.
+    int video_threads = 0;
+    // Keep serving camera.mjpg (SKYSIM_CAMERA_MJPEG). On until every consumer reads RTSP.
+    bool camera_mjpeg = true;
     double grace_s = 30.0;              // interactive: frozen longer than this => auto-despawn
     double strict_timeout_s = 10.0;     // strict: barrier stalled longer => abort with report
     std::string spawn_binary;           // arducopter for POST /vehicles {"launch_process":true}
@@ -226,6 +237,15 @@ Options parse_args(int argc, char **argv) {
         } else if (std::strcmp(argv[i], "--still-threads") == 0) {
             o.still_threads =
                 static_cast<int>(whole_number(need_value("--still-threads"), "--still-threads", 1, 64));
+        } else if (std::strcmp(argv[i], "--rtsp-port") == 0) {
+            o.rtsp_port = static_cast<int>(whole_number(need_value("--rtsp-port"), "--rtsp-port", 0, 65535));
+        } else if (std::strcmp(argv[i], "--rtsp-bind") == 0) {
+            o.rtsp_bind = need_value("--rtsp-bind");
+        } else if (std::strcmp(argv[i], "--video-threads") == 0) {
+            o.video_threads =
+                static_cast<int>(whole_number(need_value("--video-threads"), "--video-threads", 0, 16));
+        } else if (std::strcmp(argv[i], "--camera-mjpeg") == 0) {
+            o.camera_mjpeg = whole_number(need_value("--camera-mjpeg"), "--camera-mjpeg", 0, 1) == 1;
         } else if (std::strcmp(argv[i], "--frame-grace") == 0) {
             o.frame_grace = std::atof(need_value("--frame-grace"));
         } else if (std::strcmp(argv[i], "--straggler-timeout") == 0) {
@@ -740,11 +760,37 @@ struct App {
     std::vector<skysim::api::VehicleInfo> vehicle_snapshot;
     skysim::api::MetricsInfo metrics_snapshot;
 
+    // The camera's H.264/RTSP streams. Declared before render_service so it is destroyed after
+    // it: the render thread hands it pictures until it stops. ~App stops it first, because its
+    // threads call back into render_service (through render_ptr).
+    std::unique_ptr<skysim::video::VideoService> video_service;
+    std::atomic<skysim::render::RenderService *> render_ptr{nullptr};
+
     // Camera feed. Rendered on this thread because raycasting a stepping world
     // is not safe; published for the HTTP thread exactly like the snapshots above.
     std::unique_ptr<skysim::render::RenderService> render_service;
     // Survey stills, rendered on HTTP request from the same snapshot /vehicles serves.
     std::unique_ptr<skysim::render::StillService> still_service;
+
+    ~App() {
+        if (video_service) {
+            video_service->stop();
+        }
+    }
+    App() = default;
+    App(const App &) = delete;
+    App &operator=(const App &) = delete;
+
+    // The vehicle id now at an ArduPilot instance, 0 when none (any thread).
+    uint32_t vehicle_at(int instance) {
+        std::lock_guard<std::mutex> lock(snapshot_mutex);
+        for (const auto &v : vehicle_snapshot) {
+            if (v.instance == instance) {
+                return v.id;
+            }
+        }
+        return 0;
+    }
 
     std::unique_ptr<VehicleSlot> make_slot(int instance) {
         auto slot = std::make_unique<VehicleSlot>(instance);
@@ -1291,11 +1337,54 @@ int main(int argc, char **argv) {
         // A line every ten seconds while frames are being drawn — achieved fps against the
         // target, and what a frame costs — so a laggy stream is diagnosable from the log.
         rcfg.log_every_s = 10.0;
+
+        // H.264 over RTSP, built before the renderer that feeds it. Its hooks reach the renderer
+        // through render_ptr, which is null until the renderer exists: a session that starts
+        // playing in between just waits for the next refresh.
+        if (opt.rtsp_port > 0 && opt.api_port > 0 && !opt.canned && !replaying) {
+            skysim::video::VideoService::Config vcfg;
+            vcfg.width = opt.camera_width;
+            vcfg.height = opt.camera_height;
+            vcfg.max_fps = opt.camera_fps;
+            vcfg.defaults.fps = opt.camera_fps;
+            vcfg.threads = opt.video_threads > 0 ? opt.video_threads : std::clamp((cpus + 3) / 4, 1, 4);
+            vcfg.rtsp.bind = opt.rtsp_bind.empty() ? opt.api_bind : opt.rtsp_bind;
+            vcfg.rtsp.port = opt.rtsp_port;
+            skysim::video::VideoService::Hooks vhooks;
+            vhooks.resolve = [&app](int instance) { return app.vehicle_at(instance); };
+            vhooks.want_frames = [&app](uint32_t id) {
+                if (auto *r = app.render_ptr.load()) {
+                    r->want_video(id);
+                }
+            };
+            try {
+                app.video_service = std::make_unique<skysim::video::VideoService>(vcfg, std::move(vhooks));
+            } catch (const std::exception &e) {
+                std::fprintf(stderr, "skysim: %s (--rtsp-port 0 turns RTSP off)\n", e.what());
+                return 1;
+            }
+            rcfg.video_sink =
+                [v = app.video_service.get()](uint32_t id, std::shared_ptr<const skysim::render::Image> image,
+                                              double sim_time_s, std::chrono::steady_clock::time_point at) {
+                    v->on_frame(id, std::move(image), sim_time_s, at);
+                };
+        }
         app.render_service = std::make_unique<skysim::render::RenderService>(rcfg);
+        app.render_ptr.store(app.render_service.get());
         std::printf("skysim: camera %dx%d @ %.1f fps on %d render thread(s) (%s; %d CPU(s) available), "
                     "drawn only while somebody is watching\n",
                     opt.camera_width, opt.camera_height, opt.camera_fps, app.render_service->threads(),
                     opt.camera_threads > 0 ? "--camera-threads" : "default", cpus);
+        if (app.video_service) {
+            const auto defaults = skysim::video::apply_patch({}, {}, opt.camera_fps);
+            std::printf("skysim: camera H.264 (constrained baseline) on rtsp://%s:%d/instances/<n>/main.264, "
+                        "%d kbps, %.0f fps, keyframe every %.1f s, %d encoder thread(s), encoded only while "
+                        "somebody plays it%s\n",
+                        (opt.rtsp_bind.empty() ? opt.api_bind : opt.rtsp_bind).c_str(),
+                        app.video_service->port(), defaults.bitrate_kbps, opt.camera_fps,
+                        defaults.keyframe_interval_s, app.video_service->stats().threads,
+                        opt.camera_mjpeg ? "; camera.mjpg too" : "; camera.mjpg off");
+        }
     }
 
     if (stills_on) {
@@ -1387,8 +1476,46 @@ int main(int argc, char **argv) {
                 m.camera.frames_drawn = s.frames_drawn;
                 m.camera.frames_reused = s.frames_reused;
             }
+            if (app.video_service) {
+                const auto v = app.video_service->stats();
+                m.video.enabled = true;
+                m.video.rtsp_port = v.port;
+                m.video.streams = v.streams;
+                m.video.clients = v.clients;
+                m.video.threads = v.threads;
+                m.video.encode_ms = v.encode_ms;
+                m.video.frames_encoded = v.frames_encoded;
+                m.video.frames_dropped = v.frames_dropped + v.rtsp.frames_dropped;
+                m.video.keyframes = v.keyframes;
+                m.video.bytes_sent = v.rtsp.bytes_sent;
+            }
             return m;
         };
+        snaps.mjpeg = opt.camera_mjpeg;
+        if (app.video_service) {
+            snaps.camera_encoder = [&app](const skysim::api::VehicleInfo &v,
+                                          const skysim::api::EncoderPatch *patch) {
+                skysim::video::EncoderPatch p;
+                if (patch != nullptr) {
+                    p.bitrate_kbps = patch->bitrate_kbps;
+                    p.fps = patch->fps;
+                    p.keyframe_interval_s = patch->keyframe_interval_s;
+                }
+                const auto st = app.video_service->encoder(v.instance, v.id, patch != nullptr ? &p : nullptr);
+                skysim::api::EncoderState out;
+                out.bitrate_kbps = st.settings.bitrate_kbps;
+                out.fps = st.settings.fps;
+                out.keyframe_interval_s = st.settings.keyframe_interval_s;
+                out.width = st.width;
+                out.height = st.height;
+                out.max_fps = st.max_fps;
+                out.clients = st.clients;
+                return out;
+            };
+            snaps.camera_keyframe = [&app](const skysim::api::VehicleInfo &v) {
+                return app.video_service->request_keyframe(v.instance, v.id);
+            };
+        }
         // Asking is what gets a vehicle drawn: RenderService::frame puts it on the draw list.
         snaps.camera_frame = [&app](uint32_t id, uint64_t after_seq, std::chrono::milliseconds wait) {
             return app.render_service ? app.render_service->frame(id, after_seq, wait)
@@ -1434,6 +1561,9 @@ int main(int argc, char **argv) {
     }
 
     api.reset(); // stop HTTP thread before tearing down the fleet it reads
+    if (app.video_service) {
+        app.video_service->stop(); // its threads read the snapshot and call the renderer
+    }
     if (truth_log != nullptr) {
         std::fclose(truth_log);
     }

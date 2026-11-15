@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
-project(skysim LANGUAGES CXX)
+# C only for the x264 build below (its configure needs a C compiler); skysim itself is C++.
+project(skysim LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -44,6 +45,114 @@ FetchContent_MakeAvailable(stb)
 add_library(stb_image_write INTERFACE)
 target_include_directories(stb_image_write SYSTEM INTERFACE ${stb_SOURCE_DIR})
 
+# --- x264 (H.264 encoder for the RTSP camera, TASK-2561) -------------------------------------
+# Built from a pinned upstream commit into a static library linked into skysim, so the runtime
+# image needs no codec package. Constrained Baseline at a pilot camera's sizes needs nothing
+# but libx264 itself: no ffmpeg, no GStreamer. GPL-2.0-or-later, compatible with skysim's GPL-3.0.
+# Its x86 assembly (several times faster) needs nasm >= 2.13; without one it is built in plain C
+# with a warning — fine for tests, not for a deployment (the Dockerfile installs nasm).
+include(ExternalProject)
+include(ProcessorCount)
+set(SKYSIM_X264_COMMIT b35605ace3ddf7c1a5d67a2eb553f034aef41d55) # stable, 2025-06-08, X264_BUILD 165
+set(SKYSIM_X264_ASM AUTO CACHE STRING "x264 assembly: AUTO (when nasm is found), ON (require nasm), OFF")
+set_property(CACHE SKYSIM_X264_ASM PROPERTY STRINGS AUTO ON OFF)
+if(DEFINED ENV{CMAKE_BUILD_PARALLEL_LEVEL})
+    set(_x264_jobs_default $ENV{CMAKE_BUILD_PARALLEL_LEVEL})
+else()
+    ProcessorCount(_x264_jobs_default)
+    if(_x264_jobs_default EQUAL 0)
+        set(_x264_jobs_default 1)
+    endif()
+endif()
+set(SKYSIM_X264_JOBS ${_x264_jobs_default} CACHE STRING "make -j for the x264 build")
+# nasm is x264's assembler on x86 only. On ARM64 its assembly goes through the C compiler, and
+# handing it nasm as AS would make its configure fail, so there nothing is overridden.
+set(_x264_env CC=${CMAKE_C_COMPILER})
+set(_x264_asm_flags "")
+if(SKYSIM_X264_ASM STREQUAL "OFF")
+    set(_x264_asm_flags --disable-asm)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|i[3-6]86|x86)$")
+    find_program(SKYSIM_NASM nasm)
+    if(SKYSIM_NASM)
+        # x264's configure refuses anything older than 2.13 outright; treat that like no nasm.
+        execute_process(COMMAND ${SKYSIM_NASM} -v OUTPUT_VARIABLE _nasm_v ERROR_QUIET)
+        string(REGEX MATCH "version ([0-9]+\\.[0-9]+)" _nasm_match "${_nasm_v}")
+        if(NOT CMAKE_MATCH_1 OR CMAKE_MATCH_1 VERSION_LESS 2.13)
+            message(STATUS "skysim: ${SKYSIM_NASM} is not nasm >= 2.13 ('${_nasm_v}'), not using it for x264")
+            set(SKYSIM_NASM "")
+        endif()
+    endif()
+    if(SKYSIM_NASM)
+        list(APPEND _x264_env AS=${SKYSIM_NASM})
+    elseif(SKYSIM_X264_ASM STREQUAL "ON")
+        message(FATAL_ERROR "SKYSIM_X264_ASM=ON but nasm >= 2.13 was not found")
+    else()
+        message(WARNING "nasm not found: x264 is built without assembly, several times slower. Install "
+                        "nasm for a deployment build (or pass -DSKYSIM_X264_ASM=OFF to silence this).")
+        set(_x264_asm_flags --disable-asm)
+    endif()
+endif()
+set(SKYSIM_X264_PREFIX ${CMAKE_BINARY_DIR}/x264)
+file(MAKE_DIRECTORY ${SKYSIM_X264_PREFIX}/include)
+ExternalProject_Add(x264_build
+    GIT_REPOSITORY    https://code.videolan.org/videolan/x264.git
+    GIT_TAG           ${SKYSIM_X264_COMMIT}
+    GIT_SHALLOW       OFF
+    UPDATE_DISCONNECTED ON
+    PREFIX            ${CMAKE_BINARY_DIR}/x264-build
+    CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ${_x264_env}
+                      <SOURCE_DIR>/configure --prefix=${SKYSIM_X264_PREFIX} --enable-static --enable-pic
+                      --disable-cli --disable-opencl --disable-avs --disable-swscale --disable-lavf
+                      --disable-ffms --disable-gpac --disable-lsmash --bit-depth=8 --chroma-format=420
+                      ${_x264_asm_flags}
+    BUILD_COMMAND     make -j${SKYSIM_X264_JOBS}
+    INSTALL_COMMAND   make install-lib-static
+    BUILD_IN_SOURCE   ON
+    BUILD_BYPRODUCTS  ${SKYSIM_X264_PREFIX}/lib/libx264.a
+    LOG_CONFIGURE     ON
+    LOG_BUILD         ON
+    LOG_INSTALL       ON
+    LOG_OUTPUT_ON_FAILURE ON
+)
+add_library(skysim_x264 STATIC IMPORTED GLOBAL)
+set_target_properties(skysim_x264 PROPERTIES
+    IMPORTED_LOCATION ${SKYSIM_X264_PREFIX}/lib/libx264.a
+    INTERFACE_INCLUDE_DIRECTORIES ${SKYSIM_X264_PREFIX}/include)
+find_package(Threads REQUIRED)
+target_link_libraries(skysim_x264 INTERFACE Threads::Threads m ${CMAKE_DL_LIBS})
+add_dependencies(skysim_x264 x264_build)
+
+# --- link-time optimisation for skysim's own targets ------------------------------------------
+# Only for targets whose results do not depend on how floating point is contracted across
+# translation units: on ARM64, GCC's default -ffp-contract=fast can fuse a multiply-add that
+# inlining across files exposes, and the physics (core, vehicle) and radio model (whose test
+# vector is a cross-repo contract) must give the same numbers with or without LTO. Off for
+# Debug and coverage builds, where it only costs link time. GCC only (the Dockerfile's
+# compiler): GCC's linker plugin links LTO objects into any executable, while with Clang every
+# test linking one of these libraries would need the LLVM gold plugin as well.
+option(SKYSIM_IPO "Link-time optimisation for skysim's non-numeric targets (Release/RelWithDebInfo)" ON)
+set(SKYSIM_IPO_ACTIVE OFF)
+if(SKYSIM_IPO AND NOT SKYSIM_COVERAGE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+   AND CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_why LANGUAGES CXX)
+    if(_ipo_ok)
+        set(SKYSIM_IPO_ACTIVE ON)
+        # GCC's -flto=auto runs one LTRANS job per CPU at link time, whatever parallelism the
+        # build was given; keep the link to CMAKE_BUILD_PARALLEL_LEVEL when that is set.
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND "$ENV{CMAKE_BUILD_PARALLEL_LEVEL}" MATCHES "^[0-9]+$")
+            set(CMAKE_CXX_COMPILE_OPTIONS_IPO -flto=$ENV{CMAKE_BUILD_PARALLEL_LEVEL} -fno-fat-lto-objects)
+        endif()
+    else()
+        message(STATUS "skysim: no IPO/LTO (${_ipo_why})")
+    endif()
+endif()
+function(skysim_ipo)
+    if(SKYSIM_IPO_ACTIVE)
+        set_target_properties(${ARGN} PROPERTIES INTERPROCEDURAL_OPTIMIZATION ON)
+    endif()
+endfunction()
+
 # --- coverage instrumentation (our targets only; third-party stays clean) --------------------
 # Everything declared after this point picks up --coverage; Jolt/httplib are declared above.
 option(SKYSIM_COVERAGE "Instrument skysim targets for gcov/gcovr" OFF)
@@ -53,7 +162,6 @@ if(SKYSIM_COVERAGE)
 endif()
 
 # --- protocol (no Jolt dependency; shared by server and tests) -------------------------------
-find_package(Threads REQUIRED)
 add_library(skysim_protocol STATIC
     src/protocol/packets.cpp
     src/protocol/udp_endpoint.cpp
@@ -114,11 +222,25 @@ target_include_directories(skysim_terrain PUBLIC src)
 target_link_libraries(skysim_terrain PRIVATE Jolt)
 target_compile_options(skysim_terrain PRIVATE -Wall -Wextra -Wshadow)
 
+# --- video: the camera as H.264 over RTSP (TASK-2561) ------------------------------------------
+add_library(skysim_video STATIC
+    src/video/h264.cpp
+    src/video/h264_encoder.cpp
+    src/video/rtp_h264.cpp
+    src/video/rtsp_server.cpp
+    src/video/video_service.cpp
+)
+target_include_directories(skysim_video PUBLIC src)
+target_link_libraries(skysim_video PUBLIC skysim_render Threads::Threads PRIVATE skysim_x264)
+target_compile_options(skysim_video PRIVATE -Wall -Wextra -Wshadow)
+
 # --- skysim server --------------------------------------------------------------------------
 add_executable(skysim src/main.cpp)
 target_include_directories(skysim PRIVATE src)
-target_link_libraries(skysim PRIVATE skysim_protocol skysim_core skysim_vehicle skysim_api skysim_terrain skysim_render)
+target_link_libraries(skysim PRIVATE skysim_protocol skysim_core skysim_vehicle skysim_api skysim_terrain skysim_render
+                                     skysim_video)
 target_compile_options(skysim PRIVATE -Wall -Wextra -Wshadow)
+skysim_ipo(skysim skysim_protocol skysim_api skysim_video)
 
 # --- world-step benchmark (performance) ------------------------------------------------------
 add_executable(world_bench tools/bench/world_bench.cpp)
@@ -221,6 +343,16 @@ target_compile_definitions(test_radio_api PRIVATE SKYSIM_SOURCE_DIR="${CMAKE_SOU
 target_compile_options(test_radio_api PRIVATE -Wall -Wextra -Wshadow)
 add_test(NAME radio_api COMMAND test_radio_api)
 
+add_executable(test_video tests/test_video.cpp)
+target_link_libraries(test_video PRIVATE skysim_video skysim_render)
+target_compile_options(test_video PRIVATE -Wall -Wextra -Wshadow)
+add_test(NAME video COMMAND test_video)
+
+add_executable(test_video_api tests/test_video_api.cpp)
+target_link_libraries(test_video_api PRIVATE skysim_api skysim_video httplib::httplib)
+target_compile_options(test_video_api PRIVATE -Wall -Wextra -Wshadow)
+add_test(NAME video_api COMMAND test_video_api)
+
 add_executable(test_thread_pool tests/test_thread_pool.cpp)
 target_include_directories(test_thread_pool PRIVATE src)
 target_link_libraries(test_thread_pool PRIVATE Threads::Threads)
@@ -239,6 +371,7 @@ add_test(NAME streamer COMMAND test_streamer)
 
 set_tests_properties(
     packets json frames quad world collision endpoint manager api radio radio_api thread_pool streamer still cpus
+    video video_api
     PROPERTIES LABELS "unit"
 )
 
@@ -257,7 +390,12 @@ if(Python3_FOUND)
     add_test(NAME survey_fixture
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/survey_fixture_smoke.py
                      $<TARGET_FILE:survey_still> $<TARGET_FILE:tile_cooker>)
-    set_tests_properties(app_smoke app_churn survey_fixture PROPERTIES
+    # The camera as H.264 over RTSP, pulled with ffprobe (TASK-2561): two vehicles, both
+    # transports, codec, profile, frame rate and keyframe interval. Skipped (77) without ffprobe.
+    add_test(NAME rtsp_smoke
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/rtsp_smoke.py $<TARGET_FILE:skysim>)
+    set_tests_properties(rtsp_smoke PROPERTIES SKIP_RETURN_CODE 77)
+    set_tests_properties(app_smoke app_churn survey_fixture rtsp_smoke PROPERTIES
         LABELS "happy-path"
         TIMEOUT 180
         RUN_SERIAL TRUE

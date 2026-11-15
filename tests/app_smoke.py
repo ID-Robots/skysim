@@ -231,7 +231,8 @@ def case_camera_idle(tmp: str) -> None:
     with open(out_path, "w") as out:
         proc = subprocess.Popen([SIM, "--vehicles", "1", "--base-instance", "98", "--time-mode", "interactive",
                                  "--dt", "0.0025", "--api-port", str(port), "--camera-fps", "15",
-                                 "--camera-size", "640x360"], stdout=out, stderr=subprocess.STDOUT)
+                                 "--camera-size", "640x360", "--rtsp-port", "18666"],
+                                stdout=out, stderr=subprocess.STDOUT)
     try:
         deadline = time.time() + 10
         metrics = None
@@ -247,7 +248,7 @@ def case_camera_idle(tmp: str) -> None:
         time.sleep(3.0)
         idle_pct = 100.0 * (process_cpu_s(proc.pid) - cpu0) / (time.monotonic() - wall0)
         print(f"app_smoke: idle camera server with one unwatched vehicle: {idle_pct:.1f}% of a core")
-        check(idle_pct < 25.0, f"idle camera server near idle ({idle_pct:.1f}% of a core)")
+        check(idle_pct < 25.0, f"idle camera server near idle ({idle_pct:.1f}% of a core), RTSP listening")
         camera = api(port, "GET", "/metrics")["camera"]
         check(camera["frames_drawn"] == 0 and camera["watched"] == 0, "nothing drawn while nobody watches")
         check(1 <= camera["threads"] <= len(os.sched_getaffinity(0)), "render threads within the CPUs")

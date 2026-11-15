@@ -121,7 +121,11 @@ core. Beyond that, shard. Re-measure with `world_bench` / `proto_bench` before t
 Two cameras draw the same static world, off the tick thread:
 
 - **Pilot camera** (`--camera-fps`, `RenderService`): a small frame (256x144) per vehicle at a
-  fixed rate on its own thread and pool, served as `camera.jpg` / `camera.mjpg`. Drawn on
+  fixed rate on its own thread and pool, served as `camera.jpg` / `camera.mjpg`, and as H.264
+  over RTSP (`video/VideoService`, TASK-2561): the render thread hands a picture to a stream's
+  one-slot mailbox (latest wins), encoder workers at nice +10 encode it with x264, and one
+  poll() thread sends RTP to every receiver with a bounded backlog each — so a slow encoder or
+  receiver drops frames and nothing upstream waits. Drawn on
   demand: a vehicle is on the draw list only while somebody has asked for its picture within
   the last 3 s (an open MJPEG stream asks continuously, each `camera.jpg` once), and with
   nobody asking the render thread waits on a condition variable, not a timer. A vehicle whose

@@ -9,6 +9,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -58,6 +59,39 @@ struct CameraMetrics {
     uint64_t frames_reused = 0;
 };
 
+// The pilot camera's H.264/RTSP streams (TASK-2561; video/video_service.h), so their cost and
+// health can be read off /metrics. Null there when RTSP video is off.
+struct VideoMetrics {
+    bool enabled = false;
+    int rtsp_port = 0;
+    size_t streams = 0; // instances being played
+    size_t clients = 0; // RTSP sessions playing them
+    int threads = 0;    // encoder workers
+    double encode_ms = 0.0;
+    uint64_t frames_encoded = 0;
+    uint64_t frames_dropped = 0; // pictures an encoder or a receiver could not take in time
+    uint64_t keyframes = 0;
+    uint64_t bytes_sent = 0; // RTP + RTCP to every receiver
+};
+
+// GET/POST /instances/<n>/camera/encoder: what a POST may change (absent fields keep their
+// value) and what both answer with — the applied values, after clamping.
+struct EncoderPatch {
+    std::optional<double> bitrate_kbps;
+    std::optional<double> fps;
+    std::optional<double> keyframe_interval_s;
+};
+
+struct EncoderState {
+    int bitrate_kbps = 0;
+    double fps = 0.0;
+    double keyframe_interval_s = 0.0;
+    int width = 0; // the stream's picture size (the camera's, rounded down to even)
+    int height = 0;
+    double max_fps = 0.0; // the ceiling fps is clamped to: the camera's render rate
+    size_t clients = 0;   // RTSP sessions playing the stream now
+};
+
 struct MetricsInfo {
     double tick_p50_us = 0.0;
     double tick_p99_us = 0.0;
@@ -68,6 +102,7 @@ struct MetricsInfo {
     size_t vehicles = 0;
     size_t resident_tiles = 0; // streamed-in city tiles (M5 memory bound observable)
     CameraMetrics camera;
+    VideoMetrics video;
 };
 
 struct SpawnCommand {
@@ -146,6 +181,15 @@ class ControlServer {
         // it must not touch world state (it gets everything it needs in the VehicleInfo).
         std::function<skysim::render::StillFrame(const VehicleInfo &, const skysim::render::StillRequest &)>
             still;
+        // The H.264 encoder behind an instance's RTSP stream (TASK-2561): its settings, or — with
+        // a patch — the settings after applying it, clamped. Null when RTSP video is off, and the
+        // encoder and keyframe routes answer 404.
+        std::function<EncoderState(const VehicleInfo &, const EncoderPatch *patch)> camera_encoder;
+        // Makes the stream's next frame an IDR; returns the sessions playing it.
+        std::function<size_t(const VehicleInfo &)> camera_keyframe;
+        // Serve the camera.mjpg routes. On by default so SITL images keep streaming MJPEG until
+        // every consumer reads RTSP; off (--camera-mjpeg 0), they answer 404 naming the RTSP URL.
+        bool mjpeg = true;
     };
 
     // The simulated radio field behind /radio (docs/RADIO.md). It is not world state — no
