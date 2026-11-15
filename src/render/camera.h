@@ -47,23 +47,24 @@ class Camera {
 
     // On a self-stabilising gimbal (TASK-2548): the airframe's heading plus the gimbal's yaw,
     // the gimbal's earth-frame pitch, no roll — the airframe's lean does not reach the camera.
+    // Radians.
     static Camera on_gimbal(const CameraConfig &cfg, const Vec3 &position_ned, const Quat &quat_ned_frd,
-                            double yaw_rel_deg, double pitch_deg) {
-        return with_attitude(cfg, position_ned, stabilised(quat_ned_frd, yaw_rel_deg, pitch_deg));
+                            double yaw_rel_rad, double pitch_rad) {
+        return with_attitude(cfg, position_ned, stabilised(quat_ned_frd, yaw_rel_rad, pitch_rad));
     }
 
-    // Heading of an airframe attitude, degrees clockwise from north.
-    static double heading_deg(const Quat &quat_ned_frd) {
+    // Heading of an airframe attitude, radians clockwise from north.
+    static double heading_rad(const Quat &quat_ned_frd) {
         const Quat q = core::quat_normalize(quat_ned_frd);
-        return std::atan2(2.0 * (q[0] * q[3] + q[1] * q[2]), 1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3])) *
-               180.0 / M_PI;
+        return std::atan2(2.0 * (q[0] * q[3] + q[1] * q[2]), 1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]));
     }
 
-    // Yaw about down, then pitch about the resulting right axis, in NED.
-    static Quat stabilised(const Quat &quat_ned_frd, double yaw_rel_deg, double pitch_deg) {
-        const double yaw_half = (heading_deg(quat_ned_frd) + yaw_rel_deg) * M_PI / 360.0;
+    // Yaw about down, then pitch about the resulting right axis, in NED. Radians.
+    static Quat stabilised(const Quat &quat_ned_frd, double yaw_rel_rad, double pitch_rad) {
+        const double yaw_half = (heading_rad(quat_ned_frd) + yaw_rel_rad) * 0.5;
         const Quat yaw{std::cos(yaw_half), 0.0, 0.0, std::sin(yaw_half)};
-        return core::quat_multiply(yaw, mount_pitch(pitch_deg));
+        const Quat pitch{std::cos(pitch_rad * 0.5), 0.0, std::sin(pitch_rad * 0.5), 0.0};
+        return core::quat_multiply(yaw, pitch);
     }
 
     const CameraConfig &config() const { return cfg_; }

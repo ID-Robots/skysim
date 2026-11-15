@@ -64,7 +64,7 @@ void RenderService::run() {
             }
             const Camera camera = pose.gimbal
                                       ? Camera::on_gimbal(cfg_.camera, pose.position_ned, pose.quat_ned_frd,
-                                                          pose.gimbal_yaw_deg, pose.gimbal_pitch_deg)
+                                                          pose.gimbal_yaw_rad, pose.gimbal_pitch_rad)
                                       : Camera(cfg_.camera, pose.position_ned, pose.quat_ned_frd);
             const Image image = rasterizer_->render(*scene_, camera, pool_.get());
             auto jpeg = encode_jpeg(image, cfg_.quality);

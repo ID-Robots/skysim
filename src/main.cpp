@@ -881,8 +881,8 @@ struct App {
                                                      now};
             const auto g = gimbal_of(*v);
             pose.gimbal = g.present;
-            pose.gimbal_pitch_deg = g.pitch_deg;
-            pose.gimbal_yaw_deg = g.yaw_deg;
+            pose.gimbal_pitch_rad = g.pitch_rad;
+            pose.gimbal_yaw_rad = g.yaw_rad;
             poses.push_back(pose);
         }
         render_service->publish_poses(std::move(poses));
@@ -927,8 +927,8 @@ struct App {
             info.sim_time_s = world ? world->now() : 0.0;
             const auto g = gimbal_of(*v);
             info.gimbal = g.present;
-            info.gimbal_pitch_deg = g.pitch_deg;
-            info.gimbal_yaw_deg = g.yaw_deg;
+            info.gimbal_pitch_rad = g.pitch_rad;
+            info.gimbal_yaw_rad = g.yaw_rad;
             infos.push_back(info);
         }
         skysim::api::MetricsInfo m;
@@ -1379,8 +1379,8 @@ int main(int argc, char **argv) {
                                      v.quat_ned_frd[3]};
                 pose.sim_time_s = v.sim_time_s;
                 pose.gimbal = v.gimbal;
-                pose.gimbal_pitch_deg = v.gimbal_pitch_deg;
-                pose.gimbal_yaw_deg = v.gimbal_yaw_deg;
+                pose.gimbal_pitch_rad = v.gimbal_pitch_rad;
+                pose.gimbal_yaw_rad = v.gimbal_yaw_rad;
                 return app.still_service->render(pose, r);
             };
         }

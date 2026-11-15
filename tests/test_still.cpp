@@ -455,20 +455,27 @@ void test_gimbal() {
     for (int k = 0; k < 4; ++k) {
         pwm[static_cast<size_t>(k)] = 1500; // motors
     }
+    const double deg = M_PI / 180.0;
     // No pulse on output 10: no gimbal, whatever else the vehicle drives.
+    CHECK(!gimbal_from_servos(cfg, pwm, 16).present);
+    // Nor an output idling below the servo range, as some builds leave an output with no
+    // function (ArduCopter 4.8 SITL sends 0 there).
+    pwm[9] = 1000;
     CHECK(!gimbal_from_servos(cfg, pwm, 16).present);
     // Measured on ArduCopter 4.8 SITL: DO_MOUNT_CONTROL -60 puts output 10 at 1318 us, yaw 0 at 1500.
     pwm[9] = 1318;
     pwm[10] = 1500;
     auto g = gimbal_from_servos(cfg, pwm, 16);
-    CHECK(g.present && std::fabs(g.pitch_deg + 60.0) < 0.1 && std::fabs(g.yaw_deg) < 1e-9);
+    CHECK(g.present && std::fabs(g.pitch_rad + 60.0 * deg) < 0.1 * deg && std::fabs(g.yaw_rad) < 1e-9);
     pwm[9] = 1100;
     pwm[10] = 1900;
     g = gimbal_from_servos(cfg, pwm, 16);
-    CHECK(g.present && g.pitch_deg == -90.0 && g.yaw_deg == 180.0);
-    // A pulse past the end stops at the end of the range.
+    CHECK(g.present && std::fabs(g.pitch_rad + M_PI / 2.0) < 1e-12 && std::fabs(g.yaw_rad - M_PI) < 1e-12);
+    // A pulse just past the end stops at the end of the range; one far past it is no mount's.
+    pwm[9] = 1940;
+    CHECK(std::fabs(gimbal_from_servos(cfg, pwm, 16).pitch_rad - 20.0 * deg) < 1e-12);
     pwm[9] = 2000;
-    CHECK(gimbal_from_servos(cfg, pwm, 16).pitch_deg == 20.0);
+    CHECK(!gimbal_from_servos(cfg, pwm, 16).present);
     // Outputs the frame does not carry, a disabled channel, and no yaw axis.
     CHECK(!gimbal_from_servos(cfg, pwm, 8).present);
     GimbalConfig off = cfg;
@@ -478,15 +485,15 @@ void test_gimbal() {
     no_yaw.yaw_channel = 0;
     pwm[9] = 1318;
     g = gimbal_from_servos(no_yaw, pwm, 16);
-    CHECK(g.present && g.yaw_deg == 0.0);
+    CHECK(g.present && g.yaw_rad == 0.0);
 
     // A still asked to follow the gimbal is drawn at the gimbal's pitch and yaw, stabilised;
     // one not asked, or on a vehicle without a gimbal, as asked.
     render::StillPose pose;
     pose.quat_ned_frd = attitude(90.0, -12.0, 8.0);
     pose.gimbal = true;
-    pose.gimbal_pitch_deg = -60.0;
-    pose.gimbal_yaw_deg = 0.0;
+    pose.gimbal_pitch_rad = -60.0 * deg;
+    pose.gimbal_yaw_rad = 0.0;
     StillRequest asked;
     asked.pitch_deg = -90.0;
     asked.roll_stab = false;
@@ -505,7 +512,8 @@ void test_gimbal() {
     // The pilot camera on the gimbal looks along the heading at the gimbal's pitch, the
     // airframe's lean taken out: heading 90 (east), -60 -> forward (0, cos 60, sin 60) in NED.
     render::CameraConfig cam;
-    const auto on = render::Camera::on_gimbal(cam, {0.0, 0.0, -60.0}, attitude(90.0, -12.0, 8.0), 0.0, -60.0);
+    const auto on =
+        render::Camera::on_gimbal(cam, {0.0, 0.0, -60.0}, attitude(90.0, -12.0, 8.0), 0.0, -60.0 * deg);
     CHECK(std::fabs(on.forward()[0]) < 1e-9 && std::fabs(on.forward()[1] - 0.5) < 1e-9 &&
           std::fabs(on.forward()[2] - std::sqrt(3.0) / 2.0) < 1e-9);
     CHECK(std::fabs(on.right()[2]) < 1e-9); // no roll
@@ -863,8 +871,8 @@ void test_http(const std::shared_ptr<const render::RasterScene> &scene) {
     v.sim_time_s = 12.3456789;
     // Its gimbal at the -60 degrees a 3D mapping survey points it to, looking 20 degrees right.
     v.gimbal = true;
-    v.gimbal_pitch_deg = -60.0;
-    v.gimbal_yaw_deg = 20.0;
+    v.gimbal_pitch_rad = -60.0 * M_PI / 180.0;
+    v.gimbal_yaw_rad = 20.0 * M_PI / 180.0;
 
     CommandQueue queue;
     ControlServer::Snapshots snaps;
@@ -879,8 +887,8 @@ void test_http(const std::shared_ptr<const render::RasterScene> &scene) {
                              info.quat_ned_frd[3]};
         pose.sim_time_s = info.sim_time_s;
         pose.gimbal = info.gimbal;
-        pose.gimbal_pitch_deg = info.gimbal_pitch_deg;
-        pose.gimbal_yaw_deg = info.gimbal_yaw_deg;
+        pose.gimbal_pitch_rad = info.gimbal_pitch_rad;
+        pose.gimbal_yaw_rad = info.gimbal_yaw_rad;
         return service.render(pose, r);
     };
     ControlServer::RadioConfig radio;

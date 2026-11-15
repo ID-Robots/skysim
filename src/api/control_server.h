@@ -38,8 +38,8 @@ struct VehicleInfo {
     double sim_time_s = 0.0;
     // Its gimbal as the same tick's servo frame drove it (TASK-2548; vehicle/gimbal.h).
     bool gimbal = false;
-    double gimbal_pitch_deg = 0.0;
-    double gimbal_yaw_deg = 0.0;
+    double gimbal_pitch_rad = 0.0;
+    double gimbal_yaw_rad = 0.0;
 };
 
 struct MetricsInfo {

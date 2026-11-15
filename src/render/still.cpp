@@ -90,8 +90,9 @@ StillRequest gimbal_still_request(const StillPose &pose, const StillRequest &req
         return req;
     }
     StillRequest drawn = req;
-    drawn.pitch_deg = pose.gimbal_pitch_deg;
-    drawn.yaw_deg = pose.gimbal_yaw_deg;
+    // StillRequest is the HTTP query's, in degrees: convert at that boundary.
+    drawn.pitch_deg = pose.gimbal_pitch_rad * kRadToDeg;
+    drawn.yaw_deg = pose.gimbal_yaw_rad * kRadToDeg;
     drawn.roll_stab = true;
     return drawn;
 }

@@ -80,8 +80,8 @@ struct StillPose {
     // The vehicle's gimbal in the same tick (vehicle/gimbal.h): earth-frame pitch, yaw
     // relative to the heading. Absent on a vehicle that drives none.
     bool gimbal{false};
-    double gimbal_pitch_deg{0.0};
-    double gimbal_yaw_deg{0.0};
+    double gimbal_pitch_rad{0.0};
+    double gimbal_yaw_rad{0.0};
 };
 
 // Camera axes as NED Euler angles (Z-Y-X), degrees: yaw 0..360 clockwise from north, pitch
