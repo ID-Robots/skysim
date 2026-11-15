@@ -33,7 +33,10 @@ bool same_pose(const RenderService::Pose &a, const RenderService::Pose &b) {
             return false;
         }
     }
-    return true;
+    // A gimbal that moves while the vehicle holds still is a different picture (TASK-2548).
+    constexpr double kGimbalRad = 1e-9;
+    return a.gimbal == b.gimbal && std::fabs(a.gimbal_pitch_rad - b.gimbal_pitch_rad) <= kGimbalRad &&
+           std::fabs(a.gimbal_yaw_rad - b.gimbal_yaw_rad) <= kGimbalRad;
 }
 
 double ms_between(std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
@@ -352,7 +355,10 @@ void RenderService::run() {
                 continue;
             }
             const auto t0 = Clock::now();
-            const Camera camera(cfg_.camera, pose->position_ned, pose->quat_ned_frd);
+            const Camera camera = pose->gimbal
+                                      ? Camera::on_gimbal(cfg_.camera, pose->position_ned, pose->quat_ned_frd,
+                                                          pose->gimbal_yaw_rad, pose->gimbal_pitch_rad)
+                                      : Camera(cfg_.camera, pose->position_ned, pose->quat_ned_frd);
             const Image image = rasterizer_->render(*scene_, camera, pool_.get());
             const auto t1 = Clock::now();
             std::vector<uint8_t> jpeg = encode_jpeg(image, cfg_.quality);

@@ -84,6 +84,18 @@ Quat still_camera_attitude(const Quat &quat_ned_frd, const StillRequest &req, Ca
     return q;
 }
 
+Quat still_attitude(const StillPose &pose, const StillRequest &req, CameraAngles &angles, bool &followed) {
+    followed = req.follow_gimbal && pose.gimbal;
+    if (!followed) {
+        return still_camera_attitude(pose.quat_ned_frd, req, angles);
+    }
+    const Quat q = Camera::stabilised(pose.quat_ned_frd, pose.gimbal_yaw_rad, pose.gimbal_pitch_rad);
+    // Degrees only for the headers. No roll by construction: say exactly 0, not a rounding of it.
+    angles = angles_from_camera_quat(q);
+    angles.roll_deg = 0.0;
+    return q;
+}
+
 CameraConfig still_camera_config(const StillRequest &req) {
     CameraConfig cfg;
     cfg.width = req.width;
@@ -189,7 +201,9 @@ StillFrame StillService::render(Lease &lease, const StillPose &pose, const Still
         frame.status = StillFrame::Status::kInvalid;
         return frame;
     }
-    const Quat camera = still_camera_attitude(pose.quat_ned_frd, req, frame.camera);
+    // Validated as asked; drawn where the gimbal points when it was asked to follow one. The
+    // gimbal's own pitch is bounded by its range (vehicle/gimbal.h), not by the request's.
+    const Quat camera = still_attitude(pose, req, frame.camera, frame.gimbal);
     core::ThreadPool *pool = pools_[static_cast<size_t>(lease.slot())].get();
     try {
         const Image image =

@@ -55,7 +55,8 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   `GET /instances/<n>/still.jpg` (or `/vehicles/<id>/still.jpg`) renders one frame on demand
   from the vehicle's latest snapshot pose — independent of `SKYSIM_CAMERA_FPS`. Query (all
   optional): `w` 1600 (64..4096), `h` 1200 (64..4096), `hfov` 73.7 (10..120), `pitch` -90
-  (-90..0), `yaw` 0 (relative to heading, ±360), `roll_stab` 1 (0 = rigid mount), `range` 600
+  (-90..0), `yaw` 0 (relative to heading, ±360), `roll_stab` 1 (0 = rigid mount), `gimbal` 0
+  (1 = where the vehicle's gimbal points, TASK-2548), `range` 600
   (50..3000), `q` 90 (1..100). Response `image/jpeg` with `X-Skysim-Time-Usec`,
   `X-Skysim-Lat`, `X-Skysim-Lon`, `X-Skysim-Alt-Amsl`, `X-Skysim-Alt-Rel`, `X-Skysim-Yaw`,
   `X-Skysim-Pitch`, `X-Skysim-Roll` (camera axes, degrees) and `X-Skysim-Hfov` (also

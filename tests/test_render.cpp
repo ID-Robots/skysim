@@ -374,6 +374,17 @@ int main() {
         CHECK(busy.frames_reused >= 5);
         CHECK(busy.target_fps == 50.0 && busy.threads == 2);
 
+        // TASK-2548: the gimbal moving while the vehicle holds still is a new picture, drawn.
+        pose.gimbal = true;
+        pose.gimbal_pitch_rad = -60.0 * M_PI / 180.0;
+        service.publish_poses({pose});
+        auto tilted = service.frame(7, seq, 2000ms);
+        for (int i = 0; i < 10 && tilted.jpeg == next.jpeg; ++i) {
+            tilted = service.frame(7, tilted.seq, 2000ms); // the pass that read the old pose
+        }
+        CHECK(!tilted.jpeg.empty() && tilted.jpeg != next.jpeg);
+        CHECK(service.stats().frames_drawn > busy.frames_drawn);
+
         // A vehicle that is not in the fleet never gets a frame, so asking does not wait.
         const auto asked = Clock::now();
         CHECK(service.frame(99, 0, 2000ms).jpeg.empty());

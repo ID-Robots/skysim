@@ -335,8 +335,8 @@ bool query_int(const httplib::Request &req, const char *name, int lo, int hi, in
     return true;
 }
 
-// The still's query: w, h, hfov, pitch, yaw, roll_stab, range, q — every one optional, every
-// one bounded, defaults as in render::StillRequest.
+// The still's query: w, h, hfov, pitch, yaw, roll_stab, gimbal, range, q — every one optional,
+// every one bounded, defaults as in render::StillRequest.
 bool parse_still_query(const httplib::Request &req, render::StillRequest &r, std::string &error) {
     using R = render::StillRequest;
     std::optional<double> hfov;
@@ -364,6 +364,17 @@ bool parse_still_query(const httplib::Request &req, render::StillRequest &r, std
             r.roll_stab = false;
         } else {
             error = "roll_stab must be 0 or 1";
+            return false;
+        }
+    }
+    if (req.has_param("gimbal")) {
+        const std::string v = req.get_param_value("gimbal");
+        if (v == "1" || v == "true") {
+            r.follow_gimbal = true;
+        } else if (v == "0" || v == "false") {
+            r.follow_gimbal = false;
+        } else {
+            error = "gimbal must be 0 or 1";
             return false;
         }
     }
@@ -418,6 +429,8 @@ void reply_still(const ControlServer::Snapshots &snapshots, const std::optional<
     set_header(res, "X-Skysim-Yaw", "%.4f", frame.camera.yaw_deg);
     set_header(res, "X-Skysim-Pitch", "%.4f", frame.camera.pitch_deg);
     set_header(res, "X-Skysim-Roll", "%.4f", frame.camera.roll_deg);
+    // Whether those angles are the vehicle's gimbal's (gimbal=1 and it has one) or the request's.
+    res.set_header("X-Skysim-Gimbal", frame.gimbal ? "1" : "0");
     set_header(res, "X-Skysim-Hfov", "%.4f", request.hfov_deg);
     char ned[96];
     std::snprintf(ned, sizeof(ned), "%.3f,%.3f,%.3f", v.pos_ned[0], v.pos_ned[1], v.pos_ned[2]);

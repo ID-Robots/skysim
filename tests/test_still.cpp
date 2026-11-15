@@ -37,6 +37,7 @@
 #include "render/still.h"
 #include "render/texture.h"
 #include "terrain/cook.h"
+#include "vehicle/gimbal.h"
 
 namespace {
 
@@ -444,6 +445,98 @@ void test_angles() {
     CHECK(cfg.haze_start > 0.0);
 }
 
+// TASK-2548: the gimbal a SITL drives on its servo outputs, and the cameras that follow it.
+void test_gimbal() {
+    using namespace render;
+    using skysim::vehicle::gimbal_from_servos;
+    using skysim::vehicle::GimbalConfig;
+    const GimbalConfig cfg; // the gateway's: pitch on 10 over -90..20, yaw on 11 over -180..180
+    std::array<uint16_t, 32> pwm{};
+    for (int k = 0; k < 4; ++k) {
+        pwm[static_cast<size_t>(k)] = 1500; // motors
+    }
+    const double deg = M_PI / 180.0;
+    // No pulse on output 10: no gimbal, whatever else the vehicle drives.
+    CHECK(!gimbal_from_servos(cfg, pwm, 16).present);
+    // Nor an output idling below the servo range, as some builds leave an output with no
+    // function (ArduCopter 4.8 SITL sends 0 there).
+    pwm[9] = 1000;
+    CHECK(!gimbal_from_servos(cfg, pwm, 16).present);
+    // Measured on ArduCopter 4.8 SITL: DO_MOUNT_CONTROL -60 puts output 10 at 1318 us, yaw 0 at 1500.
+    pwm[9] = 1318;
+    pwm[10] = 1500;
+    auto g = gimbal_from_servos(cfg, pwm, 16);
+    CHECK(g.present && std::fabs(g.pitch_rad + 60.0 * deg) < 0.1 * deg && std::fabs(g.yaw_rad) < 1e-9);
+    pwm[9] = 1100;
+    pwm[10] = 1900;
+    g = gimbal_from_servos(cfg, pwm, 16);
+    CHECK(g.present && std::fabs(g.pitch_rad + M_PI / 2.0) < 1e-12 && std::fabs(g.yaw_rad - M_PI) < 1e-12);
+    // A pulse just past the end stops at the end of the range; one far past it is no mount's.
+    pwm[9] = 1940;
+    CHECK(std::fabs(gimbal_from_servos(cfg, pwm, 16).pitch_rad - 20.0 * deg) < 1e-12);
+    pwm[9] = 2000;
+    CHECK(!gimbal_from_servos(cfg, pwm, 16).present);
+    // Outputs the frame does not carry, a disabled channel, and no yaw axis.
+    CHECK(!gimbal_from_servos(cfg, pwm, 8).present);
+    GimbalConfig off = cfg;
+    off.pitch_channel = 0;
+    CHECK(!gimbal_from_servos(off, pwm, 16).present);
+    GimbalConfig no_yaw = cfg;
+    no_yaw.yaw_channel = 0;
+    pwm[9] = 1318;
+    g = gimbal_from_servos(no_yaw, pwm, 16);
+    CHECK(g.present && g.yaw_rad == 0.0);
+
+    // A still asked to follow the gimbal is drawn at the gimbal's pitch and yaw, stabilised;
+    // one not asked, or on a vehicle without a gimbal, as asked.
+    render::StillPose pose;
+    pose.quat_ned_frd = attitude(90.0, -12.0, 8.0);
+    pose.gimbal = true;
+    pose.gimbal_pitch_rad = -60.0 * deg;
+    pose.gimbal_yaw_rad = 0.0;
+    StillRequest asked;
+    asked.pitch_deg = -90.0;
+    asked.roll_stab = false;
+    asked.follow_gimbal = true;
+    bool followed = false;
+    CameraAngles got;
+    const Quat followed_q = render::still_attitude(pose, asked, got, followed);
+    CHECK(followed && std::fabs(got.pitch_deg + 60.0) < 1e-9 && std::fabs(got.yaw_deg - 90.0) < 1e-6 &&
+          got.roll_deg == 0.0);
+    // The same attitude the stabilised request path draws for -60 at the heading.
+    StillRequest same;
+    same.pitch_deg = -60.0;
+    CameraAngles expected;
+    const Quat requested_q = still_camera_attitude(pose.quat_ned_frd, same, expected);
+    double worst = 0.0;
+    for (const Vec3 &axis : {Vec3{1, 0, 0}, Vec3{0, 1, 0}, Vec3{0, 0, 1}}) {
+        const Vec3 a = skysim::core::quat_rotate(followed_q, axis);
+        const Vec3 b = skysim::core::quat_rotate(requested_q, axis);
+        worst = std::max({worst, std::fabs(a[0] - b[0]), std::fabs(a[1] - b[1]), std::fabs(a[2] - b[2])});
+    }
+    CHECK(worst < 1e-9);
+    asked.follow_gimbal = false;
+    render::still_attitude(pose, asked, got, followed);
+    CHECK(!followed && std::fabs(got.pitch_deg + 60.0) > 5.0); // as asked, not the gimbal
+    asked.follow_gimbal = true;
+    asked.roll_stab = true;
+    pose.gimbal = false;
+    render::still_attitude(pose, asked, got, followed);
+    CHECK(!followed && got.pitch_deg == -90.0);
+
+    // The pilot camera on the gimbal looks along the heading at the gimbal's pitch, the
+    // airframe's lean taken out: heading 90 (east), -60 -> forward (0, cos 60, sin 60) in NED.
+    render::CameraConfig cam;
+    const auto on =
+        render::Camera::on_gimbal(cam, {0.0, 0.0, -60.0}, attitude(90.0, -12.0, 8.0), 0.0, -60.0 * deg);
+    CHECK(std::fabs(on.forward()[0]) < 1e-9 && std::fabs(on.forward()[1] - 0.5) < 1e-9 &&
+          std::fabs(on.forward()[2] - std::sqrt(3.0) / 2.0) < 1e-9);
+    CHECK(std::fabs(on.right()[2]) < 1e-9); // no roll
+    // Rigid, as before a gimbal: the fixed mount pitch on the leaning airframe.
+    const render::Camera rigid(cam, {0.0, 0.0, -60.0}, attitude(90.0, 0.0, 0.0));
+    CHECK(std::fabs(rigid.forward()[2] - std::sin(15.0 * M_PI / 180.0)) < 1e-9);
+}
+
 void test_request_bounds() {
     render::StillRequest r;
     CHECK(r.invalid().empty());
@@ -791,6 +884,10 @@ void test_http(const std::shared_ptr<const render::RasterScene> &scene) {
         v.quat_ned_frd[k] = q[static_cast<size_t>(k)];
     }
     v.sim_time_s = 12.3456789;
+    // Its gimbal at the -60 degrees a 3D mapping survey points it to, looking 20 degrees right.
+    v.gimbal = true;
+    v.gimbal_pitch_rad = -60.0 * M_PI / 180.0;
+    v.gimbal_yaw_rad = 20.0 * M_PI / 180.0;
 
     CommandQueue queue;
     ControlServer::Snapshots snaps;
@@ -804,6 +901,9 @@ void test_http(const std::shared_ptr<const render::RasterScene> &scene) {
         pose.quat_ned_frd = {info.quat_ned_frd[0], info.quat_ned_frd[1], info.quat_ned_frd[2],
                              info.quat_ned_frd[3]};
         pose.sim_time_s = info.sim_time_s;
+        pose.gimbal = info.gimbal;
+        pose.gimbal_pitch_rad = info.gimbal_pitch_rad;
+        pose.gimbal_yaw_rad = info.gimbal_yaw_rad;
         return service.render(pose, r);
     };
     ControlServer::RadioConfig radio;
@@ -858,6 +958,19 @@ void test_http(const std::shared_ptr<const render::RasterScene> &scene) {
         }
         auto stab = client.Get("/instances/31/still.jpg?w=64&h=64&roll_stab=true&pitch=-45");
         CHECK(stab && stab->status == 200 && stab->get_header_value("X-Skysim-Pitch") == "-45.0000");
+        CHECK(stab && stab->get_header_value("X-Skysim-Gimbal") == "0");
+        // TASK-2548: gimbal=1 draws where the vehicle's gimbal points, at its own heading (45)
+        // plus the gimbal's yaw, whatever fixed pitch the caller also sent.
+        auto gimbal = client.Get("/instances/31/still.jpg?w=64&h=64&pitch=-90&gimbal=1");
+        CHECK(gimbal && gimbal->status == 200);
+        if (gimbal && gimbal->status == 200) {
+            CHECK(gimbal->get_header_value("X-Skysim-Gimbal") == "1");
+            CHECK(gimbal->get_header_value("X-Skysim-Pitch") == "-60.0000");
+            CHECK(std::fabs(std::stod(gimbal->get_header_value("X-Skysim-Yaw")) - 65.0) < 1e-3);
+            CHECK(gimbal->get_header_value("X-Skysim-Roll") == "0.0000");
+        }
+        auto bad_gimbal = client.Get("/instances/31/still.jpg?w=64&h=64&gimbal=yes");
+        CHECK(bad_gimbal && bad_gimbal->status == 400);
 
         // Every input bounded, every error JSON.
         const char *bad[] = {"w=63",    "w=4097",      "w=12.5",        "w=",         "h=4097",
@@ -1096,6 +1209,7 @@ int main() {
     test_geo();
     test_camera();
     test_angles();
+    test_gimbal();
     test_request_bounds();
     test_thread_pool_modes();
 

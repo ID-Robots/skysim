@@ -220,6 +220,14 @@ docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
 # http://localhost:8642/instances/0/camera.mjpg
 ```
 
+**The camera follows the vehicle's gimbal** when the vehicle drives one (TASK-2548): ArduPilot's
+mount pitch and yaw on servo outputs `SKYSIM_GIMBAL_PITCH_CHANNEL` (default 10, pitch -90..20
+degrees) and `SKYSIM_GIMBAL_YAW_CHANNEL` (default 11, yaw -180..180), both over 1100..1900 us —
+the BrushlessPWM mount (`MNT1_TYPE 7`) the SkyHub gateway builds every SITL with. The pilot
+camera then looks along the heading plus the gimbal's yaw at the gimbal's pitch, stabilised;
+a vehicle with no pulse on that output keeps the fixed `SKYSIM_CAMERA_PITCH`, rigidly mounted.
+`SKYSIM_GIMBAL_PITCH_CHANNEL=0` never follows a gimbal.
+
 **Survey stills need no switch.** `GET /instances/<n>/still.jpg` renders one large, exactly
 posed frame on demand, whatever `SKYSIM_CAMERA_FPS` says, so it costs nothing until it is
 asked for. `SKYSIM_STILL_CONCURRENCY` (default `2`; `0` turns the route off) caps renders in
@@ -262,7 +270,8 @@ survey still camera beside the small pilot feed:
 ```bash
 curl -o frame.jpg -D - "http://127.0.0.1:8642/instances/0/still.jpg?w=1600&h=1200&pitch=-90"
 # X-Skysim-Time-Usec, X-Skysim-Lat, X-Skysim-Lon, X-Skysim-Alt-Amsl, X-Skysim-Alt-Rel,
-# X-Skysim-Yaw, X-Skysim-Pitch, X-Skysim-Roll (camera axes, degrees), X-Skysim-Hfov
+# X-Skysim-Yaw, X-Skysim-Pitch, X-Skysim-Roll (camera axes, degrees), X-Skysim-Hfov,
+# X-Skysim-Gimbal (1 when the angles are the vehicle's gimbal's)
 ```
 
 | Query | Default | Range | Meaning |
@@ -272,6 +281,7 @@ curl -o frame.jpg -D - "http://127.0.0.1:8642/instances/0/still.jpg?w=1600&h=120
 | `pitch` | -90 | -90..0 | camera pitch, degrees; -90 is straight down |
 | `yaw` | 0 | -360..360 | camera yaw relative to the vehicle's heading, degrees |
 | `roll_stab` | 1 | 0, 1 | 1: gimbal-stabilised, airframe roll and pitch do not tilt the camera; 0: rigid mount |
+| `gimbal` | 0 | 0, 1 | 1: where the vehicle's gimbal points (its pitch, heading + its yaw, stabilised); `pitch`, `yaw` and `roll_stab` then apply only to a vehicle without one |
 | `range` | 600 | 50..3000 | draw distance for buildings, metres |
 | `q` | 90 | 1..100 | JPEG quality |
 
