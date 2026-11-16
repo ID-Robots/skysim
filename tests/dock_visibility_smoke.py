@@ -64,8 +64,11 @@ ALL_API_PORT, ALL_RTSP_PORT, ALL_BASE = 18692, 18693, 44
 WIDTH, HEIGHT, HFOV = 1920, 1080, 81.0
 DEV_WIDTH, DEV_HEIGHT, DEV_HFOV = 640, 360, 78.0
 SPACING_M = 5.0
+# "quick" is for the coverage build: its -O0 renders made the full flight take 8.6 minutes in CI,
+# past the coverage job's 20. It keeps both settings, both fleet sizes and every camera at 30 m,
+# where the two settings differ; the full flight runs in every other build.
 PROFILES = {"full": {"own": [30.0, 10.0, 5.0], "all": [30.0, 10.0], "rtsp_frames": 10},
-            "quick": {"own": [30.0, 10.0, 5.0], "all": [30.0, 10.0], "rtsp_frames": 3}}
+            "quick": {"own": [30.0], "all": [30.0], "rtsp_frames": 2}}
 DEV_HEIGHTS = [10.0, 5.0]  # where the dev camera resolves the marker (13 px from 30 m)
 OUTER, INNER = 228, 11
 # A detection is a dock's when its centre lies this close to where the dock's ground truth projects:
@@ -205,14 +208,18 @@ def fly(sim: str, mode: str, frames_dir: str, threads: int, profile: dict) -> di
         sitl = dms.FakeSitl(9002 + 10 * base)
         sitl.start()
         for height in profile[mode]:
-            check(sitl.hold(height), f"{mode}: slot 0 hovering at {height:g} m")
+            t0 = time.monotonic()
+            held = sitl.hold(height)
+            check(held, f"{mode}: slot 0 hovering at {height:g} m (flown in {time.monotonic() - t0:.1f} s)")
             tag = f"{mode}_{height:g}m"
+            t0 = time.monotonic()
             run["heights"].append(capture(port, rtsp_port, base, height, frames_dir, f"{tag}_2v",
                                           profile["rtsp_frames"]))
             dms.api(port, "POST", "/vehicles", json.dumps({"instance": base + 2}).encode())
             check(wait_fleet(port, {base, base + 1, base + 2}), f"{tag}: slot 2 spawned on its dock 10 m east")
             run["heights"].append(capture(port, rtsp_port, base, height, frames_dir, f"{tag}_3v",
                                           profile["rtsp_frames"]))
+            print(f"dock_visibility_smoke: {tag}: both captures in {time.monotonic() - t0:.1f} s", flush=True)
             third = next(v["id"] for v in vehicles(port) if v["instance"] == base + 2)
             dms.api(port, "DELETE", f"/vehicles/{third}")
             check(wait_fleet(port, {base, base + 1}), f"{tag}: slot 2 despawned")
@@ -386,7 +393,8 @@ def main() -> int:
     parser.add_argument("--analyse", metavar="DIR", help="no skysim: re-check pictures captured with --frames")
     parser.add_argument("--report", help="write the results table (markdown) here")
     parser.add_argument("--camera-threads", type=int, default=0, help="render threads (0: skysim's default)")
-    parser.add_argument("--quick", action="store_true", help="3 RTSP frames a picture (the coverage build)")
+    parser.add_argument("--quick", action="store_true",
+                        help="own and all at 30 m only, 2 RTSP frames each (the coverage build)")
     args = parser.parse_args()
     if not dms.HAVE_CV or (not args.analyse and shutil.which("ffmpeg") is None):
         print("dock_visibility_smoke: SKIP — needs OpenCV with cv2.aruco (python3-opencv) and ffmpeg")

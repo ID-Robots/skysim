@@ -155,7 +155,8 @@ still at 640x360 HFOV 78 (the dev camera; from 30 m the marker is 13 px there, t
 It decodes every picture with cv2.aruco (`DICT_7X7_250`, default `DetectorParameters`, the detector
 dock_marker_smoke builds). Each detection belongs to the dock whose ground truth projects nearest
 the detected quad's centre, and for slot 0's dock solvePnP's lateral error is the landing error. It
-then runs the same flight to 30 and 10 m with `--dock-markers-visible all`.
+then runs the same flight to 30 and 10 m with `--dock-markers-visible all`. CI's coverage build
+renders at -O0, so there it runs `--quick`: `own` and `all` at 30 m only, two RTSP frames each.
 
 - `own`: each still and camera.mjpg picture, and 9 RTSP frames of 10 (H.264 blurs a cell out of a
   frame now and then, as in dock_marker_smoke), finds exactly one 228, slot 0's, with the lateral
