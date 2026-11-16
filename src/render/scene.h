@@ -71,6 +71,18 @@ class RasterScene {
     // A function of the world point alone — the same from every camera.
     void lit_colour(int tri, const core::Vec3 &p, double footprint_m, double out[3]) const;
 
+    // Whether triangle `tri` is ground: a horizontal face at ground level (a scanned tile's ground
+    // mesh), textured as the ground it lies on — and so carrying what lies on the ground, like a
+    // dock marker. kSurfaceGround is ground too.
+    bool ground_level(int tri) const {
+        return tri == kSurfaceGround || (tri >= 0 && frames_[tri_frame_[static_cast<size_t>(tri)]].kind ==
+                                                         SurfaceFrame::Kind::kUnderside);
+    }
+
+    // The light at p applied to an albedo already in `colour` (lit_colour without the albedo):
+    // for something lying on a surface, like a dock marker on the ground.
+    void light(int tri, const core::Vec3 &p, double colour[3]) const;
+
     // The triangle a point on a building lies on (within tolerance_m of its plane), or -1.
     int find_triangle(const core::Vec3 &p, double tolerance_m = 0.02) const;
 

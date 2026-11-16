@@ -276,6 +276,7 @@ void RenderService::run() {
     // been made (only a JPEG viewer needs it).
     struct Drawn {
         Pose pose;
+        std::shared_ptr<const GroundMarkers> markers; // the dock markers it was drawn with
         std::shared_ptr<const Image> image;
         std::vector<uint8_t> jpeg;
     };
@@ -396,13 +397,16 @@ void RenderService::run() {
         Window pass;
         pass.started = started;
         pass.watched = wanted.size();
+        // One list of dock markers for the pass: the same pointer until a dock changes, so a
+        // parked vehicle's picture stays current — and re-sent — until its marker moves.
+        const std::shared_ptr<const GroundMarkers> markers = cfg_.docks ? cfg_.docks->markers() : nullptr;
         for (const Wanted &w : wanted) {
             if (stop_.load(std::memory_order_relaxed)) {
                 break;
             }
             const Pose *pose = w.pose;
             Drawn &d = last[pose->vehicle_id];
-            if (d.image && same_pose(d.pose, *pose)) {
+            if (d.image && same_pose(d.pose, *pose) && d.markers == markers) {
                 ++pass.reused;
             } else {
                 const auto t0 = Clock::now();
@@ -410,8 +414,10 @@ void RenderService::run() {
                     pose->gimbal ? Camera::on_gimbal(cfg_.camera, pose->position_ned, pose->quat_ned_frd,
                                                      pose->gimbal_yaw_rad, pose->gimbal_pitch_rad)
                                  : Camera(cfg_.camera, pose->position_ned, pose->quat_ned_frd);
-                d.image = std::make_shared<const Image>(rasterizer_->render(*scene_, camera, pool_.get()));
+                d.image = std::make_shared<const Image>(
+                    rasterizer_->render(*scene_, camera, pool_.get(), nullptr, true, markers.get()));
                 d.pose = *pose;
+                d.markers = markers;
                 d.jpeg.clear();
                 const double render_ms = ms_between(t0, Clock::now());
                 ++pass.drawn;

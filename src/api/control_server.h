@@ -16,6 +16,7 @@
 
 #include "core/world.h"
 #include "radio/radio_model.h"
+#include "render/dock.h"
 #include "render/frame_store.h"
 #include "render/still_request.h"
 #include "vehicle/manager.h"
@@ -90,6 +91,30 @@ struct EncoderState {
     int height = 0;
     double max_fps = 0.0; // the ceiling fps is clamped to: the camera's render rate
     size_t clients = 0;   // RTSP sessions playing the stream now
+};
+
+// GET /instances/<n>/camera/intrinsics (TASK-2562): the pinhole the pilot camera renders with —
+// what the camera.jpg, camera.mjpg and RTSP pictures are drawn through. Zero distortion.
+struct CameraIntrinsics {
+    bool enabled = false; // --camera-fps given; the rest is meaningless without it
+    int width = 0;
+    int height = 0;
+    double hfov_deg = 0.0;
+    double fps = 0.0;
+    double mount_pitch_deg = 0.0; // where the camera looks on a vehicle with no gimbal
+    // The H.264 stream's picture: the camera's, cropped to even sizes at the right and bottom
+    // (so cx, cy are the same in it). 0 when RTSP is off.
+    int stream_width = 0;
+    int stream_height = 0;
+};
+
+// A vehicle's dock marker (TASK-2562; render/dock.h), as GET/POST/DELETE
+// /instances/<n>/camera/dock report it.
+struct DockState {
+    render::DockPose pose;
+    render::DockPose home; // where the vehicle spawned: the dock until it is moved
+    bool at_home = true;
+    render::DockLayout layout; // the marker as drawn (sizes, plate, inner marker's centre)
 };
 
 struct MetricsInfo {
@@ -187,6 +212,15 @@ class ControlServer {
         std::function<EncoderState(const VehicleInfo &, const EncoderPatch *patch)> camera_encoder;
         // Makes the stream's next frame an IDR; returns the sessions playing it.
         std::function<size_t(const VehicleInfo &)> camera_keyframe;
+        // The pilot camera's pinhole (TASK-2562), for GET .../camera/intrinsics.
+        CameraIntrinsics camera_intrinsics;
+        // A vehicle's dock marker (TASK-2562): as it is; with `patch`, after applying it (in one
+        // step, so concurrent partial changes cannot undo each other); with `reset`, after putting
+        // it back home. Nothing for a vehicle that has none (it has just gone). Null when no dock
+        // markers are drawn, and the dock routes answer 404.
+        std::function<std::optional<DockState>(const VehicleInfo &, const render::DockPatch *patch,
+                                               bool reset)>
+            dock;
         // Serve the camera.mjpg routes. On by default so SITL images keep streaming MJPEG until
         // every consumer reads RTSP; off (--camera-mjpeg 0), they answer 404 naming the RTSP URL.
         bool mjpeg = true;

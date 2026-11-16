@@ -50,4 +50,22 @@ inline GeoPoint geo_from_ned(const GeoOrigin &origin, double north_m, double eas
     return p;
 }
 
+// North and east of the origin, metres, for a latitude / longitude: the inverse of
+// geo_from_ned, and what ArduPilot's Location::get_distance_NE computes (the east step scaled by
+// the cosine of the mid latitude, the longitude difference wrapped to (-180, 180]).
+struct NorthEast {
+    double north_m = 0.0;
+    double east_m = 0.0;
+};
+
+inline NorthEast ned_from_geo(const GeoOrigin &origin, double lat_deg, double lon_deg) {
+    constexpr double kDegToRad = M_PI / 180.0;
+    const double scale = std::max(std::cos((origin.lat_deg + lat_deg) * 0.5 * kDegToRad), 0.01);
+    NorthEast ne;
+    ne.north_m = (lat_deg - origin.lat_deg) / (kArduLocationScalingFactorInv * 1e-7);
+    ne.east_m =
+        std::remainder(lon_deg - origin.lon_deg, 360.0) * scale / (kArduLocationScalingFactorInv * 1e-7);
+    return ne;
+}
+
 } // namespace skysim::core

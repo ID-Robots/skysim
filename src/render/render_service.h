@@ -3,6 +3,7 @@
 #include "core/thread_pool.h"
 #include "core/world.h"
 #include "render/camera.h"
+#include "render/dock_marker.h"
 #include "render/frame_store.h"
 #include "render/image.h"
 #include "render/raster.h"
@@ -57,6 +58,8 @@ class RenderService {
         // with texture_seed; when shared, scene_tiles says how many tiles it holds.
         std::shared_ptr<const RasterScene> scene;
         size_t scene_tiles{0};
+        // The dock markers on the ground (TASK-2562), every vehicle's; none drawn when null.
+        std::shared_ptr<const DockBoard> docks;
         std::string tiles_dir;
         uint32_t texture_seed{1};
         double fps{10.0};

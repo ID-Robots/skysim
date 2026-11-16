@@ -30,6 +30,7 @@
 #include "protocol/packets.h"
 #include "radio/radio_model.h"
 #include "radio/radio_spec.h"
+#include "render/dock_marker.h"
 #include "render/render_service.h"
 #include "render/scene.h"
 #include "render/still.h"
@@ -117,6 +118,13 @@ struct Options {
     int video_threads = 0;
     // Keep serving camera.mjpg (SKYSIM_CAMERA_MJPEG). On until every consumer reads RTSP.
     bool camera_mjpeg = true;
+    // Observer 1's e-ArUco dock marker on the ground at every vehicle's dock (TASK-2562;
+    // render/dock_marker.h), drawn by the pilot camera and the survey stills alike
+    // (SKYSIM_DOCK_MARKERS, SKYSIM_DOCK_MARKER_SIZE, SKYSIM_DOCK_INNER_SIZE). The sizes are the
+    // black squares' sides, metres.
+    bool dock_markers = true;
+    double dock_marker_size_m = skysim::render::DockMarkerSpec::kDefaultOuterSizeM;
+    double dock_inner_size_m = skysim::render::DockMarkerSpec::kDefaultInnerSizeM;
     double grace_s = 30.0;              // interactive: frozen longer than this => auto-despawn
     double strict_timeout_s = 10.0;     // strict: barrier stalled longer => abort with report
     std::string spawn_binary;           // arducopter for POST /vehicles {"launch_process":true}
@@ -139,6 +147,19 @@ unsigned long long whole_number(const char *text, const char *flag, unsigned lon
     const auto parsed = std::from_chars(text, end, v);
     if (parsed.ec != std::errc() || parsed.ptr != end || v < lo || v > hi) {
         std::fprintf(stderr, "skysim: %s must be a whole number from %llu to %llu\n", flag, lo, hi);
+        std::exit(2);
+    }
+    return v;
+}
+
+// A finite length in metres, or exit with the bad-option code (the dock marker's sizes: atof
+// would read "1m" as 1 and "abc" as 0).
+double metres(const char *text, const char *flag) {
+    double v = 0.0;
+    const char *end = text + std::strlen(text);
+    const auto parsed = std::from_chars(text, end, v);
+    if (parsed.ec != std::errc() || parsed.ptr != end || !std::isfinite(v)) {
+        std::fprintf(stderr, "skysim: %s must be a length in metres\n", flag);
         std::exit(2);
     }
     return v;
@@ -246,6 +267,12 @@ Options parse_args(int argc, char **argv) {
                 static_cast<int>(whole_number(need_value("--video-threads"), "--video-threads", 0, 16));
         } else if (std::strcmp(argv[i], "--camera-mjpeg") == 0) {
             o.camera_mjpeg = whole_number(need_value("--camera-mjpeg"), "--camera-mjpeg", 0, 1) == 1;
+        } else if (std::strcmp(argv[i], "--dock-markers") == 0) {
+            o.dock_markers = whole_number(need_value("--dock-markers"), "--dock-markers", 0, 1) == 1;
+        } else if (std::strcmp(argv[i], "--dock-marker-size") == 0) {
+            o.dock_marker_size_m = metres(need_value("--dock-marker-size"), "--dock-marker-size");
+        } else if (std::strcmp(argv[i], "--dock-inner-size") == 0) {
+            o.dock_inner_size_m = metres(need_value("--dock-inner-size"), "--dock-inner-size");
         } else if (std::strcmp(argv[i], "--frame-grace") == 0) {
             o.frame_grace = std::atof(need_value("--frame-grace"));
         } else if (std::strcmp(argv[i], "--straggler-timeout") == 0) {
@@ -293,6 +320,13 @@ Options parse_args(int argc, char **argv) {
     }
     if (o.frame_grace < 0.0 || o.frame_grace > 1.0) {
         std::fprintf(stderr, "skysim: --frame-grace must be 0.0-1.0 (a fraction of the tick period)\n");
+        std::exit(2);
+    }
+    skysim::render::DockMarkerSpec dock;
+    dock.outer_size_m = o.dock_marker_size_m;
+    dock.inner_size_m = o.dock_inner_size_m;
+    if (const std::string why = dock.invalid(); !why.empty()) {
+        std::fprintf(stderr, "skysim: --dock-marker-size / --dock-inner-size: %s\n", why.c_str());
         std::exit(2);
     }
     return o;
@@ -771,6 +805,9 @@ struct App {
     std::unique_ptr<skysim::render::RenderService> render_service;
     // Survey stills, rendered on HTTP request from the same snapshot /vehicles serves.
     std::unique_ptr<skysim::render::StillService> still_service;
+    // Every vehicle's dock marker (TASK-2562), drawn by both cameras; null when neither is on or
+    // --dock-markers 0. A vehicle's dock starts where it spawns and goes when it does.
+    std::shared_ptr<skysim::render::DockBoard> docks;
 
     ~App() {
         if (video_service) {
@@ -804,6 +841,11 @@ struct App {
                             -(bp.half_extents_frd[2] + 0.005)};
         slot->body_id = world->add_vehicle(bp);
         slot->state = world->get_state(slot->body_id);
+        if (docks) {
+            // Its home, heading north: where ArduPilot will set home when it arms, so an RTL comes
+            // back to the marker unless the control plane moves it.
+            docks->add(slot->vehicle_id, bp.start_pos_ned[0], bp.start_pos_ned[1]);
+        }
         return slot;
     }
 
@@ -814,6 +856,9 @@ struct App {
             manager->stop_sitl(*v.pid);
         }
         world->remove_vehicle(v.body_id);
+        if (docks) {
+            docks->remove(v.vehicle_id);
+        }
         manager->release_instance(v.instance);
         fleet.erase(fleet.begin() + static_cast<long>(idx));
     }
@@ -844,6 +889,9 @@ struct App {
                         slot->pid = manager->launch_sitl(instance);
                         if (!slot->pid.has_value()) {
                             world->remove_vehicle(slot->body_id);
+                            if (docks) {
+                                docks->remove(slot->vehicle_id); // make_slot gave it one
+                            }
                             throw std::runtime_error("launch failed");
                         }
                     }
@@ -1317,6 +1365,18 @@ int main(int argc, char **argv) {
             render_tiles, render_scene->triangle_count(), render_scene->building_count(), opt.texture_seed);
     }
 
+    if (opt.dock_markers && render_scene) {
+        skysim::render::DockMarkerSpec spec;
+        spec.outer_size_m = opt.dock_marker_size_m;
+        spec.inner_size_m = opt.dock_inner_size_m;
+        app.docks = std::make_shared<skysim::render::DockBoard>(spec);
+        std::printf(
+            "skysim: e-ArUco dock marker (DICT_7X7_250 %d in %d) %.3f m / %.3f m at every vehicle's dock, "
+            "drawn by the cameras only\n",
+            skysim::render::DockMarkerSpec::kInnerId, skysim::render::DockMarkerSpec::kOuterId,
+            spec.outer_size_m, spec.inner_size_m);
+    }
+
     if (opt.camera_fps > 0.0) {
         if (opt.camera_width <= 0 || opt.camera_height <= 0) {
             std::fprintf(stderr, "skysim: --camera-size must be WxH with both > 0\n");
@@ -1330,6 +1390,7 @@ int main(int argc, char **argv) {
         rcfg.camera.max_range_m = opt.camera_range_m;
         rcfg.scene = render_scene;
         rcfg.scene_tiles = render_tiles;
+        rcfg.docks = app.docks;
         rcfg.fps = opt.camera_fps;
         rcfg.quality = opt.camera_quality;
         const int cpus = skysim::core::available_cpus();
@@ -1534,7 +1595,44 @@ int main(int argc, char **argv) {
                 pose.gimbal = v.gimbal;
                 pose.gimbal_pitch_rad = v.gimbal_pitch_rad;
                 pose.gimbal_yaw_rad = v.gimbal_yaw_rad;
-                return app.still_service->render(pose, r);
+                const auto markers = app.docks ? app.docks->markers() : nullptr;
+                return app.still_service->render(pose, r, markers.get());
+            };
+        }
+        if (app.render_service) {
+            skysim::api::CameraIntrinsics &ci = snaps.camera_intrinsics;
+            ci.enabled = true;
+            ci.width = opt.camera_width;
+            ci.height = opt.camera_height;
+            ci.hfov_deg = opt.camera_fov_deg;
+            ci.fps = opt.camera_fps;
+            ci.mount_pitch_deg = opt.camera_pitch_deg;
+            if (app.video_service) {
+                ci.stream_width = opt.camera_width & ~1;
+                ci.stream_height = opt.camera_height & ~1;
+            }
+        }
+        if (app.docks) {
+            // Ground truth for the dock routes. The layout comes off the marker's texture, which
+            // the first such request builds if no camera has drawn a marker yet.
+            snaps.dock = [&app](const skysim::api::VehicleInfo &v, const skysim::render::DockPatch *patch,
+                                bool reset) -> std::optional<skysim::api::DockState> {
+                const auto tex = skysim::render::dock_marker_texture(app.docks->spec());
+                if (!tex) {
+                    return std::nullopt;
+                }
+                const auto entry =
+                    reset ? app.docks->reset(v.id)
+                          : (patch != nullptr ? app.docks->update(v.id, *patch) : app.docks->get(v.id));
+                if (!entry) {
+                    return std::nullopt;
+                }
+                skysim::api::DockState out;
+                out.pose = entry->pose;
+                out.home = entry->home;
+                out.at_home = entry->at_home;
+                out.layout = tex->layout();
+                return out;
             };
         }
         skysim::api::ControlServer::RadioConfig radio_cfg;

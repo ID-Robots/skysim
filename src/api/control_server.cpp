@@ -511,6 +511,247 @@ std::string encoder_json(const EncoderState &e) {
     return out;
 }
 
+// --- dock marker and camera intrinsics (TASK-2562) --------------------------------------------
+
+constexpr double kRadToDeg = 180.0 / M_PI;
+constexpr double kDegToRad = M_PI / 180.0;
+
+// A finite number, or null: JSON has no spelling for NaN.
+void append_value(std::string &out, double v) {
+    if (std::isfinite(v)) {
+        radio::json::append_number(out, v);
+    } else {
+        out += "null";
+    }
+}
+
+void append_ned(std::string &out, double north, double east, double down) {
+    out += '[';
+    append_value(out, north);
+    out += ',';
+    append_value(out, east);
+    out += ',';
+    append_value(out, down);
+    out += ']';
+}
+
+// The pinhole of a camera `width` x `height` with horizontal field of view `hfov_deg`, in
+// OpenCV's convention (pixel centres at whole numbers, the top-left pixel's at 0,0): skysim
+// puts the optical axis through the middle of the frame (render/camera.h), so cx = width/2 - 0.5.
+std::string intrinsics_json(const char *camera, int width, int height, double hfov_deg) {
+    const double tan_half = std::tan(hfov_deg * 0.5 * kDegToRad);
+    const double f = width * 0.5 / tan_half;
+    const double cx = width * 0.5 - 0.5;
+    const double cy = height * 0.5 - 0.5;
+    std::string out = "{\"camera\":\"";
+    out += camera;
+    out +=
+        "\",\"width\":" + std::to_string(width) + ",\"height\":" + std::to_string(height) + ",\"hfov_deg\":";
+    append_value(out, hfov_deg);
+    out += ",\"vfov_deg\":";
+    append_value(out, 2.0 * std::atan(height * 0.5 / f) * kRadToDeg);
+    out += ",\"fx\":";
+    append_value(out, f);
+    out += ",\"fy\":";
+    append_value(out, f);
+    out += ",\"cx\":";
+    append_value(out, cx);
+    out += ",\"cy\":";
+    append_value(out, cy);
+    out += ",\"camera_matrix\":[[";
+    append_value(out, f);
+    out += ",0,";
+    append_value(out, cx);
+    out += "],[0,";
+    append_value(out, f);
+    out += ',';
+    append_value(out, cy);
+    out += "],[0,0,1]],\"distortion\":[0,0,0,0,0]";
+    return out; // left open for the caller's fields
+}
+
+// How far apart lat/lon and north_m/east_m in one POST /camera/dock body may be and still name
+// the same dock.
+constexpr double kSameDockM = 0.01;
+
+// A POST /camera/dock body: a JSON object with lat and lon and/or north_m and east_m (both only
+// when they name the same point), and/or yaw_deg, as a patch: absent fields keep the dock's
+// current value, so a GET's pose can be sent back with one field changed. Bounded to the ground
+// the renderer draws (20 km of the origin).
+bool parse_dock_patch(const std::string &body, const std::optional<radio::GeoAnchor> &home,
+                      render::DockPatch &patch, std::string &error) {
+    patch = render::DockPatch{};
+    if (body.find_first_not_of(" \t\r\n") == std::string::npos) {
+        return true;
+    }
+    std::string parse_error;
+    const auto doc = radio::json::parse(body, parse_error);
+    if (!doc) {
+        error = "invalid JSON: " + parse_error;
+        return false;
+    }
+    if (!doc->is_object()) {
+        error = "body must be a JSON object";
+        return false;
+    }
+    const auto number = [&](const char *name, std::optional<double> &out) {
+        const radio::json::Value *v = doc->find(name);
+        if (v == nullptr) {
+            return true;
+        }
+        if (!v->is_number() || !std::isfinite(v->number)) {
+            error = std::string(name) + " must be a number";
+            return false;
+        }
+        out = v->number;
+        return true;
+    };
+    std::optional<double> lat;
+    std::optional<double> lon;
+    std::optional<double> north;
+    std::optional<double> east;
+    std::optional<double> yaw;
+    if (!number("lat", lat) || !number("lon", lon) || !number("north_m", north) || !number("east_m", east) ||
+        !number("yaw_deg", yaw)) {
+        return false;
+    }
+    if (lat.has_value() != lon.has_value()) {
+        error = "lat and lon go together";
+        return false;
+    }
+    if (lat) {
+        if (!home) {
+            error = "no geo anchor (--spawn-home is not lat,lon[,alt,yaw]): give north_m and east_m";
+            return false;
+        }
+        if (*lat < -90.0 || *lat > 90.0 || *lon < -180.0 || *lon > 180.0) {
+            error = "lat must be between -90 and 90, lon between -180 and 180";
+            return false;
+        }
+        const core::NorthEast ne = core::ned_from_geo(
+            core::GeoOrigin{home->lat_deg, home->lon_deg, home->ground_amsl_m}, *lat, *lon);
+        // Both spellings, as a GET's pose carries them: they must name the same place (to the
+        // 9 decimals a GET prints lat/lon with, a fraction of a millimetre), and then north_m and
+        // east_m, the exact ones, win. A pose sent back with only its yaw changed round-trips.
+        if (north || east) {
+            const double apart =
+                std::hypot(north.value_or(ne.north_m) - ne.north_m, east.value_or(ne.east_m) - ne.east_m);
+            if (!(apart <= kSameDockM)) {
+                char buf[160];
+                std::snprintf(
+                    buf, sizeof(buf),
+                    "lat/lon and north_m/east_m are %.3f m apart: send one of them, or both for the same "
+                    "point",
+                    apart);
+                error = buf;
+                return false;
+            }
+        }
+        north = north.value_or(ne.north_m);
+        east = east.value_or(ne.east_m);
+    }
+    constexpr double kMaxOffsetM = 20000.0;
+    if ((north && std::fabs(*north) > kMaxOffsetM) || (east && std::fabs(*east) > kMaxOffsetM)) {
+        error = "the dock must be within 20 km of the world origin";
+        return false;
+    }
+    if (yaw && std::fabs(*yaw) > 360.0) {
+        error = "yaw_deg must be between -360 and 360";
+        return false;
+    }
+    patch.north_m = north;
+    patch.east_m = east;
+    if (yaw) {
+        patch.yaw_rad = *yaw * kDegToRad;
+    }
+    return true;
+}
+
+void append_square(std::string &out, const render::DockPose &pose, double u, double v, double size_m) {
+    const auto c = render::dock_to_ned(pose, u, v);
+    out += "{\"centre_ned\":";
+    append_ned(out, c[0], c[1], 0.0);
+    out += ",\"size_m\":";
+    append_value(out, size_m);
+    out += ",\"corners_ned\":[";
+    const auto corners = render::dock_corners_ned(pose, u, v, size_m);
+    for (size_t k = 0; k < corners.size(); ++k) {
+        out += k ? "," : "";
+        append_ned(out, corners[k][0], corners[k][1], 0.0);
+    }
+    out += "]}";
+}
+
+// The dock's ground truth: what it is, where it lies (NED, and lat/lon with a geo anchor), its
+// two markers' corners in the order cv2.aruco reports them, and the vehicle relative to it — so
+// a landing's error can be read off directly.
+std::string dock_json(const VehicleInfo &v, const DockState &d, const std::optional<radio::GeoAnchor> &home) {
+    const render::DockLayout &l = d.layout;
+    std::string out =
+        "{\"instance\":" + std::to_string(v.instance) + ",\"vehicle\":" + std::to_string(v.id) +
+        ",\"source\":\"" + (d.at_home ? "home" : "set") + "\",\"marker\":{\"family\":\"e-ArUco\"," +
+        "\"dictionary\":\"" + render::DockMarkerSpec::kDictionary +
+        "\",\"outer_id\":" + std::to_string(render::DockMarkerSpec::kOuterId) +
+        ",\"inner_id\":" + std::to_string(render::DockMarkerSpec::kInnerId) + ",\"outer_size_m\":";
+    append_value(out, l.outer_size_m);
+    out += ",\"inner_size_m\":";
+    append_value(out, l.inner_size_m);
+    out += ",\"cell_size_m\":";
+    append_value(out, l.cell_size_m);
+    out += ",\"plate_size_m\":[";
+    append_value(out, l.plate_u_max - l.plate_u_min);
+    out += ',';
+    append_value(out, l.plate_v_max - l.plate_v_min);
+    out += "]},\"pose\":{\"north_m\":";
+    append_value(out, d.pose.north_m);
+    out += ",\"east_m\":";
+    append_value(out, d.pose.east_m);
+    out += ",\"down_m\":0,\"yaw_deg\":";
+    append_value(out, d.pose.yaw_rad * kRadToDeg);
+    if (home) {
+        // Only a lat/lon that names the dock: past a pole the latitude is clamped to 90 and no longer
+        // does, and a client sending this pose back would be refused for it (lat/lon and
+        // north_m/east_m 1 cm apart at most). There the pose says why it has none.
+        const core::GeoOrigin origin{home->lat_deg, home->lon_deg, home->ground_amsl_m};
+        const core::GeoPoint geo = core::geo_from_ned(origin, d.pose.north_m, d.pose.east_m, 0.0);
+        const core::NorthEast back = core::ned_from_geo(origin, geo.lat_deg, geo.lon_deg);
+        if (std::hypot(back.north_m - d.pose.north_m, back.east_m - d.pose.east_m) <= kSameDockM) {
+            out += ",\"lat\":";
+            radio::json::append_fixed(out, geo.lat_deg, 9);
+            out += ",\"lon\":";
+            radio::json::append_fixed(out, geo.lon_deg, 9);
+            out += ",\"alt_amsl_m\":";
+            radio::json::append_fixed(out, geo.alt_amsl_m, 3);
+        } else {
+            out += ",\"geo\":\"none: past a pole, latitude/longitude do not name this point\"";
+        }
+    }
+    out += "},\"home\":{\"north_m\":";
+    append_value(out, d.home.north_m);
+    out += ",\"east_m\":";
+    append_value(out, d.home.east_m);
+    out += "},\"outer\":";
+    append_square(out, d.pose, 0.0, 0.0, l.outer_size_m);
+    out += ",\"inner\":";
+    append_square(out, d.pose, l.inner_u_m, l.inner_v_m, l.inner_size_m);
+    // The vehicle against the outer marker's centre, from the same snapshot as its position in
+    // GET /vehicles. The camera is at the vehicle's position (render/render_service.h).
+    const double dn = v.pos_ned[0] - d.pose.north_m;
+    const double de = v.pos_ned[1] - d.pose.east_m;
+    out += ",\"vehicle_pose\":{\"sim_time_s\":";
+    append_value(out, v.sim_time_s);
+    out += ",\"pos_ned\":";
+    append_ned(out, v.pos_ned[0], v.pos_ned[1], v.pos_ned[2]);
+    out += ",\"offset_ned\":";
+    append_ned(out, dn, de, v.pos_ned[2]);
+    out += ",\"horizontal_error_m\":";
+    append_value(out, std::hypot(dn, de));
+    out += ",\"height_above_marker_m\":";
+    append_value(out, -v.pos_ned[2]);
+    out += "}}";
+    return out;
+}
+
 } // namespace
 
 struct ControlServer::Impl {
@@ -911,6 +1152,111 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
                res.set_content("{\"keyframe\":true,\"clients\":" + std::to_string(clients) + "}",
                                "application/json");
            });
+
+    // The pilot camera's pinhole (TASK-2562): fx, fy, cx, cy and zero distortion, as OpenCV takes
+    // them, plus the stream's picture and the vehicle's gimbal now. With w, h and hfov (each
+    // optional, the still defaults otherwise) it is a survey still's instead.
+    s.Get(R"(/instances/(\d+)/camera/intrinsics)",
+          [snapshots](const httplib::Request &req, httplib::Response &res) {
+              if (!snapshots.vehicles) {
+                  reply_error(res, 404, "no such instance");
+                  return;
+              }
+              const bool still = req.has_param("w") || req.has_param("h") || req.has_param("hfov");
+              render::StillRequest request;
+              std::string error;
+              std::optional<double> hfov;
+              if (still && (!query_int(req, "w", render::StillRequest::kMinSize,
+                                       render::StillRequest::kMaxSize, request.width, error) ||
+                            !query_int(req, "h", render::StillRequest::kMinSize,
+                                       render::StillRequest::kMaxSize, request.height, error) ||
+                            !query_number(req, "hfov", render::StillRequest::kMinHfovDeg,
+                                          render::StillRequest::kMaxHfovDeg, hfov, error))) {
+                  reply_error(res, 400, error);
+                  return;
+              }
+              const std::vector<VehicleInfo> vehicles = snapshots.vehicles();
+              const VehicleInfo *v = find_instance(vehicles, req.matches[1].str());
+              if (v == nullptr) {
+                  reply_error(res, 404, "no such instance");
+                  return;
+              }
+              if (still) {
+                  if (!snapshots.still) {
+                      reply_error(res, 404, "still camera disabled");
+                      return;
+                  }
+                  res.set_content(intrinsics_json("still", request.width, request.height,
+                                                  hfov.value_or(request.hfov_deg)) +
+                                      "}",
+                                  "application/json");
+                  return;
+              }
+              const CameraIntrinsics &c = snapshots.camera_intrinsics;
+              if (!c.enabled) {
+                  reply_error(res, 404, "camera disabled (--camera-fps)");
+                  return;
+              }
+              std::string out = intrinsics_json("pilot", c.width, c.height, c.hfov_deg);
+              out += ",\"fps\":";
+              append_value(out, c.fps);
+              if (c.stream_width > 0) {
+                  out += ",\"stream\":{\"width\":" + std::to_string(c.stream_width) +
+                         ",\"height\":" + std::to_string(c.stream_height) + ",\"path\":\"/instances/" +
+                         std::to_string(v->instance) + "/main.264\"}";
+              } else {
+                  out += ",\"stream\":null";
+              }
+              // Where the camera looks now: the vehicle's gimbal as its last servo frame drove it, or the
+              // fixed mount on a vehicle that drives none.
+              out += ",\"gimbal\":{\"present\":";
+              out += v->gimbal ? "true" : "false";
+              out += ",\"pitch_deg\":";
+              append_value(out, v->gimbal ? v->gimbal_pitch_rad * kRadToDeg : c.mount_pitch_deg);
+              out += ",\"yaw_deg\":";
+              append_value(out, v->gimbal ? v->gimbal_yaw_rad * kRadToDeg : 0.0);
+              out += "}}";
+              res.set_content(out, "application/json");
+          });
+
+    // A vehicle's dock marker (TASK-2562): its ground truth; POST moves it (lat/lon or
+    // north_m/east_m, yaw_deg), DELETE puts it back where the vehicle spawned. By instance, like
+    // the camera's other settings, and like them it belongs to the vehicle.
+    const auto dock_route = [snapshots, home](const httplib::Request &req, httplib::Response &res,
+                                              int method) {
+        if (!snapshots.dock || !snapshots.vehicles) {
+            reply_error(res, 404, "dock markers disabled (--dock-markers 0, or no camera)");
+            return;
+        }
+        const std::vector<VehicleInfo> vehicles = snapshots.vehicles();
+        const VehicleInfo *v = find_instance(vehicles, req.matches[1].str());
+        if (v == nullptr) {
+            reply_error(res, 404, "no such instance");
+            return;
+        }
+        render::DockPatch patch;
+        if (method == 1) {
+            std::string error;
+            if (!parse_dock_patch(req.body, home, patch, error)) {
+                reply_error(res, 400, error);
+                return;
+            }
+        }
+        // A body that names no field changes nothing (and leaves a dock at home "home").
+        const std::optional<DockState> state =
+            snapshots.dock(*v, method == 1 && !patch.empty() ? &patch : nullptr, method == 2);
+        if (!state) {
+            reply_error(res, 404, "no dock for this instance");
+            return;
+        }
+        res.set_content(dock_json(*v, *state, home), "application/json");
+    };
+    s.Get(R"(/instances/(\d+)/camera/dock)",
+          [dock_route](const httplib::Request &req, httplib::Response &res) { dock_route(req, res, 0); });
+    s.Post(R"(/instances/(\d+)/camera/dock)",
+           [dock_route](const httplib::Request &req, httplib::Response &res) { dock_route(req, res, 1); });
+    s.Delete(R"(/instances/(\d+)/camera/dock)",
+             [dock_route](const httplib::Request &req, httplib::Response &res) { dock_route(req, res, 2); });
 
     // Survey still camera (docs/SKYHUB_INTEGRATION.md, "Survey stills"): one frame rendered on
     // demand, at the size, field of view and gimbal angle asked for, from the vehicle's pose in

@@ -2,6 +2,7 @@
 
 #include "core/thread_pool.h"
 #include "render/camera.h"
+#include "render/dock_marker.h"
 #include "render/image.h"
 #include "render/scene.h"
 #include "render/still_request.h"
@@ -43,10 +44,11 @@ CameraConfig still_camera_config(const StillRequest &req);
 // pitch, stabilised, computed in radians (Camera::stabilised). ``followed`` says which.
 Quat still_attitude(const StillPose &pose, const StillRequest &req, CameraAngles &angles, bool &followed);
 
-// Draw one still from an explicit camera pose. caller_runs as in Rasterizer::render.
+// Draw one still from an explicit camera pose. caller_runs and markers (the dock markers on
+// the ground) as in Rasterizer::render.
 Image render_still(const RasterScene &scene, const Vec3 &position_ned, const Quat &camera_quat,
                    const StillRequest &req, core::ThreadPool *pool, bool caller_runs = true,
-                   std::vector<int32_t> *surface = nullptr);
+                   std::vector<int32_t> *surface = nullptr, const GroundMarkers *markers = nullptr);
 
 // Lower the calling thread's scheduling priority (nice +10). Background render workers call
 // it so that, on a box short of cores, the physics tick wins every contest for a CPU.
@@ -99,9 +101,11 @@ class StillService {
     // A free slot, or nothing when all are taken.
     std::optional<Lease> try_acquire();
 
-    // Takes a slot for the length of the render; kBusy when there is none.
-    StillFrame render(const StillPose &pose, const StillRequest &req);
-    StillFrame render(Lease &lease, const StillPose &pose, const StillRequest &req);
+    // Takes a slot for the length of the render; kBusy when there is none. `markers`: the dock
+    // markers on the ground (render/dock_marker.h), drawn like the pilot camera draws them.
+    StillFrame render(const StillPose &pose, const StillRequest &req, const GroundMarkers *markers = nullptr);
+    StillFrame render(Lease &lease, const StillPose &pose, const StillRequest &req,
+                      const GroundMarkers *markers = nullptr);
 
   private:
     void release(int slot);
