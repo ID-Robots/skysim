@@ -79,9 +79,11 @@ void fill(const std::vector<ScreenTriangle> &tris, int width, Band &band) {
 } // namespace
 
 Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::ThreadPool *pool,
-                         std::vector<int32_t> *surface, bool caller_runs) const {
+                         std::vector<int32_t> *surface, bool caller_runs,
+                         const GroundMarkers *markers) const {
     Image image;
     std::vector<ScreenTriangle> tris;
+    MarkerView marker_view;
     // Setup: the frame buffers and the pass over the whole world that picks what is in shot.
     // With caller_runs = false it runs on a pool worker like the rest, so the caller's thread
     // (an HTTP worker at normal priority) does none of the work.
@@ -93,6 +95,9 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
             surface->assign(static_cast<size_t>(cfg_.width) * cfg_.height, kSurfaceSky);
         }
         transform(scene, camera, tris);
+        // The dock markers in shot, once a frame (a marker's texture is built here the first
+        // time one is, so on a worker too).
+        marker_view = MarkerView(markers, camera);
     };
     if (pool != nullptr && !caller_runs) {
         pool->parallel_for(1, [&](size_t, size_t) { setup(); }, false);
@@ -148,7 +153,24 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
                     const Vec3 normal =
                         id == kSurfaceGround ? Vec3{0.0, 0.0, -1.0} : normals[static_cast<size_t>(id)];
                     const double footprint = camera.footprint(dir, tt, normal);
-                    scene.lit_colour(id, p, footprint, colour);
+                    double marker = 0.0;
+                    const double covered = id == kSurfaceGround && !marker_view.empty()
+                                               ? marker_view.albedo(x, y, p[0], p[1], footprint, marker)
+                                               : 0.0;
+                    if (covered > 0.0) {
+                        // A dock marker's plate: its albedo, blended with the ground's along the
+                        // plate's edge, lit like the ground it lies on.
+                        double ground[3] = {marker, marker, marker};
+                        if (covered < 1.0) {
+                            scene.albedo(kSurfaceGround, p, footprint, ground);
+                        }
+                        for (int c = 0; c < 3; ++c) {
+                            colour[c] = mix(ground[c], marker, covered);
+                        }
+                        scene.light(kSurfaceGround, p, colour);
+                    } else {
+                        scene.lit_colour(id, p, footprint, colour);
+                    }
                     const double haze = haze_at(t, cfg_.max_range_m, cfg_.haze_start);
                     for (int c = 0; c < 3; ++c) {
                         colour[c] = mix(colour[c], kSkyHorizon[c], haze);

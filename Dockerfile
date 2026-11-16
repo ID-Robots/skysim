@@ -41,6 +41,8 @@ COPY CMakeLists.txt ./
 COPY src/ ./src/
 COPY tools/ ./tools/
 COPY tests/ ./tests/
+# The dock marker's image, compiled into the renderer (TASK-2562).
+COPY assets/ ./assets/
 
 # Jolt and httplib are pulled by FetchContent during configure, x264 by ExternalProject during
 # the build; SKYSIM_X264_ASM=ON fails the build rather than ship a C-only (slow) encoder.

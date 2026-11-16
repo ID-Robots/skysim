@@ -495,6 +495,10 @@ void RasterScene::albedo(int tri, const Vec3 &p, double footprint_m, double out[
 
 void RasterScene::lit_colour(int tri, const Vec3 &p, double footprint_m, double out[3]) const {
     albedo(tri, p, footprint_m, out);
+    light(tri, p, out);
+}
+
+void RasterScene::light(int tri, const Vec3 &p, double out[3]) const {
     const Vec3 n = tri >= 0 ? normals_[static_cast<size_t>(tri)] : Vec3{0.0, 0.0, -1.0};
     // Two-sided: a face turned away from the sun is not lit by it, but that is the shadow
     // ray's job — it starts on the face and runs into the building's own far side. Asking

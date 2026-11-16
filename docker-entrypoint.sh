@@ -73,6 +73,14 @@ if [[ -n "${SKYSIM_CAMERA_FPS:-}" ]]; then
     add_if_set SKYSIM_CAMERA_MJPEG --camera-mjpeg
 fi
 
+# Observer 1's e-ArUco dock marker on the ground at every vehicle's dock (TASK-2562;
+# docs/DOCK_MARKER.md), drawn by the camera and the survey stills alike: SKYSIM_DOCK_MARKERS=0
+# turns it off, SKYSIM_DOCK_MARKER_SIZE / SKYSIM_DOCK_INNER_SIZE are the outer and inner black
+# squares' sides in metres (default 1.0 and 0.09).
+add_if_set SKYSIM_DOCK_MARKERS --dock-markers
+add_if_set SKYSIM_DOCK_MARKER_SIZE --dock-marker-size
+add_if_set SKYSIM_DOCK_INNER_SIZE --dock-inner-size
+
 # Survey still camera (GET /instances/<n>/still.jpg). On by default and independent of
 # SKYSIM_CAMERA_FPS: it renders on demand, so it costs nothing until it is asked for.
 # SKYSIM_STILL_CONCURRENCY caps renders in flight (default 2; 0 turns the route off) and

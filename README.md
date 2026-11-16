@@ -188,7 +188,8 @@ docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
 `docker-entrypoint.sh` turns `SKYSIM_*` variables into flags: `SKYSIM_API_BIND`,
 `SKYSIM_API_PORT`, `SKYSIM_VEHICLES`, `SKYSIM_TILES`, `SKYSIM_STREAM_RADIUS`,
 `SKYSIM_STREAM_MAX`, `SKYSIM_DT`, `SKYSIM_TIME_MODE`, `SKYSIM_SPAWN_HOME`,
-`SKYSIM_RADIO_SPEC`, `SKYSIM_STILL_CONCURRENCY`, `SKYSIM_TEXTURE_SEED`, and
+`SKYSIM_RADIO_SPEC`, `SKYSIM_STILL_CONCURRENCY`, `SKYSIM_TEXTURE_SEED`, `SKYSIM_DOCK_MARKERS`,
+`SKYSIM_DOCK_MARKER_SIZE`, `SKYSIM_DOCK_INNER_SIZE`, and
 `SKYSIM_EXTRA_ARGS` for anything not listed.
 
 **Set `SKYSIM_TIME_MODE=interactive` on a long-lived server.** The default is `strict`,
@@ -242,6 +243,18 @@ the BrushlessPWM mount (`MNT1_TYPE 7`) the SkyHub gateway builds every SITL with
 camera then looks along the heading plus the gimbal's yaw at the gimbal's pitch, stabilised;
 a vehicle with no pulse on that output keeps the fixed `SKYSIM_CAMERA_PITCH`, rigidly mounted.
 `SKYSIM_GIMBAL_PITCH_CHANNEL=0` never follows a gimbal.
+
+**Every vehicle's dock carries Observer 1's e-ArUco marker** (TASK-2562): DICT_7X7_250 ID 228
+at 1.00 m with ID 11 at 0.09 m nested in its centre cell, from skyhub_core's generator
+(`assets/markers/`). It lies flat on the ground at the vehicle's home, heading north, and both
+cameras draw it at its real size, so a SITL can land on it with the unmodified aruco_landing
+module. `GET /instances/<n>/camera/intrinsics` publishes the pinhole the camera renders with (fx,
+fy, cx, cy, no distortion). `GET /instances/<n>/camera/dock` gives the marker's ground truth
+(pose, lat/lon, both markers' corners, the vehicle's offset from it); `POST` moves it and `DELETE`
+puts it back. `SKYSIM_DOCK_MARKERS=0` turns it off, and `SKYSIM_DOCK_MARKER_SIZE` /
+`SKYSIM_DOCK_INNER_SIZE` set the sizes. The marker costs nothing until a camera has one in shot.
+Details, the cv2.aruco proof from 30 m to 0.7 m and what it found:
+[docs/DOCK_MARKER.md](docs/DOCK_MARKER.md).
 
 **Survey stills need no switch.** `GET /instances/<n>/still.jpg` renders one large, exactly
 posed frame on demand, whatever `SKYSIM_CAMERA_FPS` says, so it costs nothing until it is

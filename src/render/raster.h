@@ -3,6 +3,7 @@
 #include "core/thread_pool.h"
 #include "core/world.h"
 #include "render/camera.h"
+#include "render/dock_marker.h"
 #include "render/image.h"
 #include "render/scene.h"
 
@@ -42,9 +43,11 @@ class Rasterizer {
 
     // `surface`, when given, receives one entry per pixel: the scene triangle index, or
     // kSurfaceGround / kSurfaceSky. caller_runs = false keeps the calling thread out of the
-    // work (see ThreadPool::parallel_for).
+    // work (see ThreadPool::parallel_for). `markers`, when given, are the dock markers lying on
+    // the ground (render/dock_marker.h); a marker's pixels are ground in `surface`.
     Image render(const RasterScene &scene, const Camera &camera, core::ThreadPool *pool,
-                 std::vector<int32_t> *surface = nullptr, bool caller_runs = true) const;
+                 std::vector<int32_t> *surface = nullptr, bool caller_runs = true,
+                 const GroundMarkers *markers = nullptr) const;
 
   private:
     // Project, clip against the near plane and cull, producing screen triangles.

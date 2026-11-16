@@ -111,10 +111,10 @@ CameraConfig still_camera_config(const StillRequest &req) {
 
 Image render_still(const RasterScene &scene, const Vec3 &position_ned, const Quat &camera_quat,
                    const StillRequest &req, core::ThreadPool *pool, bool caller_runs,
-                   std::vector<int32_t> *surface) {
+                   std::vector<int32_t> *surface, const GroundMarkers *markers) {
     const CameraConfig cfg = still_camera_config(req);
     const Camera camera = Camera::with_attitude(cfg, position_ned, camera_quat);
-    return Rasterizer(cfg).render(scene, camera, pool, surface, caller_runs);
+    return Rasterizer(cfg).render(scene, camera, pool, surface, caller_runs, markers);
 }
 
 bool lower_thread_priority() {
@@ -177,7 +177,8 @@ void StillService::release(int slot) {
     busy_[static_cast<size_t>(slot)] = false;
 }
 
-StillFrame StillService::render(const StillPose &pose, const StillRequest &req) {
+StillFrame StillService::render(const StillPose &pose, const StillRequest &req,
+                                const GroundMarkers *markers) {
     if (cfg_.concurrency == 0) {
         StillFrame frame;
         frame.status = StillFrame::Status::kDisabled;
@@ -191,10 +192,11 @@ StillFrame StillService::render(const StillPose &pose, const StillRequest &req) 
         frame.error = "busy: " + std::to_string(cfg_.concurrency) + " stills already rendering; retry";
         return frame;
     }
-    return render(*lease, pose, req);
+    return render(*lease, pose, req, markers);
 }
 
-StillFrame StillService::render(Lease &lease, const StillPose &pose, const StillRequest &req) {
+StillFrame StillService::render(Lease &lease, const StillPose &pose, const StillRequest &req,
+                                const GroundMarkers *markers) {
     StillFrame frame;
     frame.error = req.invalid();
     if (!frame.error.empty()) {
@@ -206,8 +208,8 @@ StillFrame StillService::render(Lease &lease, const StillPose &pose, const Still
     const Quat camera = still_attitude(pose, req, frame.camera, frame.gimbal);
     core::ThreadPool *pool = pools_[static_cast<size_t>(lease.slot())].get();
     try {
-        const Image image =
-            render_still(*scene_, pose.position_ned, camera, req, pool, /*caller_runs=*/false);
+        const Image image = render_still(*scene_, pose.position_ned, camera, req, pool, /*caller_runs=*/false,
+                                         nullptr, markers);
         // The encode is the other big cost of a frame; it runs on a worker too.
         pool->parallel_for(
             1, [&](size_t, size_t) { frame.jpeg = encode_jpeg(image, req.quality); }, /*caller_runs=*/false);
