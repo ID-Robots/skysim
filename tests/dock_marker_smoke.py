@@ -79,7 +79,12 @@ OFF_API_PORT = 18678
 OFF_RTSP_PORT = 18679
 OFF_INSTANCE = 87
 WIDTH, HEIGHT, HFOV = 1920, 1080, 81.0
+MODE = "full"
 HEIGHTS = [30.0, 21.5, 15.0, 5.0, 2.0, 1.2, 0.7]
+# The two captures this script makes: every height with 10 RTSP frames, or (--quick, the coverage
+# build) three heights with 3. A manifest must be one of them to be analysed.
+PROFILES = {"full": ([30.0, 21.5, 15.0, 5.0, 2.0, 1.2, 0.7], 10), "quick": ([30.0, 5.0, 0.7], 3)}
+
 # Which marker each detector setting must find at which heights, by OpenCV generation.
 NEW_DETECTOR = HAVE_CV and hasattr(cv2.aruco, "ArucoDetector")
 HIGH, LOW = [30.0, 21.5, 15.0], [5.0, 2.0, 1.2, 0.7]
@@ -479,8 +484,8 @@ def case_flight(sim: str, frames_dir: str, threads: int, bitrate_kbps: int = 0) 
            "--camera-size", f"{WIDTH}x{HEIGHT}", "--camera-fov", str(HFOV), "--straggler-timeout", "10"]
     if threads > 0:
         cmd += ["--camera-threads", str(threads), "--still-threads", str(threads), "--video-threads", "1"]
-    manifest: dict = {"camera": {"width": WIDTH, "height": HEIGHT, "hfov_deg": HFOV}, "heights_m": HEIGHTS,
-                      "rtsp_frames": RTSP_FRAMES, "heights": []}
+    manifest: dict = {"camera": {"width": WIDTH, "height": HEIGHT, "hfov_deg": HFOV}, "mode": MODE,
+                      "heights_m": HEIGHTS, "rtsp_frames": RTSP_FRAMES, "heights": []}
     with open(log_path, "w") as log:
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
     sitl = None
@@ -556,8 +561,12 @@ def complete(manifest: dict, frames_dir: str) -> bool:
         os.path.isfile(os.path.join(frames_dir, h["still"]["file"])) and
         len(h["rtsp"]["files"]) == manifest.get("rtsp_frames") and
         all(os.path.isfile(os.path.join(frames_dir, f)) for f in h["rtsp"]["files"]) for h in heights)
-    whole = bool(manifest.get("intrinsics")) and bool(heights) and flown == manifest.get("heights_m") and files_ok
-    check(whole, f"the capture is whole: heights {flown} of {manifest.get('heights_m')}, "
+    profile = PROFILES.get(manifest.get("mode", ""))
+    declared_ok = profile is not None and list(profile[0]) == manifest.get("heights_m") and \
+        profile[1] == manifest.get("rtsp_frames")
+    whole = bool(manifest.get("intrinsics")) and declared_ok and flown == manifest.get("heights_m") and files_ok
+    check(whole, f"the capture is whole and a {'/'.join(PROFILES)} one: mode {manifest.get('mode')}, "
+                 f"heights {flown} of {manifest.get('heights_m')}, "
                  f"{manifest.get('rtsp_frames')} RTSP frames each, intrinsics {'present' if manifest.get('intrinsics') else 'missing'}")
     return whole
 
@@ -778,9 +787,9 @@ def main() -> int:
                         help="30, 5 and 0.7 m and 3 RTSP frames each (the coverage build, at -O0)")
     args = parser.parse_args()
     if args.quick:
-        global HEIGHTS, RTSP_FRAMES
-        HEIGHTS = [30.0, 5.0, 0.7]
-        RTSP_FRAMES = 3
+        global MODE, HEIGHTS, RTSP_FRAMES
+        MODE = "quick"
+    HEIGHTS, RTSP_FRAMES = list(PROFILES[MODE][0]), PROFILES[MODE][1]
     if not HAVE_CV or (not args.analyse and shutil.which("ffmpeg") is None):
         print("dock_marker_smoke: SKIP — needs OpenCV with cv2.aruco (python3-opencv) and ffmpeg")
         return 77

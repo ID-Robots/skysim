@@ -299,6 +299,27 @@ int main() {
         CHECK(body(u.Post("/instances/7/camera/dock", R"({"north_m":1.5})", "application/json"), 200));
     }
 
+    {
+        // Near a pole: a dock past it has no lat/lon to give (the latitude clamps at 90), so its
+        // pose carries none, says why, and still posts back.
+        ControlServer::RadioConfig polar;
+        polar.home = skysim::radio::GeoAnchor{89.99, 0.0, 0.0};
+        ControlServer arctic("127.0.0.1", kBarePort + 3, queue, snaps, polar);
+        httplib::Client a("127.0.0.1", kBarePort + 3);
+        const auto far = body(
+            a.Post("/instances/7/camera/dock", R"({"north_m":2000,"east_m":0})", "application/json"), 200);
+        CHECK(far && !far->find("pose")->find("lat") &&
+              str(*far->find("pose"), "geo").find("pole") != std::string::npos);
+        CHECK(body(a.Post("/instances/7/camera/dock", R"({"north_m":2000,"east_m":0,"yaw_deg":10})",
+                          "application/json"),
+                   200));
+        const auto near_pole = body(
+            a.Post("/instances/7/camera/dock", R"({"north_m":100,"east_m":0})", "application/json"), 200);
+        CHECK(near_pole &&
+              near_pole->find("pose")->find("lat") != nullptr); // short of the pole: lat/lon as usual
+        CHECK(body(a.Delete("/instances/7/camera/dock"), 200));
+    }
+
     if (g_failures != 0) {
         std::printf("%d failure(s)\n", g_failures);
         return 1;

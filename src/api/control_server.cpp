@@ -709,15 +709,22 @@ std::string dock_json(const VehicleInfo &v, const DockState &d, const std::optio
     out += ",\"down_m\":0,\"yaw_deg\":";
     append_value(out, d.pose.yaw_rad * kRadToDeg);
     if (home) {
-        const core::GeoPoint geo =
-            core::geo_from_ned(core::GeoOrigin{home->lat_deg, home->lon_deg, home->ground_amsl_m},
-                               d.pose.north_m, d.pose.east_m, 0.0);
-        out += ",\"lat\":";
-        radio::json::append_fixed(out, geo.lat_deg, 9);
-        out += ",\"lon\":";
-        radio::json::append_fixed(out, geo.lon_deg, 9);
-        out += ",\"alt_amsl_m\":";
-        radio::json::append_fixed(out, geo.alt_amsl_m, 3);
+        // Only a lat/lon that names the dock: past a pole the latitude is clamped to 90 and no longer
+        // does, and a client sending this pose back would be refused for it (lat/lon and
+        // north_m/east_m 1 cm apart at most). There the pose says why it has none.
+        const core::GeoOrigin origin{home->lat_deg, home->lon_deg, home->ground_amsl_m};
+        const core::GeoPoint geo = core::geo_from_ned(origin, d.pose.north_m, d.pose.east_m, 0.0);
+        const core::NorthEast back = core::ned_from_geo(origin, geo.lat_deg, geo.lon_deg);
+        if (std::hypot(back.north_m - d.pose.north_m, back.east_m - d.pose.east_m) <= kSameDockM) {
+            out += ",\"lat\":";
+            radio::json::append_fixed(out, geo.lat_deg, 9);
+            out += ",\"lon\":";
+            radio::json::append_fixed(out, geo.lon_deg, 9);
+            out += ",\"alt_amsl_m\":";
+            radio::json::append_fixed(out, geo.alt_amsl_m, 3);
+        } else {
+            out += ",\"geo\":\"none: past a pole, latitude/longitude do not name this point\"";
+        }
     }
     out += "},\"home\":{\"north_m\":";
     append_value(out, d.home.north_m);

@@ -92,7 +92,9 @@ The dock's ground truth.
 
 - `pose` is the outer marker's centre on the ground and `yaw_deg`, the direction the image's top
   edge faces, clockwise from north. `lat`, `lon` and `alt_amsl_m` are present only with a geo
-  anchor (`--spawn-home` lat,lon). They use ArduPilot's own flat-earth step (`core/geo.h`).
+  anchor (`--spawn-home` lat,lon). They use ArduPilot's own flat-earth step (`core/geo.h`). For a
+  dock past a pole, where the latitude clamps at 90 and stops naming the point, `geo` says so in
+  their place, so the pose still posts back.
 - `corners_ned` lists each black square's corners in the order cv2.aruco reports a marker's
   corners: the image's top-left, top-right, bottom-right and bottom-left. At yaw 0 those are
   north-west, north-east, south-east and south-west.
