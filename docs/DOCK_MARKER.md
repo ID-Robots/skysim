@@ -132,7 +132,10 @@ What it holds skysim to, whatever the OpenCV version:
   detector biases get wider bounds, and they are the findings below: 8 % where the quad frames the
   white border's outline, and 12 % for a marker under 30 px (the inner marker at 5 m is 20 px,
   2.2 px a cell), whose side cv2.aruco's integer corners get a pixel or two wrong.
-- **Decoding**, with the expectations for the installed OpenCV generation (below).
+- **Decoding**, with the expectations for the installed OpenCV generation (below): in the still
+  and in 9 RTSP frames of 10 (8 for a marker under 30 px). H.264 at its default 1200 kbit/s for
+  1080p blurs a cell out of a frame now and then (once in CI, the outer marker at 21.5 m), and the
+  report lists which frames missed.
 
 The run used for the PR is in [docs/dock_marker/](dock_marker/). The main proof is
 [proof-opencv-4.5.4.md](dock_marker/proof-opencv-4.5.4.md): OpenCV 4.5.4, read inside the
