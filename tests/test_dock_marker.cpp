@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "core/geo.h"
+#include "core/world.h"
 #include "render/dock.h"
 #include "render/dock_marker.h"
 #include "render/render_service.h"
@@ -181,16 +182,39 @@ void test_bad_images() {
     bad.outer_size_m = 0.01;
     CHECK(!bad.invalid().empty());
     CHECK(DockMarkerSpec{}.invalid().empty());
-    // Below one cell by the /9 rule, but not inside the image's whole-pixel cell with its ring.
+    // Over 95 % of a cell is refused up front, so a size that starts the server always fits the
+    // committed image's whole-pixel cell; the largest that passes builds.
     DockMarkerSpec tight;
     tight.inner_size_m = 0.1111;
-    CHECK(tight.invalid().empty());
-    CHECK(asset(tight) == nullptr);
+    CHECK(!tight.invalid().empty());
     CHECK(render::MarkerTexture::from_png(render::dock_marker_png(), render::dock_marker_png_size(), tight,
                                           error) == nullptr &&
-          error.find("does not fit") != std::string::npos);
+          error == tight.invalid());
     CHECK(render::dock_marker_texture(tight) == nullptr); // logged once, cached as a failure
     CHECK(render::dock_marker_texture(tight) == nullptr);
+    DockMarkerSpec widest;
+    widest.inner_size_m = 1.0 / 9.0 * DockMarkerSpec::kMaxInnerCellFraction;
+    CHECK(widest.invalid().empty() && asset(widest) != nullptr);
+
+    // A small generator-like image (a 99 px square, cells of 11 px, an 8 px inner marker 1 px in
+    // from its cell's edge): it builds, but not with an inner marker stretched past its cell —
+    // the whole-pixel layout puts this one half a pixel off the cell's centre.
+    std::vector<uint8_t> small(109 * 109, 255);
+    for (int y = 5; y < 104; ++y) {
+        std::fill_n(small.begin() + y * 109 + 5, 99, uint8_t{0});
+    }
+    for (int y = 49; y < 60; ++y) {
+        std::fill_n(small.begin() + y * 109 + 49, 11, uint8_t{255});
+    }
+    for (int y = 50; y < 58; ++y) {
+        std::fill_n(small.begin() + y * 109 + 50, 8, uint8_t{0});
+    }
+    DockMarkerSpec modest;
+    modest.inner_size_m = 0.08;
+    const auto built = render::MarkerTexture::build(small.data(), 109, 109, modest, error);
+    CHECK(built != nullptr && built->size() == 128 && built->levels() == 8);
+    CHECK(render::MarkerTexture::build(small.data(), 109, 109, widest, error) == nullptr &&
+          error.find("does not fit") != std::string::npos);
     CHECK(render::dock_marker_texture(DockMarkerSpec{}) != nullptr);
     CHECK(render::dock_marker_texture(DockMarkerSpec{}) == render::dock_marker_texture(DockMarkerSpec{}));
 }
@@ -244,6 +268,11 @@ void maybe_write(const render::Image &img, const std::string &name) {
 double luma(const render::Image &img, int x, int y) {
     const size_t i = (static_cast<size_t>(y) * img.width + static_cast<size_t>(x)) * 3;
     return (img.rgb[i] + img.rgb[i + 1] + img.rgb[i + 2]) / 3.0;
+}
+
+render::Image img_upright(const render::RasterScene &scene, const render::Vec3 &eye, const render::Quat &q,
+                          const render::StillRequest &req, const render::GroundMarkers &markers) {
+    return render::render_still(scene, eye, q, req, nullptr, true, nullptr, &markers);
 }
 
 void test_frames() {
@@ -358,6 +387,39 @@ void test_frames() {
     // Looking away from it: in range, off screen.
     const render::Quat up = render::camera_quat_from_angles(0.0, -10.0, 0.0);
     CHECK(render::MarkerView(&markers, render::Camera::with_attitude(cfg, {20.0, 0.0, -2.0}, up)).empty());
+    // A scanned tile's ground mesh lying on the ground carries the marker like the ground plane
+    // does; a face raised above the ground hides it.
+    const auto quad = [](double z) {
+        auto t = [](core::Vec3 a, core::Vec3 b, core::Vec3 c) {
+            core::World::Triangle tri;
+            tri.a = a;
+            tri.b = b;
+            tri.c = c;
+            return tri;
+        };
+        return std::vector<core::World::Triangle>{t({-5, -5, z}, {5, -5, z}, {5, 5, z}),
+                                                  t({-5, -5, z}, {5, 5, z}, {-5, 5, z})};
+    };
+    render::RasterScene ground_mesh;
+    ground_mesh.build(quad(0.0));
+    render::RasterScene table;
+    table.build(quad(-0.5));
+    std::vector<int32_t> mesh_surface;
+    const render::Image on_mesh =
+        render::render_still(ground_mesh, eye, nadir, req, nullptr, true, &mesh_surface, &markers);
+    CHECK(mesh_surface[static_cast<size_t>(cfg.height / 2) * cfg.width + cfg.width / 2] >= 0); // the mesh won
+    // The same picture as on the bare ground plane, to rounding (the mesh's plane is hit by a
+    // different formula): every byte within 2.
+    const render::Image on_plane = img_upright(scene, eye, nadir, req, markers);
+    int worst = 0;
+    for (size_t i = 0; i < on_mesh.rgb.size() && on_mesh.rgb.size() == on_plane.rgb.size(); ++i) {
+        worst =
+            std::max(worst, std::abs(static_cast<int>(on_mesh.rgb[i]) - static_cast<int>(on_plane.rgb[i])));
+    }
+    CHECK(on_mesh.rgb.size() == on_plane.rgb.size() && worst <= 2);
+    CHECK(render::render_still(table, eye, nadir, req, nullptr, true, nullptr, &markers).rgb ==
+          render::render_still(table, eye, nadir, req, nullptr, true, nullptr, nullptr).rgb);
+
     // A marker given its own texture draws from it.
     const render::GroundMarkers own{render::GroundMarker{7, DockPose{}, DockMarkerSpec{}, tex}};
     CHECK(render::render_still(scene, eye, nadir, req, nullptr, true, nullptr, &own).rgb ==

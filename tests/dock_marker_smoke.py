@@ -208,10 +208,11 @@ def dock_point(dock: dict, square: dict, u: float, v: float) -> list[float]:
             0.0]
 
 
-def measured_side(grey, view: View, dock: dict, square: dict) -> tuple[float, float] | None:
+def measured_side(grey, view: View, dock: dict, square: dict) -> tuple[float | None, float] | None:
     """The square's black side in the frame, measured from pixels alone: the dark run along its
     bottom border row (black in every ArUco marker), against the side the camera model projects.
-    None when the row is not wholly in the frame."""
+    None when the row is not wholly in the frame or not resolved; a measurement of None when it
+    should be and the pixels show no dark run there (a failure, not a skip)."""
     v = 0.5 - 0.5 / 9.0
     (xa, ya), (xb, _) = view.project(dock_point(dock, square, -0.5, v)), view.project(dock_point(dock, square, 0.5, v))
     h, w = grey.shape
@@ -225,7 +226,7 @@ def measured_side(grey, view: View, dock: dict, square: dict) -> tuple[float, fl
     mid = (white + 8.0) / 2.0
     x = round((xa + xb) / 2.0)
     if line[x] >= mid:
-        return None
+        return None, float(abs(xb - xa))
     a = x
     while a > 0 and line[a - 1] < mid:
         a -= 1
@@ -260,7 +261,7 @@ def evaluate(grey, view: View, dock: dict) -> dict:
         m = measured_side(grey, view, dock, dock[key])
         if m is not None:
             out["geometry"][str(mid)] = {"measured_px": m[0], "projected_px": round(m[1], 2),
-                                         "err_px": round(m[0] - m[1], 2)}
+                                         "err_px": None if m[0] is None else round(m[0] - m[1], 2)}
     for name, rate in RATES.items():
         found = detect(grey, rate)
         per: dict = {}
@@ -444,8 +445,12 @@ def summarise(results: list[dict], rate: str, mid: str) -> dict:
 
 
 def geometry_err(results: list[dict], mid: str) -> float | None:
-    errs = [abs(r["geometry"][mid]["err_px"]) for r in results if mid in r["geometry"]]
-    return max(errs) if errs else None
+    """The worst error over the frames that resolve the square; inf when one of them should
+    measure it and cannot."""
+    errs = [r["geometry"][mid]["err_px"] for r in results if mid in r["geometry"]]
+    if any(e is None for e in errs):
+        return math.inf
+    return max(abs(e) for e in errs) if errs else None
 
 
 def framed(entry: dict, rate: str, mid: str, view_geometry: dict) -> bool:
@@ -473,7 +478,8 @@ def case_flight(sim: str, frames_dir: str, threads: int) -> dict:
            "--camera-size", f"{WIDTH}x{HEIGHT}", "--camera-fov", str(HFOV), "--straggler-timeout", "10"]
     if threads > 0:
         cmd += ["--camera-threads", str(threads), "--still-threads", str(threads), "--video-threads", "1"]
-    manifest: dict = {"camera": {"width": WIDTH, "height": HEIGHT, "hfov_deg": HFOV}, "heights": []}
+    manifest: dict = {"camera": {"width": WIDTH, "height": HEIGHT, "hfov_deg": HFOV}, "heights_m": HEIGHTS,
+                      "rtsp_frames": RTSP_FRAMES, "heights": []}
     with open(log_path, "w") as log:
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
     sitl = None
@@ -534,6 +540,22 @@ def case_flight(sim: str, frames_dir: str, threads: int) -> dict:
     return manifest
 
 
+def complete(manifest: dict, frames_dir: str) -> bool:
+    """Whether a capture is whole: the intrinsics, every height it set out to fly, and at each the
+    still and all the RTSP frames it declared, on disk. A partial one fails the run rather than
+    being analysed as far as it goes."""
+    heights = manifest.get("heights", [])
+    flown = [h.get("height_m") for h in heights]
+    files_ok = all(
+        os.path.isfile(os.path.join(frames_dir, h["still"]["file"])) and
+        len(h["rtsp"]["files"]) == manifest.get("rtsp_frames") and
+        all(os.path.isfile(os.path.join(frames_dir, f)) for f in h["rtsp"]["files"]) for h in heights)
+    whole = bool(manifest.get("intrinsics")) and bool(heights) and flown == manifest.get("heights_m") and files_ok
+    check(whole, f"the capture is whole: heights {flown} of {manifest.get('heights_m')}, "
+                 f"{manifest.get('rtsp_frames')} RTSP frames each, intrinsics {'present' if manifest.get('intrinsics') else 'missing'}")
+    return whole
+
+
 def analyse(manifest: dict, frames_dir: str, report: dict) -> None:
     """What the installed OpenCV makes of the captured frames, against the ground truth."""
     intr = manifest["intrinsics"]
@@ -559,17 +581,21 @@ def analyse(manifest: dict, frames_dir: str, report: dict) -> None:
         report["heights"].append(entry)
 
         # What skysim draws: each marker's black square, measured off the pixels, where the
-        # published intrinsics and ground truth put it — within 2 px (or 1 %).
+        # published intrinsics and ground truth put it — within 2 px (or 1 %). Wherever the still
+        # resolves a square, so does every RTSP frame (the same pose): a frame that cannot be
+        # measured there fails rather than drops out.
         for mid in ("228", "11"):
             g = entry["still"]["geometry"].get(mid)
-            if g:
-                check(abs(g["err_px"]) <= max(2.0, 0.01 * g["projected_px"]),
-                      f"still {height} m: {mid}'s black square is {g['measured_px']:.0f} px, projected "
-                      f"{g['projected_px']:.1f}")
+            if not g:
+                continue
+            limit = max(2.0, 0.01 * g["projected_px"])
+            check(g["err_px"] is not None and abs(g["err_px"]) <= limit,
+                  f"still {height} m: {mid}'s black square is {g['measured_px']} px, projected {g['projected_px']:.1f}")
+            unmeasured = sum(1 for r in rtsp if mid not in r["geometry"] or r["geometry"][mid]["err_px"] is None)
             worst = entry["rtsp"]["geometry_max_err_px"][mid]
-            if worst is not None and g:
-                check(worst <= max(2.0, 0.01 * g["projected_px"]) + 1.0,
-                      f"rtsp {height} m: {mid}'s black square within {worst:.1f} px of its projection")
+            check(unmeasured == 0 and worst is not None and worst <= limit + 1.0,
+                  f"rtsp {height} m: {mid}'s black square within {worst} px of its projection in every frame "
+                  f"({unmeasured} unmeasured)")
         # What the detector makes of it.
         for rate, mid in (("default", "228"), ("default", "11"), ("rate_0.04", "228"), ("rate_0.04", "11")):
             if height not in EXPECT[rate][mid]:
@@ -586,24 +612,26 @@ def analyse(manifest: dict, frames_dir: str, report: dict) -> None:
                   f"(need {need}; missed frames {rs.get('missed', [])})")
             if not st["found"] or rs["found"] == 0:
                 continue
-            check(st["lateral_err_m"] <= POS_TOL_M and rs["max_lateral_err_m"] <= POS_TOL_M,
-                  f"{height} m: {mid} lateral (landing) error {st['lateral_err_m'] * 100:.1f} cm still, "
-                  f"<= {rs['max_lateral_err_m'] * 100:.1f} cm RTSP (limit 10 cm)")
-            # The scale: within 5 % where the detector framed the black square and it is 30 px or
-            # more. Two detector biases get wider bounds, so a rendering change cannot hide in
-            # them: 8 % where the quad frames the 2 cm white border's outline instead (outer 228 on
-            # darker ground, the second finding), and 12 % for a marker under 30 px (the inner at
-            # 5 m, about 20 px), where cv2.aruco's integer corners (no corner refinement by
-            # default) are a pixel or two off a 20 px side.
-            bound = 5.0
-            key = f"framed_{rate}_{mid}"
-            if not (entry["still"][key] and entry["rtsp"][key] == rs["found"]):
-                bound = 8.0
-            if st["side_px"] < 30.0:
-                bound = 12.0
-            check(st["size_err_pct"] <= bound and rs["max_size_err_pct"] <= bound,
-                  f"{height} m: {mid} size {st['size_est_m']:.4f} m ({st['size_err_pct']:.2f} %) still, "
-                  f"<= {rs['max_size_err_pct']:.2f} % RTSP (limit {bound:g} %)")
+            # Each detection on its own (the still, then every RTSP frame): lateral within 10 cm, and
+            # the scale within its own bound — 5 % where the detector framed the black square and
+            # it is 30 px or more; 8 % where the quad frames the 2 cm white border's outline instead
+            # (outer 228 on darker ground, the second finding); 12 % for a marker under 30 px (the
+            # inner at 5 m, about 20 px), whose side cv2.aruco's integer corners (no corner
+            # refinement by default) get a pixel or two wrong. A rendering change cannot hide in them.
+            over = []
+            for i, frame in enumerate([entry["still"], *rtsp]):
+                d = frame[rate][mid]
+                if not d["found"]:
+                    continue
+                bound = 12.0 if d["side_px"] < 30.0 else (5.0 if framed(frame, rate, mid, frame["geometry"]) else 8.0)
+                where = "still" if i == 0 else f"rtsp frame {i - 1}"
+                if d["lateral_err_m"] > POS_TOL_M:
+                    over.append(f"{where}: lateral {d['lateral_err_m'] * 100:.1f} cm")
+                if d["size_err_pct"] > bound:
+                    over.append(f"{where}: size {d['size_err_pct']:.2f} % > {bound:g} %")
+            check(not over, f"{height} m: {mid} ({rate}) lateral <= {rs['max_lateral_err_m'] * 100:.1f} cm (limit "
+                            f"10 cm), size <= {max(st['size_err_pct'], rs['max_size_err_pct']):.2f} % within each "
+                            f"detection's bound {over or ''}")
         for rate in RATES:
             print(f"dock_marker_smoke: {height:>5} m {rate:<9} still 228 {entry['still'][rate]['228']} "
                   f"11 {entry['still'][rate]['11']}")
@@ -764,7 +792,7 @@ def main() -> int:
             frames_dir = args.frames or os.path.join(tmp, "frames")
             os.makedirs(frames_dir, exist_ok=True)
             manifest = case_flight(args.sim, frames_dir, args.camera_threads)
-        if manifest.get("intrinsics") and manifest.get("heights"):
+        if complete(manifest, frames_dir):
             analyse(manifest, frames_dir, report)
         if args.report:
             for h in manifest.get("heights", []):

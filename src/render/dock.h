@@ -35,14 +35,20 @@ struct DockMarkerSpec {
     double outer_size_m{kDefaultOuterSizeM}; // side of the outer marker's black square
     double inner_size_m{kDefaultInnerSizeM}; // side of the inner marker's black square
 
-    // Empty when the sizes can be drawn, else what is wrong. The inner marker sits on a white
-    // square one cell across, so it must be smaller than a cell.
+    // The inner marker sits on a white square one cell across, and needs some of its white ring
+    // to be found: at most this much of a cell (the generator's own is 0.8).
+    static constexpr double kMaxInnerCellFraction = 0.95;
+
+    // Empty when the sizes can be drawn, else what is wrong. Any size this accepts fits on the
+    // committed image's cell (437 px of 3937, whole pixels, 0.1 % under a ninth), so a size that
+    // passes at startup is never refused later by the texture.
     std::string invalid() const {
         if (!(outer_size_m >= kMinOuterSizeM && outer_size_m <= kMaxOuterSizeM)) {
             return "dock marker size must be between 0.1 and 10 m";
         }
-        if (!(inner_size_m > 0.0 && inner_size_m < outer_size_m / kCells)) {
-            return "dock inner marker size must be above 0 and below one cell of the outer marker (size / 9)";
+        if (!(inner_size_m > 0.0 && inner_size_m <= outer_size_m / kCells * kMaxInnerCellFraction)) {
+            return "dock inner marker size must be above 0 and at most 95 % of one cell of the outer marker "
+                   "(size / 9 * 0.95)";
         }
         return {};
     }

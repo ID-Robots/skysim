@@ -154,7 +154,9 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
                         id == kSurfaceGround ? Vec3{0.0, 0.0, -1.0} : normals[static_cast<size_t>(id)];
                     const double footprint = camera.footprint(dir, tt, normal);
                     double marker = 0.0;
-                    const double covered = id == kSurfaceGround && !marker_view.empty()
+                    // On the ground plane or on a ground mesh lying on it (a scanned tile's): a
+                    // dock marker lies on either. A raised face hides it.
+                    const double covered = !marker_view.empty() && scene.ground_level(id)
                                                ? marker_view.albedo(x, y, p[0], p[1], footprint, marker)
                                                : 0.0;
                     if (covered > 0.0) {
@@ -162,12 +164,12 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
                         // plate's edge, lit like the ground it lies on.
                         double ground[3] = {marker, marker, marker};
                         if (covered < 1.0) {
-                            scene.albedo(kSurfaceGround, p, footprint, ground);
+                            scene.albedo(id, p, footprint, ground);
                         }
                         for (int c = 0; c < 3; ++c) {
                             colour[c] = mix(ground[c], marker, covered);
                         }
-                        scene.light(kSurfaceGround, p, colour);
+                        scene.light(id, p, colour);
                     } else {
                         scene.lit_colour(id, p, footprint, colour);
                     }

@@ -13,7 +13,7 @@ calibration and a test can measure the landing error.
 |---|---|
 | family | nested e-ArUco, cv2.aruco `DICT_7X7_250` |
 | outer | ID 228, 1.00 m black square (`--dock-marker-size`, `SKYSIM_DOCK_MARKER_SIZE`) |
-| inner | ID 11, 0.09 m black square on a white square one outer cell across, in the outer marker's centre cell (`--dock-inner-size`, `SKYSIM_DOCK_INNER_SIZE`) |
+| inner | ID 11, 0.09 m black square on a white square one outer cell across, in the outer marker's centre cell (`--dock-inner-size`, `SKYSIM_DOCK_INNER_SIZE`; at most 95 % of a cell, so a white ring stays around it; a larger size stops startup) |
 | plate | the image's 2 cm white border around the outer marker: 1.0396 m square at 1.00 m |
 | image | `assets/markers/e_aruco_228_11_100cm.png`, skyhub_core `utils/generate_e_aruco_marker.py --size 100 --outer-id 228 --inner-id 11 --dpi 100 --border 2.0`, unedited ([README](../assets/markers/README.md)) |
 | where | each vehicle's home (where it spawned, where ArduPilot sets home when it arms), yaw 0 (the image upright with north up). It can be moved per vehicle (below) |
@@ -25,7 +25,8 @@ distance is aruco_landing's setting. skysim draws both markers at every distance
 
 **How it is drawn.** The marker is a decal, not geometry. The rasteriser already intersects the
 ground plane analytically per pixel, and a ground pixel that lands on a plate takes the marker's
-albedo instead of the ground texture (white 0.80, black 0.03, a matte print), lit and hazed like
+albedo instead of the ground texture. A scanned tile's ground mesh at ground level carries it too,
+and a raised face hides it (white 0.80, black 0.03, a matte print), lit and hazed like
 the ground under it, building shadows included. The outer marker is drawn at the image's own
 scale, so its cells are the generator's. The inner marker is stretched about its own centre to
 the configured inner size, by exact area weights. The image's 349 px make 0.0886 m at 1.00 m, and
@@ -40,7 +41,7 @@ truth is asked for. The log then says `skysim: dock marker texture built (...)`.
 screen-box test per ground pixel for each marker in shot, and nothing for markers out of range or
 off screen. A parked vehicle's picture is redrawn when its dock moves and re-sent otherwise.
 `tests/dock_marker_smoke.py` holds an idle server (camera on, a vehicle on its dock, nobody
-watching) under 25 % of a core (1.0 % measured), and checks that the texture is never built there.
+watching) under 25 % of a core (1.3 % measured), and checks that the texture is never built there.
 
 **Gimbal.** Nothing new: the pilot camera and `still.jpg?gimbal=1` follow the pitch ArduPilot
 drives on the mount output (TASK-2548). A SITL that points the gimbal at -90 deg for docking looks
@@ -102,11 +103,13 @@ The dock's ground truth.
 - `source` is `home` until the dock is moved, then `set`.
 
 `POST /instances/<n>/camera/dock` moves the dock. The body is a JSON object with `lat` and `lon`
-(this needs the geo anchor) or `north_m` and `east_m`, and/or `yaw_deg`. Absent fields keep their
-value, so a GET's pose can be sent back with one field changed. A body that names no field changes
-nothing. It answers like GET. `400` for a body that is not an object, a field that is not a number,
-lat/lon mixed with north/east, lat without lon, a dock more than 20 km from the world origin, or a
-yaw outside ±360. `DELETE` puts the dock back at the vehicle's home. The dock belongs to the
+(this needs the geo anchor) and/or `north_m` and `east_m`, and/or `yaw_deg`. Absent fields keep
+their value, and the change is applied in one step, so concurrent partial changes cannot undo each
+other. A GET's whole `pose` can be sent back with one field changed: when lat/lon and
+north_m/east_m both come, they must name the same point (within 1 cm), and then north_m/east_m
+win. A body that names no field changes nothing. It answers like GET. `400` for a body that is not
+an object, a field that is not a number, lat/lon and north/east that disagree, lat without lon, a
+dock more than 20 km from the world origin, or a yaw outside ±360. `DELETE` puts the dock back at the vehicle's home. The dock belongs to the
 vehicle: it goes when the vehicle despawns, and the next vehicle at that instance starts at its own
 home. Every camera draws every vehicle's dock, as a camera would see them in the real world.
 `404` with dock markers off (`--dock-markers 0`, or neither the camera nor the still camera on).
@@ -124,10 +127,10 @@ What it holds skysim to, whatever the OpenCV version:
 
 - **Geometry, detector-free.** Each black square's side, measured off the pixels, is within 2 px
   (or 1 %) of what the published intrinsics and ground truth project. The worst seen was 0.9 px in
-  a still and 1.9 px (of 934) in an H.264 frame.
+  a still and 1.8 px (of 934) in an H.264 frame.
 - **Lateral (landing) error.** For every marker the detector finds, tvec (the marker's centre
   relative to the camera) across the optical axis is within 10 cm of the truth. The worst seen
-  was 1.2 cm, at 1.2 m.
+  was 1.6 cm, at 21.5 m.
 - **Scale.** The marker size implied by the true distance and the solved one is within 5 %. Two
   detector biases get wider bounds, and they are the findings below: 8 % where the quad frames the
   white border's outline, and 12 % for a marker under 30 px (the inner marker at 5 m is 20 px,
@@ -135,7 +138,8 @@ What it holds skysim to, whatever the OpenCV version:
 - **Decoding**, with the expectations for the installed OpenCV generation (below): in the still
   and in 9 RTSP frames of 10 (8 for a marker under 30 px). H.264 at its default 1200 kbit/s for
   1080p blurs a cell out of a frame now and then (once in CI, the outer marker at 21.5 m), and the
-  report lists which frames missed.
+  report lists which frames missed. The lateral and scale bounds hold for each detection on its
+  own, and `--analyse` refuses a capture that is missing a height or a frame.
 
 The run used for the PR is in [docs/dock_marker/](dock_marker/). The main proof is
 [proof-opencv-4.5.4.md](dock_marker/proof-opencv-4.5.4.md): OpenCV 4.5.4, read inside the
@@ -154,7 +158,8 @@ and then re-analyses the same frames with 4.5.4 from apt on an Ubuntu 22.04 cont
    The detector treats the two squares as "too close" and keeps the larger one, the white cell,
    which then fails to decode. On the committed image, ID 11 is lost at full resolution and at
    2048 and 1024 px, and decodes again once the inner marker is under about 60 px. In the flight,
-   with the defaults, ID 11 decodes only at 5 m (20 px), and at 2, 1.2 and 0.7 m it is not found.
+   with the defaults, ID 11 decodes only at 5 m (20 px: in the still and 7 of 10 RTSP frames), and
+   at 2, 1.2 and 0.7 m it is not found.
    At 0.7 m the outer marker no longer fits in the frame, so nothing decodes at all. With
    `minMarkerDistanceRate <= 0.04`, ID 11 decodes in every frame from 5 m to 0.7 m. OpenCV 4.7+
    (`ArucoDetector`, a new candidate filter) keeps the inner marker with the defaults, from 5 m
@@ -170,7 +175,7 @@ and then re-analyses the same frames with 4.5.4 from apt on an Ubuntu 22.04 cont
    candidate that decodes to 228. The "too close" filter keeps the larger one, so the corners land
    on the border's outside and the marker looks 5 to 7 % larger than it is, at 15 to 1.2 m with the
    legacy detector (in the stills; in H.264 frames at 15 m it framed the black square). The distance
-   is underestimated by the same amount, and the lateral error stays under 1.3 cm. On a white surround the same frames give the exact black square (563 px against
+   is underestimated by the same amount, and the lateral error stays under 1.6 cm. On a white surround the same frames give the exact black square (563 px against
    562 px projected at 2 m). Whether the real dock's surround is darker than the print decides
    whether Observer 1 sees this too.
 3. **OpenCV 4.5/4.6's `SOLVEPNP_IPPE_SQUARE`**, which `estimatePoseSingleMarkers` uses, returns a

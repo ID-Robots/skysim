@@ -221,13 +221,39 @@ int main() {
         CHECK(same && near(num(*same, "pose", "north_m"), 12.0, 1e-3) && str(*same, "source") == "set");
         CHECK(body(c.Post("/instances/7/camera/dock", "", "application/json"), 200));
 
+        // A GET's whole pose sent back with only its yaw changed: lat/lon and north/east agree.
+        const auto got = c.Get("/instances/7/camera/dock");
+        std::string error;
+        const auto now = got ? json::parse(got->body, error) : std::nullopt;
+        CHECK(now.has_value());
+        if (now) {
+            char round_trip[256];
+            std::snprintf(round_trip, sizeof(round_trip),
+                          R"({"north_m":%.9f,"east_m":%.9f,"down_m":0,"yaw_deg":30,"lat":%.9f,"lon":%.9f})",
+                          num(*now, "pose", "north_m"), num(*now, "pose", "east_m"), num(*now, "pose", "lat"),
+                          num(*now, "pose", "lon"));
+            const auto rt = body(c.Post("/instances/7/camera/dock", round_trip, "application/json"), 200);
+            CHECK(rt && near(num(*rt, "pose", "north_m"), num(*now, "pose", "north_m"), 1e-6) &&
+                  near(num(*rt, "pose", "east_m"), num(*now, "pose", "east_m"), 1e-6) &&
+                  near(num(*rt, "pose", "yaw_deg"), 30.0, 1e-9));
+            std::snprintf(round_trip, sizeof(round_trip), R"({"north_m":%.9f,"lat":%.9f,"lon":%.9f})",
+                          num(*now, "pose", "north_m") + 1.0, num(*now, "pose", "lat"),
+                          num(*now, "pose", "lon"));
+            const auto apart = c.Post("/instances/7/camera/dock", round_trip, "application/json");
+            CHECK(apart && apart->status == 400 && apart->body.find("apart") != std::string::npos);
+        }
+
+        // Refused bodies change nothing: the whole pose is as it was, after each one.
+        const skysim::render::DockPose before = board->get(3)->pose;
         for (const char *bad :
              {R"({"lat":42.1})", R"({"lat":42.1,"lon":24.7,"north_m":1})", R"({"yaw_deg":400})",
               R"({"north_m":30000})", R"({"east_m":-30000})", R"({"lat":95,"lon":24})",
               R"({"lat":42,"lon":200})", R"({"north_m":"3"})", R"([1,2])", R"({"north_m":)"}) {
             CHECK(body(c.Post("/instances/7/camera/dock", bad, "application/json"), 400));
+            const skysim::render::DockPose after = board->get(3)->pose;
+            CHECK(after.north_m == before.north_m && after.east_m == before.east_m &&
+                  after.yaw_rad == before.yaw_rad);
         }
-        CHECK(board->get(3)->pose.north_m != 0.0); // the bad ones changed nothing
 
         const auto home = body(c.Delete("/instances/7/camera/dock"), 200);
         CHECK(home && str(*home, "source") == "home" && num(*home, "pose", "north_m") == 0.0 &&

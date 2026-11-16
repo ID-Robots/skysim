@@ -570,9 +570,14 @@ std::string intrinsics_json(const char *camera, int width, int height, double hf
     return out; // left open for the caller's fields
 }
 
-// A POST /camera/dock body: a JSON object with lat and lon, or north_m and east_m, and/or
-// yaw_deg, as a patch: absent fields keep the dock's current value, so a GET's pose can be sent
-// back with one field changed. Bounded to the ground the renderer draws (20 km of the origin).
+// How far apart lat/lon and north_m/east_m in one POST /camera/dock body may be and still name
+// the same dock.
+constexpr double kSameDockM = 0.01;
+
+// A POST /camera/dock body: a JSON object with lat and lon and/or north_m and east_m (both only
+// when they name the same point), and/or yaw_deg, as a patch: absent fields keep the dock's
+// current value, so a GET's pose can be sent back with one field changed. Bounded to the ground
+// the renderer draws (20 km of the origin).
 bool parse_dock_patch(const std::string &body, const std::optional<radio::GeoAnchor> &home,
                       render::DockPatch &patch, std::string &error) {
     patch = render::DockPatch{};
@@ -610,10 +615,6 @@ bool parse_dock_patch(const std::string &body, const std::optional<radio::GeoAnc
         !number("yaw_deg", yaw)) {
         return false;
     }
-    if ((lat || lon) && (north || east)) {
-        error = "give lat and lon, or north_m and east_m, not both";
-        return false;
-    }
     if (lat.has_value() != lon.has_value()) {
         error = "lat and lon go together";
         return false;
@@ -629,8 +630,25 @@ bool parse_dock_patch(const std::string &body, const std::optional<radio::GeoAnc
         }
         const core::NorthEast ne = core::ned_from_geo(
             core::GeoOrigin{home->lat_deg, home->lon_deg, home->ground_amsl_m}, *lat, *lon);
-        north = ne.north_m;
-        east = ne.east_m;
+        // Both spellings, as a GET's pose carries them: they must name the same place (to the
+        // 9 decimals a GET prints lat/lon with, a fraction of a millimetre), and then north_m and
+        // east_m, the exact ones, win. A pose sent back with only its yaw changed round-trips.
+        if (north || east) {
+            const double apart =
+                std::hypot(north.value_or(ne.north_m) - ne.north_m, east.value_or(ne.east_m) - ne.east_m);
+            if (!(apart <= kSameDockM)) {
+                char buf[160];
+                std::snprintf(
+                    buf, sizeof(buf),
+                    "lat/lon and north_m/east_m are %.3f m apart: send one of them, or both for the same "
+                    "point",
+                    apart);
+                error = buf;
+                return false;
+            }
+        }
+        north = north.value_or(ne.north_m);
+        east = east.value_or(ne.east_m);
     }
     constexpr double kMaxOffsetM = 20000.0;
     if ((north && std::fabs(*north) > kMaxOffsetM) || (east && std::fabs(*east) > kMaxOffsetM)) {
