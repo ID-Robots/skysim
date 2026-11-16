@@ -257,18 +257,28 @@ def detections(grey, view, docks: dict, base: int) -> list[dict]:
     return out
 
 
-def judge(run: dict, frames_dir: str, report: dict) -> None:
+def judge(run: dict, frames_dir: str, report: dict, rtsp_frames: int) -> None:
     mode, base = run["mode"], run["base_instance"]
     for h in run["heights"]:
         docks = h["docks"]
         n = len(h["instances"])
-        rows: dict[str, list[list[dict]]] = {}
-        for p in h["pictures"]:
-            grey = cv2.imread(os.path.join(frames_dir, p["file"]), cv2.IMREAD_GRAYSCALE)
-            view = dms.View(p["camera_ned"], p["angles_deg"], np.array(p["k"], dtype=np.float64))
-            rows.setdefault(p["kind"], []).append(detections(grey, view, docks, base))
         height = h["height_m"]
         tag = f"{mode} {height:g} m, {n} vehicles"
+        # Every picture this height should have, on disk, before any is judged: a capture with one
+        # missing must fail rather than pass on the pictures it has.
+        pictures = h.get("pictures", [])
+        want = {"still": 1, "mjpeg": 1, "rtsp": rtsp_frames, "still_dev": 1 if height in DEV_HEIGHTS else 0}
+        have = {k: sum(1 for p in pictures if p["kind"] == k) for k in want}
+        on_disk = all(os.path.isfile(os.path.join(frames_dir, p["file"])) for p in pictures)
+        check(have == want and on_disk, f"{tag}: every picture captured and on disk ({have}, want {want})")
+        rows: dict[str, list[list[dict]]] = {}
+        for p in pictures:
+            grey = cv2.imread(os.path.join(frames_dir, p["file"]), cv2.IMREAD_GRAYSCALE)
+            if grey is None:
+                check(False, f"{tag}: {p['file']} reads as an image")
+                continue
+            view = dms.View(p["camera_ned"], p["angles_deg"], np.array(p["k"], dtype=np.float64))
+            rows.setdefault(p["kind"], []).append(detections(grey, view, docks, base))
         summary: dict = {"mode": mode, "height_m": height, "vehicles": n}
         for kind, found in rows.items():
             outer = [[d for d in f if d["id"] == OUTER] for f in found]
@@ -407,7 +417,7 @@ def main() -> int:
         check(whole, f"the capture is whole: both runs, every height with 2 and 3 vehicles ({manifest.get('profile')})")
         if whole:
             for m in ("own", "all"):
-                judge(runs[m], frames_dir, report)
+                judge(runs[m], frames_dir, report, profile["rtsp_frames"])
     if args.report:
         write_report(report, args.report)
     for r in report.get("rows", []):
