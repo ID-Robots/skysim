@@ -397,14 +397,16 @@ void RenderService::run() {
         Window pass;
         pass.started = started;
         pass.watched = wanted.size();
-        // One list of dock markers for the pass: the same pointer until a dock changes, so a
-        // parked vehicle's picture stays current — and re-sent — until its marker moves.
-        const std::shared_ptr<const GroundMarkers> markers = cfg_.docks ? cfg_.docks->markers() : nullptr;
         for (const Wanted &w : wanted) {
             if (stop_.load(std::memory_order_relaxed)) {
                 break;
             }
             const Pose *pose = w.pose;
+            // The docks this vehicle's camera sees — its own alone, unless every camera is to see
+            // every dock (DockBoard::seen_by, TASK-2609). The same pointer until that list changes,
+            // so a parked vehicle's picture stays current — and re-sent — until a dock in it moves.
+            const std::shared_ptr<const GroundMarkers> markers =
+                cfg_.docks ? cfg_.docks->seen_by(pose->vehicle_id) : nullptr;
             Drawn &d = last[pose->vehicle_id];
             if (d.image && same_pose(d.pose, *pose) && d.markers == markers) {
                 ++pass.reused;

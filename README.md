@@ -189,7 +189,7 @@ docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
 `SKYSIM_API_PORT`, `SKYSIM_VEHICLES`, `SKYSIM_TILES`, `SKYSIM_STREAM_RADIUS`,
 `SKYSIM_STREAM_MAX`, `SKYSIM_DT`, `SKYSIM_TIME_MODE`, `SKYSIM_SPAWN_HOME`,
 `SKYSIM_RADIO_SPEC`, `SKYSIM_STILL_CONCURRENCY`, `SKYSIM_TEXTURE_SEED`, `SKYSIM_DOCK_MARKERS`,
-`SKYSIM_DOCK_MARKER_SIZE`, `SKYSIM_DOCK_INNER_SIZE`, and
+`SKYSIM_DOCK_MARKER_SIZE`, `SKYSIM_DOCK_INNER_SIZE`, `SKYSIM_DOCK_MARKERS_VISIBLE`, and
 `SKYSIM_EXTRA_ARGS` for anything not listed.
 
 **Set `SKYSIM_TIME_MODE=interactive` on a long-lived server.** The default is `strict`,
@@ -252,7 +252,10 @@ module. `GET /instances/<n>/camera/intrinsics` publishes the pinhole the camera 
 fy, cx, cy, no distortion). `GET /instances/<n>/camera/dock` gives the marker's ground truth
 (pose, lat/lon, both markers' corners, the vehicle's offset from it); `POST` moves it and `DELETE`
 puts it back. `SKYSIM_DOCK_MARKERS=0` turns it off, and `SKYSIM_DOCK_MARKER_SIZE` /
-`SKYSIM_DOCK_INNER_SIZE` set the sizes. The marker costs nothing until a camera has one in shot.
+`SKYSIM_DOCK_INNER_SIZE` set the sizes. A vehicle's own cameras (pilot camera, RTSP, stills) draw
+its own dock alone, so its picture never holds a neighbour's identical marker (TASK-2609);
+`SKYSIM_DOCK_MARKERS_VISIBLE=all` draws every dock in every camera (default `own`). The marker
+costs nothing until a camera has one in shot.
 Details, the cv2.aruco proof from 30 m to 0.7 m and what it found:
 [docs/DOCK_MARKER.md](docs/DOCK_MARKER.md).
 

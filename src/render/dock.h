@@ -16,8 +16,34 @@
 #include <cmath>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace skysim::render {
+
+// Which docks a vehicle's own cameras draw — its pilot camera (camera.jpg / .mjpg and the H.264
+// RTSP stream) and its survey stills (TASK-2609; --dock-markers-visible, SKYSIM_DOCK_MARKERS_VISIBLE).
+//
+// kOwn, the default: only that vehicle's dock. Every dock carries the same IDs (228 in 11), and
+// vehicles spawn 5 m apart, so a camera that drew every dock showed several identical markers at
+// once — from 30 m up a 640x360 HFOV 78 frame spans 48.6 m of ground across — and aruco_landing, which
+// takes the first detection of its ID, flew a dev SITL 0.08 m above its own dock sideways onto
+// the next slot's, 9.58 m away. kAll: every vehicle's dock in every camera, as before.
+enum class DockVisibility { kOwn, kAll };
+
+inline const char *dock_visibility_name(DockVisibility v) {
+    return v == DockVisibility::kAll ? "all" : "own";
+}
+
+// "own" or "all", exactly; anything else is nothing.
+inline std::optional<DockVisibility> parse_dock_visibility(std::string_view text) {
+    if (text == "own") {
+        return DockVisibility::kOwn;
+    }
+    if (text == "all") {
+        return DockVisibility::kAll;
+    }
+    return std::nullopt;
+}
 
 struct DockMarkerSpec {
     static constexpr const char *kDictionary = "DICT_7X7_250";

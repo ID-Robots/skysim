@@ -441,12 +441,20 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/dock_marker_smoke.py $<TARGET_FILE:skysim>
                      --frames ${CMAKE_BINARY_DIR}/dock_marker_frames ${_dock_smoke_args})
     set_tests_properties(dock_marker_smoke PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+    # A vehicle's own cameras draw its own dock alone (TASK-2609): slot 0 flown over its dock with
+    # slots 1 and 2 parked on theirs 5 and 10 m east; at 30, 10 and 5 m its camera.mjpg, RTSP frames
+    # and stills decode exactly one 228, slot 0's, and with --dock-markers-visible all more than one.
+    # The pictures stay in build/dock_visibility_frames for --analyse with another OpenCV (ci.yml).
+    add_test(NAME dock_visibility_smoke
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/dock_visibility_smoke.py $<TARGET_FILE:skysim>
+                     --frames ${CMAKE_BINARY_DIR}/dock_visibility_frames ${_dock_smoke_args})
+    set_tests_properties(dock_visibility_smoke PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
     set_tests_properties(app_smoke app_churn survey_fixture rtsp_smoke PROPERTIES
         LABELS "happy-path"
         TIMEOUT 180
         RUN_SERIAL TRUE
     )
-    set_tests_properties(dock_marker_smoke PROPERTIES LABELS "happy-path" RUN_SERIAL TRUE)
+    set_tests_properties(dock_marker_smoke dock_visibility_smoke PROPERTIES LABELS "happy-path" RUN_SERIAL TRUE)
 endif()
 
 add_test(NAME performance_world

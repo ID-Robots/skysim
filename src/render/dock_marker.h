@@ -118,7 +118,7 @@ class MarkerView {
 // Every vehicle's dock, for the renderers and the control plane. A vehicle gets one at spawn, at
 // its home (where it spawned, heading north); the control plane can move it and put it back;
 // it goes with the vehicle. Not world state — no tick reads it — so any thread may use it: the
-// tick thread adds and removes, HTTP threads move and read, render threads take markers().
+// tick thread adds and removes, HTTP threads move and read, render threads take seen_by().
 class DockBoard {
   public:
     struct Entry {
@@ -127,9 +127,11 @@ class DockBoard {
         bool at_home{true};
     };
 
-    explicit DockBoard(const DockMarkerSpec &spec) : spec_(spec) {}
+    explicit DockBoard(const DockMarkerSpec &spec, DockVisibility visibility = DockVisibility::kOwn)
+        : spec_(spec), visibility_(visibility) {}
 
     const DockMarkerSpec &spec() const { return spec_; }
+    DockVisibility visibility() const { return visibility_; }
 
     // A vehicle spawned at (north, east): its dock is there, heading north.
     void add(uint32_t vehicle_id, double home_north_m, double home_east_m);
@@ -142,17 +144,29 @@ class DockBoard {
     std::optional<Entry> update(uint32_t vehicle_id, const DockPatch &patch);
     std::optional<Entry> reset(uint32_t vehicle_id); // back home
 
-    // What the renderers draw: every dock, as one immutable list. The same pointer until a dock
-    // changes, so a renderer can tell a parked vehicle's picture is still current by comparing it.
+    // Every dock, as one immutable list: what a view that is no vehicle's own camera draws. The
+    // same pointer until a dock changes.
     std::shared_ptr<const GroundMarkers> markers() const;
 
+    // What vehicle `vehicle_id`'s own cameras draw (the pilot camera, its stills): its own dock
+    // alone under kOwn — empty for a vehicle that has none — and every dock (markers()) under
+    // kAll. Immutable, and the same pointer until that list changes, so a renderer can tell a
+    // parked vehicle's picture is still current by comparing it: under kOwn another vehicle's
+    // dock arriving, moving or going does not change it.
+    std::shared_ptr<const GroundMarkers> seen_by(uint32_t vehicle_id) const;
+
   private:
-    void publish_locked();
+    // After vehicle `vehicle_id`'s dock changed, arrived or went: the lists that hold it.
+    void publish_locked(uint32_t vehicle_id);
 
     DockMarkerSpec spec_;
+    DockVisibility visibility_;
     mutable std::mutex mutex_;
     std::map<uint32_t, Entry> entries_;
     std::shared_ptr<const GroundMarkers> markers_{std::make_shared<const GroundMarkers>()};
+    // kOwn: each vehicle's own dock, as a list of one.
+    std::map<uint32_t, std::shared_ptr<const GroundMarkers>> own_;
+    std::shared_ptr<const GroundMarkers> none_{std::make_shared<const GroundMarkers>()};
 };
 
 } // namespace skysim::render

@@ -1,7 +1,8 @@
 // Observer 1's e-ArUco dock marker (TASK-2562): the image compiled in is the committed one, its
 // texture keeps both markers' bits where the generator put them at the configured sizes, frames
-// draw it where the camera model says it is, a frame without one in shot is untouched, and the
-// pilot camera redraws a parked vehicle's picture when its dock moves.
+// draw it where the camera model says it is, a frame without one in shot is untouched, the
+// pilot camera redraws a parked vehicle's picture when its dock moves, and a vehicle's camera
+// draws its own dock alone unless every dock is to be visible (TASK-2609).
 //
 // That the drawn marker decodes with cv2.aruco, and solvePnP recovers its pose, is
 // tests/dock_marker_smoke.py's job (it needs OpenCV); this holds the pixels to the geometry.
@@ -14,6 +15,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -506,6 +509,169 @@ void test_render_service_redraws_on_move() {
     CHECK(frame.jpeg != first.jpeg);
 }
 
+// --dock-markers-visible (TASK-2609): exactly "own" or "all".
+void test_visibility_names() {
+    CHECK(render::parse_dock_visibility("own") == render::DockVisibility::kOwn);
+    CHECK(render::parse_dock_visibility("all") == render::DockVisibility::kAll);
+    for (const char *bad : {"", "Own", "ALL", "own ", " all", "none", "1", "own,all"}) {
+        CHECK(!render::parse_dock_visibility(bad));
+    }
+    CHECK(std::string(render::dock_visibility_name(render::DockVisibility::kOwn)) == "own");
+    CHECK(std::string(render::dock_visibility_name(render::DockVisibility::kAll)) == "all");
+    CHECK(render::DockBoard{DockMarkerSpec{}}.visibility() == render::DockVisibility::kOwn); // the default
+}
+
+// What a vehicle's own cameras are given (TASK-2609): under kOwn its own dock alone, a list that
+// keeps its pointer while other vehicles' docks come, move and go; under kAll every dock.
+void test_board_seen_by() {
+    render::DockBoard board{DockMarkerSpec{}};
+    const auto nobody = board.seen_by(1);
+    CHECK(nobody != nullptr && nobody->empty());
+    board.add(1, 0.0, 0.0);
+    board.add(2, 0.0, 5.0);
+    board.add(3, 0.0, 10.0);
+    CHECK(board.markers()->size() == 3);
+    for (uint32_t id = 1; id <= 3; ++id) {
+        const auto seen = board.seen_by(id);
+        CHECK(seen && seen->size() == 1 && (*seen)[0].vehicle_id == id &&
+              (*seen)[0].pose.east_m == 5.0 * (id - 1) && (*seen)[0].spec.outer_size_m == 1.0);
+    }
+    CHECK(board.seen_by(9) && board.seen_by(9)->empty()); // no dock of its own: nothing drawn
+    const auto one = board.seen_by(1);
+    CHECK(board.seen_by(1) == one); // unchanged: the same list
+
+    // Another vehicle's dock moving, a new one arriving, one going: vehicle 1's list stands.
+    const auto all_before = board.markers();
+    board.set(2, DockPose{3.0, 4.0, 0.5});
+    board.add(4, 0.0, 15.0);
+    board.remove(3);
+    CHECK(board.seen_by(1) == one);
+    CHECK(board.markers() != all_before && board.markers()->size() == 3);
+    CHECK(board.seen_by(2)->size() == 1 && (*board.seen_by(2))[0].pose.north_m == 3.0 &&
+          (*board.seen_by(2))[0].pose.yaw_rad == 0.5);
+    CHECK(board.seen_by(3)->empty());
+    CHECK(board.seen_by(4)->size() == 1 && (*board.seen_by(4))[0].pose.east_m == 15.0);
+
+    // Its own dock changing does change it, every way it can.
+    render::DockPatch east;
+    east.east_m = 0.4;
+    CHECK(board.update(1, east));
+    const auto patched = board.seen_by(1);
+    CHECK(patched != one && (*patched)[0].pose.east_m == 0.4);
+    CHECK(board.update(1, render::DockPatch{}) && board.seen_by(1) == patched); // nothing named
+    CHECK(board.reset(1));
+    const auto home = board.seen_by(1);
+    CHECK(home != patched && (*home)[0].pose.east_m == 0.0);
+    board.remove(1);
+    CHECK(board.seen_by(1)->empty());
+    board.add(1, 0.0, 0.0); // a vehicle spawned again at the same instance: its dock is back
+    CHECK(board.seen_by(1)->size() == 1 && board.seen_by(1) != home);
+
+    // kAll: every vehicle's cameras get every dock, the very list markers() gives.
+    render::DockBoard all{DockMarkerSpec{}, render::DockVisibility::kAll};
+    CHECK(all.visibility() == render::DockVisibility::kAll);
+    CHECK(all.seen_by(1) == all.markers() && all.seen_by(1)->empty());
+    all.add(1, 0.0, 0.0);
+    all.add(2, 0.0, 5.0);
+    CHECK(all.seen_by(1) == all.markers() && all.seen_by(2) == all.markers() &&
+          all.seen_by(9) == all.markers());
+    CHECK(all.seen_by(1)->size() == 2);
+}
+
+// The pilot camera of vehicle 1, hovering 30 m over its dock with two more docks 5 and 10 m east of
+// it in shot, draws its own dock alone — the very picture of its own dock with no other — unless
+// every camera is to see every dock. And under kOwn a parked picture stays current while another
+// vehicle's dock moves: nothing it shows has changed.
+void test_render_service_own_dock() {
+    auto scene = std::make_shared<render::RasterScene>();
+    scene->build({});
+    for (const render::DockVisibility visibility :
+         {render::DockVisibility::kOwn, render::DockVisibility::kAll}) {
+        auto board = std::make_shared<render::DockBoard>(DockMarkerSpec{}, visibility);
+        board->add(1, 0.0, 0.0);
+        board->add(2, 0.0, 5.0);
+        board->add(3, 0.0, 10.0);
+        std::mutex mutex;
+        std::shared_ptr<const render::Image> latest;
+        render::RenderService::Config cfg;
+        cfg.camera.width = 640;
+        cfg.camera.height = 360;
+        cfg.camera.fov_deg = 81.0;
+        cfg.scene = scene;
+        cfg.docks = board;
+        cfg.fps = 50.0;
+        cfg.threads = 2;
+        cfg.background_priority = false;
+        cfg.video_sink = [&](uint32_t id, std::shared_ptr<const render::Image> image, double,
+                             std::chrono::steady_clock::time_point) {
+            if (id == 1) {
+                std::lock_guard<std::mutex> lock(mutex);
+                latest = std::move(image);
+            }
+        };
+        render::RenderService service(cfg);
+        std::vector<render::RenderService::Pose> poses(3);
+        for (uint32_t k = 0; k < 3; ++k) {
+            poses[k].vehicle_id = k + 1;
+            poses[k].position_ned = {0.0, 5.0 * k, -0.1};
+        }
+        poses[0].position_ned = {0.0, 0.0, -30.0};
+        poses[0].gimbal = true;
+        poses[0].gimbal_pitch_rad = -M_PI / 2;
+        service.publish_poses(poses);
+
+        const auto picture = [&](uint64_t drawn) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (std::chrono::steady_clock::now() < deadline) {
+                service.want_video(1);
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    if (latest && service.stats().frames_drawn >= drawn) {
+                        return latest;
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            std::lock_guard<std::mutex> lock(mutex);
+            return latest;
+        };
+        const auto first = picture(1);
+        CHECK(first != nullptr);
+        if (!first) {
+            continue;
+        }
+        const render::Camera camera = render::Camera::on_gimbal(cfg.camera, poses[0].position_ned,
+                                                                poses[0].quat_ned_frd, 0.0, -M_PI / 2);
+        const render::Rasterizer raster(cfg.camera);
+        const render::GroundMarkers own_only{
+            render::GroundMarker{1, DockPose{0.0, 0.0, 0.0}, DockMarkerSpec{}, nullptr}};
+        const render::Image own = raster.render(*scene, camera, nullptr, nullptr, true, &own_only);
+        const render::Image every =
+            raster.render(*scene, camera, nullptr, nullptr, true, board->markers().get());
+        // Both other docks are in shot from 30 m (the frame spans 51 m of ground across): what is
+        // drawn of them is what the two settings differ by.
+        CHECK(render::MarkerView(board->markers().get(), camera).size() == 3);
+        CHECK(own.rgb != every.rgb);
+        const bool own_mode = visibility == render::DockVisibility::kOwn;
+        CHECK(first->rgb == (own_mode ? own.rgb : every.rgb));
+        maybe_write(*first, std::string("service_") + render::dock_visibility_name(visibility) + "_30m");
+
+        // Another vehicle's dock moves: under kOwn vehicle 1's picture is re-sent, not redrawn.
+        const uint64_t drawn = service.stats().frames_drawn;
+        board->set(2, DockPose{2.0, 5.0, 0.0});
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        const auto after = picture(own_mode ? drawn : drawn + 1);
+        CHECK(after != nullptr);
+        if (own_mode) {
+            CHECK(service.stats().frames_drawn == drawn && after == first);
+        } else {
+            CHECK(service.stats().frames_drawn > drawn && after && after->rgb != first->rgb &&
+                  after->rgb ==
+                      raster.render(*scene, camera, nullptr, nullptr, true, board->markers().get()).rgb);
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -516,6 +682,9 @@ int main() {
     test_frames();
     test_board();
     test_render_service_redraws_on_move();
+    test_visibility_names();
+    test_board_seen_by();
+    test_render_service_own_dock();
     if (g_failures != 0) {
         std::printf("%d failure(s)\n", g_failures);
         return 1;
