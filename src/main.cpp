@@ -125,6 +125,9 @@ struct Options {
     bool dock_markers = true;
     double dock_marker_size_m = skysim::render::DockMarkerSpec::kDefaultOuterSizeM;
     double dock_inner_size_m = skysim::render::DockMarkerSpec::kDefaultInnerSizeM;
+    // Which docks a vehicle's own cameras draw (TASK-2609; SKYSIM_DOCK_MARKERS_VISIBLE): "own",
+    // the default, only its own; "all" every vehicle's, as before (render/dock.h).
+    skysim::render::DockVisibility dock_markers_visible = skysim::render::DockVisibility::kOwn;
     double grace_s = 30.0;              // interactive: frozen longer than this => auto-despawn
     double strict_timeout_s = 10.0;     // strict: barrier stalled longer => abort with report
     std::string spawn_binary;           // arducopter for POST /vehicles {"launch_process":true}
@@ -273,6 +276,13 @@ Options parse_args(int argc, char **argv) {
             o.dock_marker_size_m = metres(need_value("--dock-marker-size"), "--dock-marker-size");
         } else if (std::strcmp(argv[i], "--dock-inner-size") == 0) {
             o.dock_inner_size_m = metres(need_value("--dock-inner-size"), "--dock-inner-size");
+        } else if (std::strcmp(argv[i], "--dock-markers-visible") == 0) {
+            const auto visible = skysim::render::parse_dock_visibility(need_value("--dock-markers-visible"));
+            if (!visible) {
+                std::fprintf(stderr, "skysim: --dock-markers-visible must be own or all\n");
+                std::exit(2);
+            }
+            o.dock_markers_visible = *visible;
         } else if (std::strcmp(argv[i], "--frame-grace") == 0) {
             o.frame_grace = std::atof(need_value("--frame-grace"));
         } else if (std::strcmp(argv[i], "--straggler-timeout") == 0) {
@@ -805,8 +815,9 @@ struct App {
     std::unique_ptr<skysim::render::RenderService> render_service;
     // Survey stills, rendered on HTTP request from the same snapshot /vehicles serves.
     std::unique_ptr<skysim::render::StillService> still_service;
-    // Every vehicle's dock marker (TASK-2562), drawn by both cameras; null when neither is on or
-    // --dock-markers 0. A vehicle's dock starts where it spawns and goes when it does.
+    // Every vehicle's dock marker (TASK-2562), drawn by both cameras — a vehicle's own cameras draw
+    // the docks seen_by() gives them, by default its own alone (TASK-2609); null when neither
+    // camera is on or --dock-markers 0. A vehicle's dock starts where it spawns and goes when it does.
     std::shared_ptr<skysim::render::DockBoard> docks;
 
     ~App() {
@@ -1369,12 +1380,15 @@ int main(int argc, char **argv) {
         skysim::render::DockMarkerSpec spec;
         spec.outer_size_m = opt.dock_marker_size_m;
         spec.inner_size_m = opt.dock_inner_size_m;
-        app.docks = std::make_shared<skysim::render::DockBoard>(spec);
+        app.docks = std::make_shared<skysim::render::DockBoard>(spec, opt.dock_markers_visible);
+        const bool own = opt.dock_markers_visible == skysim::render::DockVisibility::kOwn;
         std::printf(
             "skysim: e-ArUco dock marker (DICT_7X7_250 %d in %d) %.3f m / %.3f m at every vehicle's dock, "
-            "drawn by the cameras only\n",
+            "drawn by the cameras only: %s (--dock-markers-visible %s)\n",
             skysim::render::DockMarkerSpec::kInnerId, skysim::render::DockMarkerSpec::kOuterId,
-            spec.outer_size_m, spec.inner_size_m);
+            spec.outer_size_m, spec.inner_size_m,
+            own ? "a vehicle's cameras draw its own dock alone" : "every vehicle's cameras draw every dock",
+            skysim::render::dock_visibility_name(opt.dock_markers_visible));
     }
 
     if (opt.camera_fps > 0.0) {
@@ -1595,7 +1609,9 @@ int main(int argc, char **argv) {
                 pose.gimbal = v.gimbal;
                 pose.gimbal_pitch_rad = v.gimbal_pitch_rad;
                 pose.gimbal_yaw_rad = v.gimbal_yaw_rad;
-                const auto markers = app.docks ? app.docks->markers() : nullptr;
+                // The docks this vehicle's cameras see: its own alone unless --dock-markers-visible
+                // all (TASK-2609), exactly as its pilot camera draws them.
+                const auto markers = app.docks ? app.docks->seen_by(v.id) : nullptr;
                 return app.still_service->render(pose, r, markers.get());
             };
         }

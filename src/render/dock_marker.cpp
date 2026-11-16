@@ -424,13 +424,13 @@ void DockBoard::add(uint32_t vehicle_id, double home_north_m, double home_east_m
     e.pose = e.home;
     e.at_home = true;
     entries_[vehicle_id] = e;
-    publish_locked();
+    publish_locked(vehicle_id);
 }
 
 void DockBoard::remove(uint32_t vehicle_id) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (entries_.erase(vehicle_id) != 0) {
-        publish_locked();
+        publish_locked(vehicle_id);
     }
 }
 
@@ -451,7 +451,7 @@ std::optional<DockBoard::Entry> DockBoard::set(uint32_t vehicle_id, const DockPo
     }
     it->second.pose = pose;
     it->second.at_home = false;
-    publish_locked();
+    publish_locked(vehicle_id);
     return it->second;
 }
 
@@ -469,7 +469,7 @@ std::optional<DockBoard::Entry> DockBoard::update(uint32_t vehicle_id, const Doc
     p.east_m = patch.east_m.value_or(p.east_m);
     p.yaw_rad = patch.yaw_rad.value_or(p.yaw_rad);
     it->second.at_home = false;
-    publish_locked();
+    publish_locked(vehicle_id);
     return it->second;
 }
 
@@ -481,7 +481,7 @@ std::optional<DockBoard::Entry> DockBoard::reset(uint32_t vehicle_id) {
     }
     it->second.pose = it->second.home;
     it->second.at_home = true;
-    publish_locked();
+    publish_locked(vehicle_id);
     return it->second;
 }
 
@@ -490,13 +490,31 @@ std::shared_ptr<const GroundMarkers> DockBoard::markers() const {
     return markers_;
 }
 
-void DockBoard::publish_locked() {
+std::shared_ptr<const GroundMarkers> DockBoard::seen_by(uint32_t vehicle_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (visibility_ == DockVisibility::kAll) {
+        return markers_;
+    }
+    const auto it = own_.find(vehicle_id);
+    return it != own_.end() ? it->second : none_;
+}
+
+void DockBoard::publish_locked(uint32_t vehicle_id) {
     auto list = std::make_shared<GroundMarkers>();
     list->reserve(entries_.size());
     for (const auto &[id, e] : entries_) {
         list->push_back(GroundMarker{id, e.pose, spec_, nullptr});
     }
     markers_ = std::move(list);
+    // Only the vehicle whose dock changed gets a new list of its own: every other vehicle's camera
+    // keeps the pointer it has, and with it a parked picture that is still current.
+    const auto it = entries_.find(vehicle_id);
+    if (it == entries_.end()) {
+        own_.erase(vehicle_id);
+    } else {
+        own_[vehicle_id] = std::make_shared<const GroundMarkers>(
+            GroundMarkers{GroundMarker{vehicle_id, it->second.pose, spec_, nullptr}});
+    }
 }
 
 } // namespace skysim::render

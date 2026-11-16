@@ -2,7 +2,8 @@
 
 skysim draws Observer 1's e-ArUco dock marker flat on the ground at every vehicle's dock, at its
 real size. The pilot camera (camera.jpg / camera.mjpg / the H.264 RTSP stream) and the survey
-stills both show it. A SITL can then land on it with skyhub_core's unmodified aruco_landing
+stills both show it; a vehicle's own cameras show its own dock alone
+([below](#which-docks-a-camera-draws-task-2609)). A SITL can then land on it with skyhub_core's unmodified aruco_landing
 module, reading the vehicle's RTSP stream like the real camera. skysim also publishes the camera
 intrinsics it renders with and the marker's ground truth, so the core side can build its
 calibration and a test can measure the landing error.
@@ -18,6 +19,7 @@ calibration and a test can measure the landing error.
 | image | `assets/markers/e_aruco_228_11_100cm.png`, skyhub_core `utils/generate_e_aruco_marker.py --size 100 --outer-id 228 --inner-id 11 --dpi 100 --border 2.0`, unedited ([README](../assets/markers/README.md)) |
 | where | each vehicle's home (where it spawned, where ArduPilot sets home when it arms), yaw 0 (the image upright with north up). It can be moved per vehicle (below) |
 | switch | `--dock-markers 0` / `SKYSIM_DOCK_MARKERS=0` draws none |
+| visible | `--dock-markers-visible own` / `SKYSIM_DOCK_MARKERS_VISIBLE=own` (the default): a vehicle's own cameras draw its own dock alone; `all`: every vehicle's cameras draw every dock (TASK-2609, [below](#which-docks-a-camera-draws-task-2609)) |
 
 The sizes come from Observer 1: Yanko (15.11) gave the 1.00 m outer marker, and the flight log of
 16.11 gave the 0.09 m inner marker and the 5.0 m outer-to-inner switch distance. The switch
@@ -39,7 +41,8 @@ cells stay crisp from 30 m (4 px a cell at 1920 px, HFOV 81) down to touchdown, 
 texture (22 MB) is built the first time a frame has a marker in shot, or the first time the ground
 truth is asked for. The log then says `skysim: dock marker texture built (...)`. A frame pays a
 screen-box test per ground pixel for each marker in shot, and nothing for markers out of range or
-off screen. A parked vehicle's picture is redrawn when its dock moves and re-sent otherwise.
+off screen. A parked vehicle's picture is redrawn when a dock it shows moves (by default only its
+own) and re-sent otherwise.
 `tests/dock_marker_smoke.py` holds an idle server (camera on, a vehicle on its dock, nobody
 watching) under 25 % of a core (1.3 % measured), and checks that the texture is never built there.
 
@@ -113,8 +116,82 @@ win. A body that names no field changes nothing. It answers like GET. `400` for 
 an object, a field that is not a number, lat/lon and north/east that disagree, lat without lon, a
 dock more than 20 km from the world origin, or a yaw outside ±360. `DELETE` puts the dock back at the vehicle's home. The dock belongs to the
 vehicle: it goes when the vehicle despawns, and the next vehicle at that instance starts at its own
-home. Every camera draws every vehicle's dock, as a camera would see them in the real world.
-`404` with dock markers off (`--dock-markers 0`, or neither the camera nor the still camera on).
+home. A vehicle's own cameras draw its own dock alone, by default (next section). `404` with dock
+markers off (`--dock-markers 0`, or neither the camera nor the still camera on).
+
+## Which docks a camera draws (TASK-2609)
+
+Every dock carries the same IDs, 228 with 11 inside, and vehicles spawn 5 m apart (`--spacing`).
+When every camera drew every dock, a vehicle's camera showed several identical markers at once:
+from 30 m up a 640x360 HFOV 78 pilot camera spans 48.6 m of ground across, and a 1920x1080 HFOV 81
+one 51.2 m. skyhub_core's aruco_landing takes the first detection with its ID, and which one that
+is changed from frame to frame. On dev (Mike, 16.11) a SITL in slot 0 that started 0.08 m above
+its own dock flew sideways and landed 9.58 m away, on slot 2's dock.
+
+So a vehicle's own cameras draw that vehicle's dock alone. This covers instance N's pilot camera
+(camera.jpg, camera.mjpg and the `main.264` RTSP stream, which are the same pictures) and its
+survey stills (`still.jpg`, any size, lens or attitude): they draw instance N's dock and no other
+instance's. `--dock-markers-visible all` (`SKYSIM_DOCK_MARKERS_VISIBLE=all`) gives back the old
+behaviour, every dock in every camera. `own` is the default, and the startup log names the
+setting. Nothing else changes: the marker, its sizes, the intrinsics, `POST`/`DELETE
+.../camera/dock` and the ground truth `GET` (`pose`, `vehicle_pose.horizontal_error_m`) are as above.
+Every vehicle still has its dock, and the dock routes still move each one.
+
+In the code, `DockBoard::seen_by(vehicle)` is what a vehicle's cameras draw (`render/dock_marker.h`).
+It is a list of one under `own` and every dock under `all`. `DockBoard::markers()` stays every dock,
+for a view that is not a vehicle's own camera. skysim serves no such view today: every picture route
+is a vehicle's camera, and `tools/survey/survey_still` draws no docks. A vehicle's list keeps its
+pointer while other vehicles' docks arrive, move or go, so under `own` a parked vehicle's picture is
+re-sent, not redrawn, when a neighbour's dock moves.
+
+**The proof.** `tests/dock_visibility_smoke.py` (ctest `dock_visibility_smoke`, label happy-path)
+uses real renders throughout. It starts skysim with the pilot camera at 1920x1080 HFOV 81 and RTSP
+on, and no visibility flag (so the default is what is tested). Slot 0 is flown up over its dock by
+dock_marker_smoke's fake SITL, with the gimbal at -90 deg. Slot 1 is parked on its dock 5 m east.
+At each height a slot 2 is spawned on its dock 10 m east, captured with, and despawned. At 30, 10 and
+5 m, with two vehicles and then three, it takes slot 0's camera.mjpg (a part drawn at that hover),
+ten RTSP frames, a `still.jpg?gimbal=1` at the pilot camera's size and lens, and from 10 and 5 m a
+still at 640x360 HFOV 78 (the dev camera; from 30 m the marker is 13 px there, too small to decode).
+It decodes every picture with cv2.aruco (`DICT_7X7_250`, default `DetectorParameters`, the detector
+dock_marker_smoke builds). Each detection belongs to the dock whose ground truth projects nearest
+the detected quad's centre, and for slot 0's dock solvePnP's lateral error is the landing error. It
+then runs the same flight to 30 and 10 m with `--dock-markers-visible all`. CI's coverage build
+renders at -O0, so there it runs `--quick`: `own` and `all` at 30 m only, two RTSP frames each.
+
+- `own`: each still and camera.mjpg picture, and 9 RTSP frames of 10 (H.264 blurs a cell out of a
+  frame now and then, as in dock_marker_smoke), finds exactly one 228, slot 0's, with the lateral
+  error within 10 cm (dock_marker_smoke's bound). No picture and no RTSP frame finds a second one,
+  or any other dock.
+- `all`: each still and camera.mjpg picture, and 9 RTSP frames of 10, finds more than one 228. Each
+  sits on its own dock, its centre within 3 px of that dock's projected centre. So the test can
+  see the difference.
+
+The run for the PR, OpenCV 4.6.0 (Ubuntu 24.04 apt, what CI's ctest has). Each cell gives how many
+228s were found (RTSP: frames x count), then slot 0's worst lateral (landing) error, then the worst
+distance between a detected centre and its dock's projected centre. Values are rounded, so 0.0 cm
+is under 0.5 mm:
+
+| mode | height | vehicles | still 1920x1080 | still 640x360 | camera.mjpg | RTSP frames |
+|---|---|---|---|---|---|---|
+| own | 30 m | 2 | 1; 0.0 cm; 0.0 px | - | 1; 0.0 cm; 0.0 px | 10x1; 0.8 cm; 0.25 px |
+| own | 30 m | 3 | 1; 0.0 cm; 0.0 px | - | 1; 0.0 cm; 0.0 px | 10x1; 2.1 cm; 0.75 px |
+| own | 10 m | 2 | 1; 0.0 cm; 0.0 px | 1; 0.0 cm; 0.0 px | 1; 0.0 cm; 0.0 px | 10x1; 0.4 cm; 0.25 px |
+| own | 10 m | 3 | 1; 0.0 cm; 0.0 px | 1; 0.0 cm; 0.0 px | 1; 0.0 cm; 0.0 px | 10x1; 0.4 cm; 0.25 px |
+| own | 5 m | 2 | 1; 0.2 cm; 0.35 px | 1; 0.0 cm; 0.0 px | 1; 0.6 cm; 0.25 px | 10x1; 1.0 cm; 1.46 px |
+| own | 5 m | 3 | 1; 0.8 cm; 0.79 px | 1; 0.0 cm; 0.0 px | 1; 0.5 cm; 0.25 px | 10x1; 0.9 cm; 1.41 px |
+| all | 30 m | 2 | 2; 0.0 cm; 0.14 px | - | 2; 0.0 cm; 0.15 px | 10x2; 1.0 cm; 0.42 px |
+| all | 30 m | 3 | 3; 0.0 cm; 0.18 px | - | 3; 0.0 cm; 0.18 px | 10x3; 1.0 cm; 0.35 px |
+| all | 10 m | 2 | 2; 0.0 cm; 0.11 px | 2; 0.0 cm; 0.03 px | 2; 0.0 cm; 0.21 px | 10x2; 0.4 cm; 0.26 px |
+| all | 10 m | 3 | 2; 0.0 cm; 0.01 px | 2; 0.0 cm; 0.08 px | 2; 0.0 cm; 0.49 px | 10x2; 0.4 cm; 0.51 px |
+
+With `all`, from 10 m the third dock, 10 m east, is out of frame: 2 of 3 is the geometry. The same
+pictures re-checked with other OpenCV versions:
+[4.5.4](dock_marker/visibility-opencv-4.5.4.md) (Ubuntu 22.04 apt, the SkyHub core image's) gave
+the same table. [4.10.0](dock_marker/visibility-opencv-4.10.0.md) (pip, `ArucoDetector`) gave the
+same table except at 5 m, where the 1920x1080 pictures decode the inner 11 instead of the outer 228
+(as in the proof below). There the test asks for exactly one of the two, and it is slot 0's.
+`--analyse DIR` re-checks a capture with another OpenCV; CI re-checks its frames with Ubuntu
+22.04's 4.5.4.
 
 ## The proof
 

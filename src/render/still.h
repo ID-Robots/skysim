@@ -102,7 +102,8 @@ class StillService {
     std::optional<Lease> try_acquire();
 
     // Takes a slot for the length of the render; kBusy when there is none. `markers`: the dock
-    // markers on the ground (render/dock_marker.h), drawn like the pilot camera draws them.
+    // markers on the ground (render/dock_marker.h), drawn like the pilot camera draws them — for a
+    // vehicle's still, the docks its own cameras see (DockBoard::seen_by).
     StillFrame render(const StillPose &pose, const StillRequest &req, const GroundMarkers *markers = nullptr);
     StillFrame render(Lease &lease, const StillPose &pose, const StillRequest &req,
                       const GroundMarkers *markers = nullptr);

@@ -80,6 +80,9 @@ fi
 add_if_set SKYSIM_DOCK_MARKERS --dock-markers
 add_if_set SKYSIM_DOCK_MARKER_SIZE --dock-marker-size
 add_if_set SKYSIM_DOCK_INNER_SIZE --dock-inner-size
+# Which docks a vehicle's own cameras (pilot camera, RTSP, stills) draw (TASK-2609):
+# SKYSIM_DOCK_MARKERS_VISIBLE=own (the default) its own dock alone, =all every vehicle's.
+add_if_set SKYSIM_DOCK_MARKERS_VISIBLE --dock-markers-visible
 
 # Survey still camera (GET /instances/<n>/still.jpg). On by default and independent of
 # SKYSIM_CAMERA_FPS: it renders on demand, so it costs nothing until it is asked for.

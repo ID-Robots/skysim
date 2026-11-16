@@ -71,11 +71,13 @@ jobs:
       - name: Dock marker proof with the OpenCV the SkyHub core image ships
         # dock_marker_smoke above decoded its frames with Ubuntu 24.04's OpenCV 4.6. The core image
         # (skyhub_core docker/core) is Ubuntu 22.04 with apt python3-opencv 4.5.4: the same frames,
-        # decoded and held to the same criteria with that.
+        # decoded and held to the same criteria with that. dock_visibility_smoke's pictures too: a
+        # vehicle's camera shows its own dock alone (TASK-2609).
         run: >-
           docker run --rm -v "$PWD:/w" -w /w ubuntu:22.04 bash -c
           "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-opencv > /dev/null
-          && python3 tests/dock_marker_smoke.py --analyse build/dock_marker_frames"
+          && python3 tests/dock_marker_smoke.py --analyse build/dock_marker_frames
+          && python3 tests/dock_visibility_smoke.py --analyse build/dock_visibility_frames"
 
   performance:
     name: Performance budgets

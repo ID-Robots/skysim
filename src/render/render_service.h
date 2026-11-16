@@ -58,7 +58,8 @@ class RenderService {
         // with texture_seed; when shared, scene_tiles says how many tiles it holds.
         std::shared_ptr<const RasterScene> scene;
         size_t scene_tiles{0};
-        // The dock markers on the ground (TASK-2562), every vehicle's; none drawn when null.
+        // The dock markers on the ground (TASK-2562); none drawn when null. A vehicle's picture
+        // shows the docks DockBoard::seen_by gives it: by default its own alone (TASK-2609).
         std::shared_ptr<const DockBoard> docks;
         std::string tiles_dir;
         uint32_t texture_seed{1};

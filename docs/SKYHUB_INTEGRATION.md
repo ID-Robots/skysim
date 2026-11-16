@@ -112,7 +112,14 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
 - **[S7] Observer 1's dock marker** (done; TASK-2562, [`docs/DOCK_MARKER.md`](DOCK_MARKER.md)):
   every vehicle's dock carries the e-ArUco marker (DICT_7X7_250, outer ID 228 at 1.00 m, inner ID
   11 at 0.09 m, `assets/markers/`) flat on the ground at the vehicle's home, heading north, drawn
-  by the pilot camera (MJPEG and RTSP) and the survey stills at its real size.
+  by the pilot camera (MJPEG and RTSP) and the survey stills at its real size. **A vehicle's own
+  cameras draw its own dock alone** (TASK-2609): instance N's camera.jpg / camera.mjpg, its
+  `main.264` RTSP stream and its still.jpg show instance N's dock and no other instance's, so
+  aruco_landing, which takes the first detection of ID 228, cannot lock onto a neighbour's dock
+  (every dock has the same IDs, and docks are 5 m apart). Before this fix, a dev SITL in slot 0
+  that started 0.08 m above its own dock landed 9.58 m away, on slot 2's.
+  `--dock-markers-visible all` / `SKYSIM_DOCK_MARKERS_VISIBLE=all` draws every dock in every camera
+  again (default `own`). The ground truth, the intrinsics and the dock routes are unchanged.
   `GET /instances/<n>/camera/intrinsics` → `width`, `height`, `hfov_deg`, `fx`, `fy`, `cx`, `cy`,
   `camera_matrix`, `distortion` (zeros), the RTSP picture size and the gimbal's current pitch
   (`?w=&h=&hfov=` for a still's). `GET /instances/<n>/camera/dock` → the marker's ground truth:
@@ -120,7 +127,8 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   vehicle's offset from it (`horizontal_error_m` is the landing error). `POST` the same path with
   `lat`/`lon` or `north_m`/`east_m` and/or `yaw_deg` moves it, and `DELETE` puts it back home.
   Flags / env: `--dock-markers` / `SKYSIM_DOCK_MARKERS` (default 1), `--dock-marker-size` /
-  `SKYSIM_DOCK_MARKER_SIZE` (1.0 m), `--dock-inner-size` / `SKYSIM_DOCK_INNER_SIZE` (0.09 m).
+  `SKYSIM_DOCK_MARKER_SIZE` (1.0 m), `--dock-inner-size` / `SKYSIM_DOCK_INNER_SIZE` (0.09 m),
+  `--dock-markers-visible` / `SKYSIM_DOCK_MARKERS_VISIBLE` (`own` or `all`, default `own`).
   For aruco_landing ("observer1-sim"): run the camera at 1920x1080 with HFOV 81
   (`SKYSIM_CAMERA_SIZE=1920x1080`, `SKYSIM_CAMERA_FOV=81`), take fx/fy/cx/cy from the intrinsics
   route, and drive the gimbal pitch on servo output 10. Read the findings in DOCK_MARKER.md before
