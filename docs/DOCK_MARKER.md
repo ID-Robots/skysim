@@ -126,11 +126,11 @@ published intrinsics against the ground truth above. It also decodes the committ
 What it holds skysim to, whatever the OpenCV version:
 
 - **Geometry, detector-free.** Each black square's side, measured off the pixels, is within 2 px
-  (or 1 %) of what the published intrinsics and ground truth project. The worst seen was 0.9 px in
-  a still and 1.8 px (of 934) in an H.264 frame.
+  (or 1 %) of what the published intrinsics and ground truth project. The worst seen was 1.0 px in
+  a still and 1.9 px (of 934) in an H.264 frame.
 - **Lateral (landing) error.** For every marker the detector finds, tvec (the marker's centre
   relative to the camera) across the optical axis is within 10 cm of the truth. The worst seen
-  was 1.6 cm, at 21.5 m.
+  over the runs was 1.6 cm, at 21.5 m.
 - **Scale.** The marker size implied by the true distance and the solved one is within 5 %. Two
   detector biases get wider bounds, and they are the findings below: 8 % where the quad frames the
   white border's outline, and 12 % for a marker under 30 px (the inner marker at 5 m is 20 px,
@@ -138,8 +138,13 @@ What it holds skysim to, whatever the OpenCV version:
 - **Decoding**, with the expectations for the installed OpenCV generation (below): in the still
   and in 9 RTSP frames of 10 (8 for a marker under 30 px). H.264 at its default 1200 kbit/s for
   1080p blurs a cell out of a frame now and then (once in CI, the outer marker at 21.5 m), and the
-  report lists which frames missed. The lateral and scale bounds hold for each detection on its
-  own, and `--analyse` refuses a capture that is missing a height or a frame.
+  report lists which frames missed. A marker under 30 px, the inner at 5 m with 2.2 px a cell, is
+  at the stream's limit and needs the still and at least one RTSP frame: 7 to 10 of 10 locally, 1
+  of 3 in CI's -O0 coverage run. At 4000 kbit/s it decoded in 10 of 10
+  ([proof-opencv-4.6.0-4000kbps.md](dock_marker/proof-opencv-4.6.0-4000kbps.md),
+  `--bitrate 4000`), so raise the bitrate for a 1080p stream if the link allows. The lateral and
+  scale bounds hold for each detection on its own, and `--analyse` refuses a capture that is
+  missing a height or a frame.
 
 The run used for the PR is in [docs/dock_marker/](dock_marker/). The main proof is
 [proof-opencv-4.5.4.md](dock_marker/proof-opencv-4.5.4.md): OpenCV 4.5.4, read inside the
@@ -158,8 +163,8 @@ and then re-analyses the same frames with 4.5.4 from apt on an Ubuntu 22.04 cont
    The detector treats the two squares as "too close" and keeps the larger one, the white cell,
    which then fails to decode. On the committed image, ID 11 is lost at full resolution and at
    2048 and 1024 px, and decodes again once the inner marker is under about 60 px. In the flight,
-   with the defaults, ID 11 decodes only at 5 m (20 px: in the still and 7 of 10 RTSP frames), and
-   at 2, 1.2 and 0.7 m it is not found.
+   with the defaults, ID 11 decodes only at 5 m (20 px: in the still, and in 7 to 10 of 10 RTSP
+   frames over the runs), and at 2, 1.2 and 0.7 m it is not found.
    At 0.7 m the outer marker no longer fits in the frame, so nothing decodes at all. With
    `minMarkerDistanceRate <= 0.04`, ID 11 decodes in every frame from 5 m to 0.7 m. OpenCV 4.7+
    (`ArucoDetector`, a new candidate filter) keeps the inner marker with the defaults, from 5 m

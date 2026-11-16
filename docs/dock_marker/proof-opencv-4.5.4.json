@@ -290,6 +290,7 @@
    "yaw_deg": 0
   }
  },
+ "rtsp_bitrate_kbps": 1200,
  "heights": [
   {
    "height_m": 30.0,
@@ -353,10 +354,10 @@
       "found": 10,
       "missed": [],
       "within": 10,
-      "max_size_err_pct": 3.881,
+      "max_size_err_pct": 2.211,
       "max_lateral_err_m": 0.0076,
       "max_ippe_lateral_err_m": 0.0076,
-      "side_px": 36.2
+      "side_px": 36.4
      },
      "11": {
       "frames": 10,
@@ -381,10 +382,10 @@
       "found": 10,
       "missed": [],
       "within": 10,
-      "max_size_err_pct": 3.881,
+      "max_size_err_pct": 2.211,
       "max_lateral_err_m": 0.0076,
       "max_ippe_lateral_err_m": 0.0076,
-      "side_px": 36.2
+      "side_px": 36.4
      },
      "11": {
       "frames": 10,
@@ -475,10 +476,10 @@
       "found": 10,
       "missed": [],
       "within": 10,
-      "max_size_err_pct": 2.445,
-      "max_lateral_err_m": 0.0156,
-      "max_ippe_lateral_err_m": 0.0157,
-      "side_px": 51.3
+      "max_size_err_pct": 3.444,
+      "max_lateral_err_m": 0.0125,
+      "max_ippe_lateral_err_m": 0.0124,
+      "side_px": 50.9
      },
      "11": {
       "frames": 10,
@@ -503,10 +504,10 @@
       "found": 10,
       "missed": [],
       "within": 10,
-      "max_size_err_pct": 2.445,
-      "max_lateral_err_m": 0.0156,
-      "max_ippe_lateral_err_m": 0.0157,
-      "side_px": 51.3
+      "max_size_err_pct": 3.444,
+      "max_lateral_err_m": 0.0125,
+      "max_ippe_lateral_err_m": 0.0124,
+      "side_px": 50.9
      },
      "11": {
       "frames": 10,
@@ -529,9 +530,9 @@
      "228": 0.28,
      "11": null
     },
-    "framed_default_228": 10,
+    "framed_default_228": 9,
     "framed_default_11": 0,
-    "framed_rate_0.04_228": 10,
+    "framed_rate_0.04_228": 9,
     "framed_rate_0.04_11": 0
    }
   },
@@ -598,9 +599,9 @@
       "missed": [],
       "within": 10,
       "max_size_err_pct": 2.586,
-      "max_lateral_err_m": 0.0085,
-      "max_ippe_lateral_err_m": 0.0069,
-      "side_px": 73.6
+      "max_lateral_err_m": 0.0059,
+      "max_ippe_lateral_err_m": 0.0055,
+      "side_px": 73.4
      },
      "11": {
       "frames": 10,
@@ -626,9 +627,9 @@
       "missed": [],
       "within": 10,
       "max_size_err_pct": 2.586,
-      "max_lateral_err_m": 0.0085,
-      "max_ippe_lateral_err_m": 0.0069,
-      "side_px": 73.6
+      "max_lateral_err_m": 0.0059,
+      "max_ippe_lateral_err_m": 0.0055,
+      "side_px": 73.4
      },
      "11": {
       "frames": 10,
@@ -737,24 +738,20 @@
       "frames": 10,
       "found": 10,
       "missed": [],
-      "within": 4,
-      "max_size_err_pct": 6.965,
-      "max_lateral_err_m": 0.006,
-      "max_ippe_lateral_err_m": 0.0102,
-      "side_px": 233.3
+      "within": 0,
+      "max_size_err_pct": 6.818,
+      "max_lateral_err_m": 0.0098,
+      "max_ippe_lateral_err_m": 0.0078,
+      "side_px": 239.3
      },
      "11": {
       "frames": 10,
-      "found": 7,
-      "missed": [
-       6,
-       7,
-       8
-      ],
-      "within": 5,
+      "found": 10,
+      "missed": [],
+      "within": 7,
       "max_size_err_pct": 6.08,
-      "max_lateral_err_m": 0.0018,
-      "max_ippe_lateral_err_m": 0.0018,
+      "max_lateral_err_m": 0.0017,
+      "max_ippe_lateral_err_m": 0.0017,
       "side_px": 19.2
      }
     },
@@ -763,30 +760,30 @@
       "frames": 10,
       "found": 10,
       "missed": [],
-      "within": 4,
-      "max_size_err_pct": 6.965,
-      "max_lateral_err_m": 0.006,
-      "max_ippe_lateral_err_m": 0.0102,
-      "side_px": 233.3
+      "within": 0,
+      "max_size_err_pct": 6.818,
+      "max_lateral_err_m": 0.0098,
+      "max_ippe_lateral_err_m": 0.0078,
+      "side_px": 239.3
      },
      "11": {
       "frames": 10,
       "found": 10,
       "missed": [],
-      "within": 8,
+      "within": 7,
       "max_size_err_pct": 6.08,
-      "max_lateral_err_m": 0.0018,
-      "max_ippe_lateral_err_m": 0.0018,
-      "side_px": 19.3
+      "max_lateral_err_m": 0.0017,
+      "max_ippe_lateral_err_m": 0.0017,
+      "side_px": 19.2
      }
     },
     "geometry_max_err_px": {
      "228": 0.78,
-     "11": 0.77
+     "11": 0.23
     },
-    "framed_default_228": 4,
-    "framed_default_11": 7,
-    "framed_rate_0.04_228": 4,
+    "framed_default_228": 0,
+    "framed_default_11": 10,
+    "framed_rate_0.04_228": 0,
     "framed_rate_0.04_11": 10
    }
   },
@@ -864,10 +861,10 @@
       "found": 10,
       "missed": [],
       "within": 0,
-      "max_size_err_pct": 6.676,
-      "max_lateral_err_m": 0.0084,
-      "max_ippe_lateral_err_m": 0.021,
-      "side_px": 599.1
+      "max_size_err_pct": 6.843,
+      "max_lateral_err_m": 0.0097,
+      "max_ippe_lateral_err_m": 0.0205,
+      "side_px": 599.5
      },
      "11": {
       "frames": 10,
@@ -892,24 +889,24 @@
       "found": 10,
       "missed": [],
       "within": 0,
-      "max_size_err_pct": 6.676,
-      "max_lateral_err_m": 0.0084,
-      "max_ippe_lateral_err_m": 0.021,
-      "side_px": 599.1
+      "max_size_err_pct": 6.843,
+      "max_lateral_err_m": 0.0097,
+      "max_ippe_lateral_err_m": 0.0205,
+      "side_px": 599.5
      },
      "11": {
       "frames": 10,
       "found": 10,
       "missed": [],
       "within": 10,
-      "max_size_err_pct": 1.94,
-      "max_lateral_err_m": 0.0013,
-      "max_ippe_lateral_err_m": 0.0013,
-      "side_px": 50.0
+      "max_size_err_pct": 1.003,
+      "max_lateral_err_m": 0.0008,
+      "max_ippe_lateral_err_m": 0.0008,
+      "side_px": 49.7
      }
     },
     "geometry_max_err_px": {
-     "228": 1.62,
+     "228": 1.66,
      "11": 0.39
     },
     "framed_default_228": 0,
@@ -946,12 +943,12 @@
     "default": {
      "228": {
       "found": true,
-      "side_px": 983.3,
-      "size_est_m": 1.05255,
-      "size_err_pct": 5.255,
-      "lateral_err_m": 0.0119,
-      "distance_err_m": -0.0601,
-      "ippe_lateral_err_m": 0.0239,
+      "side_px": 983.6,
+      "size_est_m": 1.05278,
+      "size_err_pct": 5.278,
+      "lateral_err_m": 0.0108,
+      "distance_err_m": -0.0603,
+      "ippe_lateral_err_m": 0.0268,
       "within": false
      },
      "11": {
@@ -961,12 +958,12 @@
     "rate_0.04": {
      "228": {
       "found": true,
-      "side_px": 983.3,
-      "size_est_m": 1.05255,
-      "size_err_pct": 5.255,
-      "lateral_err_m": 0.0119,
-      "distance_err_m": -0.0601,
-      "ippe_lateral_err_m": 0.0239,
+      "side_px": 983.6,
+      "size_est_m": 1.05278,
+      "size_err_pct": 5.278,
+      "lateral_err_m": 0.0108,
+      "distance_err_m": -0.0603,
+      "ippe_lateral_err_m": 0.0268,
       "within": false
      },
      "11": {
@@ -991,11 +988,11 @@
       "frames": 10,
       "found": 10,
       "missed": [],
-      "within": 7,
-      "max_size_err_pct": 5.175,
-      "max_lateral_err_m": 0.0133,
-      "max_ippe_lateral_err_m": 0.0267,
-      "side_px": 982.8
+      "within": 6,
+      "max_size_err_pct": 5.085,
+      "max_lateral_err_m": 0.013,
+      "max_ippe_lateral_err_m": 0.0354,
+      "side_px": 982.4
      },
      "11": {
       "frames": 10,
@@ -1019,26 +1016,26 @@
       "frames": 10,
       "found": 10,
       "missed": [],
-      "within": 7,
-      "max_size_err_pct": 5.175,
-      "max_lateral_err_m": 0.0133,
-      "max_ippe_lateral_err_m": 0.0267,
-      "side_px": 982.8
+      "within": 6,
+      "max_size_err_pct": 5.085,
+      "max_lateral_err_m": 0.013,
+      "max_ippe_lateral_err_m": 0.0354,
+      "side_px": 982.4
      },
      "11": {
       "frames": 10,
       "found": 10,
       "missed": [],
       "within": 10,
-      "max_size_err_pct": 1.442,
+      "max_size_err_pct": 1.449,
       "max_lateral_err_m": 0.0,
       "max_ippe_lateral_err_m": 0.0,
       "side_px": 83.0
      }
     },
     "geometry_max_err_px": {
-     "228": 1.78,
-     "11": 1.22
+     "228": 1.85,
+     "11": 0.23
     },
     "framed_default_228": 0,
     "framed_default_11": 0,
@@ -1151,7 +1148,7 @@
       "found": 10,
       "missed": [],
       "within": 10,
-      "max_size_err_pct": 0.895,
+      "max_size_err_pct": 0.923,
       "max_lateral_err_m": 0.0002,
       "max_ippe_lateral_err_m": 0.0002,
       "side_px": 143.0
@@ -1159,7 +1156,7 @@
     },
     "geometry_max_err_px": {
      "228": null,
-     "11": 0.29
+     "11": 0.33
     },
     "framed_default_228": 0,
     "framed_default_11": 0,
