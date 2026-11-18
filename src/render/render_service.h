@@ -271,7 +271,8 @@ class RenderService {
     // One vehicle's settings and what the render thread last decided for it, under settings_mutex_.
     struct Setting {
         std::optional<std::pair<int, int>> picture; // its own picture size
-        uint64_t picture_revision{0};               // picture size changes so far (configure())
+        uint64_t picture_revision{0};               // picture size changes so far (configure());
+                                                    // per vehicle id, so readers match both
         std::optional<CameraMode> normal;           // its own
         std::optional<CameraMode> landing; // its own
         bool landing_enabled{true};

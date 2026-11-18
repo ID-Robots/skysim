@@ -147,6 +147,8 @@ struct VehicleCameraState {
     // How many times the vehicle's picture size has changed since it spawned (0: never). Each JPEG
     // camera.jpg and camera.mjpg serve carries the revision it was drawn for, and the intrinsics and
     // GET .../camera name the current one, so a reader can tell the frame its calibration is for.
+    // It counts within one vehicle id: a replacement at the same instance starts again from 0, so
+    // the frames and the intrinsics name the vehicle too, and only the pair names one picture.
     uint64_t picture_revision{0};
     CameraMode normal;
     bool normal_own{false}; // its own, not the fleet's

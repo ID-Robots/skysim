@@ -319,10 +319,12 @@ def main() -> int:
         check(call("GET", "/instances/999/camera")[0] == 404, "an unknown instance is a 404")
 
         # --- a new picture size, and the frame and calibration that belong to it ------------------
-        # Every JPEG names the picture revision it was drawn for (X-Skysim-Picture-Revision), and
-        # GET .../camera and the intrinsics name the current one: a size change is a new revision,
-        # and what is served after it is a frame of the new size with the new revision.
+        # Every JPEG names the vehicle and the picture revision it was drawn for (X-Skysim-Vehicle,
+        # X-Skysim-Picture-Revision), and GET .../camera and the intrinsics name the current ones: a
+        # size change is a new revision, and what is served after it is a frame of the new size with
+        # the new revision, of the same vehicle.
         rev = call("GET", path)[1]["picture"]["revision"]
+        vid = str(parked["id"])
         for size, step in (((480, 270), 1), (FLEET[:2], 2)):
             status, cam = (call("POST", path, {"size": f"{size[0]}x{size[1]}"}) if step == 1
                            else call("DELETE", path))
@@ -335,12 +337,47 @@ def main() -> int:
             intr = call("GET", f"/instances/{BASE + 1}/camera/intrinsics")[1]
             check(status == 200 and jpeg_size(jpeg) == tuple(size)
                   and headers.get("x-skysim-picture-revision") == str(rev + step)
+                  and headers.get("x-skysim-vehicle") == vid and str(intr.get("vehicle")) == vid
                   and intr["picture_revision"] == rev + step and (intr["width"], intr["height"]) == tuple(size),
-                  f"... camera.jpg is a {jpeg_size(jpeg)} frame of revision {headers.get('x-skysim-picture-revision')}, "
-                  f"the intrinsics say {intr['width']}x{intr['height']} revision {intr['picture_revision']}")
+                  f"... camera.jpg is a {jpeg_size(jpeg)} frame of vehicle {headers.get('x-skysim-vehicle')} revision "
+                  f"{headers.get('x-skysim-picture-revision')}, the intrinsics say {intr['width']}x{intr['height']} "
+                  f"vehicle {intr.get('vehicle')} revision {intr['picture_revision']} (want vehicle {vid})")
             status, headers, part = fetch(f"/instances/{BASE + 1}/camera.mjpg", limit=1500)
-            check(status == 200 and f"X-Skysim-Picture-Revision: {rev + step}".encode() in part,
+            check(status == 200 and f"X-Skysim-Picture-Revision: {rev + step}".encode() in part
+                  and f"X-Skysim-Vehicle: {vid}\r\n".encode() in part,
                   "... and so does the MJPEG stream's first part")
+            status, headers, _ = fetch(f"/vehicles/{vid}/camera.jpg")
+            check(status == 200 and headers.get("x-skysim-vehicle") == vid
+                  and headers.get("x-skysim-picture-revision") == str(rev + step),
+                  "... and camera.jpg by vehicle id")
+
+        # A replacement at the same instance is a new vehicle: its revisions count again, so the
+        # revision alone could pair its frames (another size) with a calibration of the old one,
+        # read at the same number; the vehicle id cannot.
+        old_vid = vid
+        check(call("DELETE", f"/vehicles/{old_vid}")[0] == 200, "despawn the vehicle at the instance")
+        deadline = time.monotonic() + 10
+        while call("GET", path)[0] != 404 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        check(call("POST", "/vehicles", {"instance": BASE + 1, "camera": {"size": "320x180"}})[0] == 200,
+              "spawn a replacement at the same instance")
+        parked = listed(BASE + 1)
+        vid = str(parked["id"]) if parked else ""
+        check(parked is not None and vid != old_vid, f"... a new vehicle id ({vid}, was {old_vid})")
+        cam = call("GET", path)[1]
+        for _ in range(5):
+            status, headers, jpeg = fetch(f"/instances/{BASE + 1}/camera.jpg")
+            if status != 404:
+                break
+        intr = call("GET", f"/instances/{BASE + 1}/camera/intrinsics")[1]
+        check(status == 200 and jpeg_size(jpeg) == (320, 180) and str(cam.get("vehicle")) == vid
+              and headers.get("x-skysim-vehicle") == vid and str(intr.get("vehicle")) == vid
+              and headers.get("x-skysim-picture-revision") == str(intr["picture_revision"]),
+              f"... its {jpeg_size(jpeg)} frame (vehicle {headers.get('x-skysim-vehicle')} revision "
+              f"{headers.get('x-skysim-picture-revision')}) and calibration (vehicle {intr.get('vehicle')} revision "
+              f"{intr['picture_revision']}) name the new vehicle and agree")
+        # Back to the fleet's size, as the vehicle was before (and as what follows expects).
+        check(call("DELETE", path)[0] == 200, "... and back to the fleet's camera")
 
         # --- the landing camera in flight ----------------------------------------------------
         receiver = Receiver(BASE)

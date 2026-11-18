@@ -35,6 +35,8 @@ class FrameStore {
         int64_t captured_unix_us{0};
         // The vehicle's picture revision this JPEG was drawn for (VehicleCameraState::picture_revision):
         // the intrinsics and GET .../camera name the same number while they describe this picture.
+        // It counts within the vehicle the slot is keyed by: the routes that serve the frame name
+        // that vehicle too (X-Skysim-Vehicle), since a replacement at one instance starts again.
         uint64_t picture_revision{0};
     };
 

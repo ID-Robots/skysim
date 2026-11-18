@@ -174,9 +174,11 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
     normal and landing modes changes the frame rate (15 vs 30 fps): the stream's next frame is an
     IDR with SPS/PPS for the new rate, same picture size, same session. `GET .../camera/intrinsics`
     is the picture's pinhole always (`fx = width/2 / tan(hfov/2)`), plus `drawn` (`mode`, the draw
-    `width` and `height`) and `fps` now, and `picture_revision`: every `camera.jpg` and MJPEG part
-    carries `X-Skysim-Picture-Revision`, and a frame and a calibration with the same number are for
-    the same picture size (a size change makes a new one). In the normal mode the picture is a 640x360 drawing scaled
+    `width` and `height`) and `fps` now, `vehicle` and `picture_revision`: every `camera.jpg` and
+    MJPEG part carries `X-Skysim-Vehicle` and `X-Skysim-Picture-Revision`, and a frame and a
+    calibration with the same vehicle and the same revision are for the same picture size (a size
+    change makes a new revision; a replacement vehicle at the same instance has a new id and counts
+    its revisions from 0 again, so a client must match both values, not the revision alone). In the normal mode the picture is a 640x360 drawing scaled
     up, so it is soft; in the landing mode it is sharp.
   - **Cost**: [README, "What the camera costs"](../README.md#what-the-camera-costs-task-2661) and
     `tools/bench/camera_cost.py`. `GET /metrics` `camera.landing` counts vehicles in the landing

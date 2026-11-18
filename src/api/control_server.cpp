@@ -55,18 +55,22 @@ constexpr auto kFirstFrameWait = std::chrono::milliseconds(2000);
 // Each part says when its picture was taken: X-Skysim-Time-Usec is the sim time of the pose (as
 // on a survey still), X-Skysim-Capture-Unix-Usec the wall clock when it was drawn or re-sent, and
 // X-Skysim-Picture-Revision the vehicle's picture revision it was drawn for: the intrinsics name
-// the same number while they describe it (a picture size change makes a new one).
+// the same number while they describe it (a picture size change makes a new one). X-Skysim-Vehicle
+// is the vehicle it was drawn for: a revision counts within one vehicle, so a replacement at the
+// same instance starts again and only the pair (vehicle, revision) names one picture.
 // Multipart readers (GStreamer's multipartdemux, ffmpeg's mpjpeg) skip headers they do not know.
-void write_mjpeg_part(httplib::DataSink &sink, const skysim::render::FrameStore::Frame &frame) {
-    char head[384];
+void write_mjpeg_part(httplib::DataSink &sink, const skysim::render::FrameStore::Frame &frame,
+                      uint32_t vehicle_id) {
+    char head[416];
     const int n =
         std::snprintf(head, sizeof(head),
                       "--skysimframe\r\nContent-Type: image/jpeg\r\n"
                       "Content-Length: %zu\r\nX-Skysim-Time-Usec: %lld\r\n"
-                      "X-Skysim-Capture-Unix-Usec: %lld\r\nX-Skysim-Picture-Revision: %llu\r\n\r\n",
+                      "X-Skysim-Capture-Unix-Usec: %lld\r\nX-Skysim-Picture-Revision: %llu\r\n"
+                      "X-Skysim-Vehicle: %u\r\n\r\n",
                       frame.jpeg.size(), static_cast<long long>(std::llround(frame.sim_time_s * 1e6)),
                       static_cast<long long>(frame.captured_unix_us),
-                      static_cast<unsigned long long>(frame.picture_revision));
+                      static_cast<unsigned long long>(frame.picture_revision), vehicle_id);
     sink.write(head, std::min(static_cast<size_t>(n), sizeof(head) - 1));
     sink.write(reinterpret_cast<const char *>(frame.jpeg.data()), frame.jpeg.size());
     sink.write("\r\n", 2);
@@ -81,7 +85,7 @@ void stream_next_frame(const ControlServer::Snapshots &snapshots, uint32_t id, u
         id != 0 ? snapshots.camera_frame(id, last_seq, kFrameWait) : skysim::render::FrameStore::Frame{};
     if (!frame.jpeg.empty() && frame.seq != last_seq) {
         last_seq = frame.seq;
-        write_mjpeg_part(sink, frame);
+        write_mjpeg_part(sink, frame, id);
         return;
     }
     const auto waited = std::chrono::steady_clock::now() - asked;
@@ -1308,6 +1312,7 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
             return;
         }
         res.set_header("X-Skysim-Picture-Revision", std::to_string(frame.picture_revision));
+        res.set_header("X-Skysim-Vehicle", std::to_string(id));
         res.set_content(reinterpret_cast<const char *>(frame.jpeg.data()), frame.jpeg.size(), "image/jpeg");
     });
 
@@ -1354,6 +1359,7 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
             return;
         }
         res.set_header("X-Skysim-Picture-Revision", std::to_string(frame.picture_revision));
+        res.set_header("X-Skysim-Vehicle", std::to_string(id));
         res.set_content(reinterpret_cast<const char *>(frame.jpeg.data()), frame.jpeg.size(), "image/jpeg");
     });
 
@@ -1537,10 +1543,13 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
                   revision = cam->picture_revision;
               }
               std::string out = intrinsics_json("pilot", width, height, c.hfov_deg);
-              // Which picture these numbers are for: camera.jpg and camera.mjpg name the revision of
-              // each frame in X-Skysim-Picture-Revision, so a frame and a calibration read apart
-              // belong together when the two are equal (a size change makes a new revision; frames
-              // of the old size are never served for the new one, but one read just before may be).
+              // Which picture these numbers are for: camera.jpg and camera.mjpg name the vehicle and
+              // the revision of each frame in X-Skysim-Vehicle and X-Skysim-Picture-Revision, so a
+              // frame and a calibration read apart belong together when both are equal (a size
+              // change makes a new revision; frames of the old size are never served for the new
+              // one, but one read just before may be; a replacement vehicle at the same instance
+              // counts its revisions again, under a new id).
+              out += ",\"vehicle\":" + std::to_string(v->id);
               out += ",\"picture_revision\":" + std::to_string(revision);
               out += ",\"fps\":";
               append_value(out, fps);
