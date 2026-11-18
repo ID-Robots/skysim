@@ -256,7 +256,7 @@ size). A vehicle draws that picture in one of three modes:
   ArUco precision landing, which takes over at 30 m within 15 m of home, reads the dock marker —
   drawn at `SKYSIM_CAMERA_LANDING_SIZE` (default the picture size: every pixel) at
   `SKYSIM_CAMERA_LANDING_FPS`, its stream at `SKYSIM_CAMERA_LANDING_BITRATE` kbit/s. On when either
-  of the last three is set. Leaving takes 5 m more of either; a hover, however still, keeps it;
+  of the last three is set. Leaving takes 5 m more of either; a hover more than 0.12 m up, however still, keeps it;
 - **at rest**: a vehicle that has not moved (2 cm, half a degree) for 5 s on the ground — parked on
   its dock — is drawn in its normal mode at `SKYSIM_CAMERA_REST_FPS` (default `0`: its mode's rate).
   Its picture does not change, so this only saves re-sending and re-encoding it; its stream keeps

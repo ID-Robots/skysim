@@ -149,9 +149,13 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
     `SKYSIM_CAMERA_LANDING_FPS` (default the fleet's), `SKYSIM_CAMERA_LANDING_BITRATE` (kbit/s,
     default the stream's own), `SKYSIM_CAMERA_LANDING_RADIUS` (25 m), `SKYSIM_CAMERA_LANDING_HEIGHT`
     (40 m): drawn while a vehicle is within the radius of its dock (`GET .../camera/dock`), at most
-    the height above the ground, from when it leaves the ground (0.12 m up: a quad on the ground has its centre 0.07 m up) until it leaves the zone or
-    comes to rest on the ground again. Leaving the zone takes 5 m more of either. A hover never
-    counts as rest, so a SITL searching for the marker at 28.5 m keeps it.
+    the height above the ground, from when it leaves the ground until it leaves the zone or comes
+    to rest on the ground again. Leaving the zone takes 5 m more of either. A hover more than
+    0.12 m up never counts as rest, so a SITL searching for the marker at 28.5 m keeps it.
+    "On the ground" is a height, not a contact: a quad resting on the ground plane has its centre
+    0.07 m up, and one held still with its centre within 0.12 m (skids within about 5 cm of the
+    ground) for 5 s counts as landed. skysim's physics counts new contacts but does not track
+    which ones are still touching, so there is no contact signal to use instead.
   - **At rest**: `SKYSIM_CAMERA_REST_FPS` (default 0 = off): a vehicle still (2 cm, 0.5 deg) for 5 s
     on the ground is drawn — re-sent — at this rate. Its stream keeps its nominal frame rate (the
     encoder and SPS do not change); frames just come less often. A vehicle spawned on its dock
