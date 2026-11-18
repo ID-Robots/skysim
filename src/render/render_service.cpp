@@ -747,8 +747,8 @@ void RenderService::run() {
                 const Setting &st = it->second;
                 // (A setting that has changed its vehicle's picture size stays, whatever it holds now:
                 // its revision must not start again from 0 and name two sizes by one number.)
-                const bool own = st.picture || st.normal || st.landing || !st.landing_enabled ||
-                                 st.picture_revision != 0;
+                const bool own =
+                    st.picture || st.normal || st.landing || !st.landing_enabled || st.picture_revision != 0;
                 it = !own && gone(it->first) ? settings_.erase(it) : std::next(it);
             }
             for (const Pose &pose : poses) {
