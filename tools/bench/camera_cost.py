@@ -362,6 +362,12 @@ def main() -> int:
     args = ap.parse_args()
     if not 1000 <= args.pwm <= 2000:
         ap.error("--pwm must be 1000..2000")
+    fleet = [int(v) for v in args.vehicles.split(",") if v]
+    if args.state == "flying" and args.pwm == 1000 and any(n - min(args.parked, n) > 0 for n in fleet):
+        # 1000 is the parked group's motor command (run_one), so these aircraft would sit still and
+        # every frame would be a re-sent picture, in a run the report calls flying.
+        ap.error("--pwm 1000 is the motors-off command of a parked aircraft: a flying one needs more "
+                 "(use a --pwm above 1000, or --state parked, or --parked N for every vehicle)")
     if args.gimbal_pitch <= -999:
         args.gimbal_pitch = None
     if args.viewer_cpus:
@@ -371,7 +377,6 @@ def main() -> int:
             cpus.update(range(int(lo), int(hi or lo) + 1))
         os.sched_setaffinity(0, cpus)
     configs = [parse_config(c) for c in args.configs.split(",") if c]
-    fleet = [int(v) for v in args.vehicles.split(",") if v]
     rows: list[dict] = []
     for size, fps in configs:
         for n in fleet:

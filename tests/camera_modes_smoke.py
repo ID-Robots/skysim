@@ -64,6 +64,26 @@ def call(method: str, path: str, body: dict | str | None = None) -> tuple[int, d
         return e.code, json.loads(e.read().decode() or "{}")
 
 
+def fetch(path: str, limit: int | None = None) -> tuple[int, dict[str, str], bytes]:
+    """A route's status, headers (lower-cased names) and body, the first `limit` bytes of it if given."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{API_PORT}{path}", timeout=15) as resp:
+            body = resp.read(limit) if limit else resp.read()
+            return resp.status, {k.lower(): v for k, v in resp.headers.items()}, body
+    except urllib.error.HTTPError as e:
+        return e.code, {k.lower(): v for k, v in e.headers.items()}, e.read()
+
+
+def jpeg_size(jpeg: bytes) -> tuple[int, int]:
+    """(width, height) from a JPEG's SOF marker; (0, 0) when there is none."""
+    i = 2
+    while i + 9 < len(jpeg) and jpeg[i] == 0xFF:
+        if jpeg[i + 1] in (0xC0, 0xC1, 0xC2):
+            return struct.unpack(">H", jpeg[i + 7:i + 9])[0], struct.unpack(">H", jpeg[i + 5:i + 7])[0]
+        i += 2 + struct.unpack(">H", jpeg[i + 2:i + 4])[0]
+    return 0, 0
+
+
 def listed(instance: int) -> dict | None:
     """POST /vehicles answers before the tick publishes the snapshot: poll the list."""
     deadline = time.time() + 10
@@ -96,8 +116,9 @@ def rbsp(nal: bytes) -> bytes:
     return bytes(out)
 
 
-def sps_size(nal: bytes) -> tuple[int, int]:
-    """Picture size of a Baseline SPS (no chroma fields), after cropping."""
+def parse_sps(nal: bytes) -> tuple[tuple[int, int], float | None]:
+    """(picture size after cropping, frame rate) of a Baseline SPS (no chroma fields). The rate is the
+    VUI timing, time_scale / (2 * num_units_in_tick) as x264 writes it; None when there is none."""
     bits = "".join(f"{b:08b}" for b in rbsp(nal)[3:])
     pos = 0
 
@@ -133,8 +154,31 @@ def sps_size(nal: bytes) -> tuple[int, int]:
     crop = [0, 0, 0, 0]
     if u(1):
         crop = [ue(), ue(), ue(), ue()]
-    return (width_mbs * 16 - 2 * (crop[0] + crop[1]),
-            (2 - frame_mbs_only) * height_units * 16 - 2 * (crop[2] + crop[3]))
+    size = (width_mbs * 16 - 2 * (crop[0] + crop[1]), (2 - frame_mbs_only) * height_units * 16 - 2 * (crop[2] + crop[3]))
+    fps = None
+    try:
+        if u(1):  # vui_parameters_present_flag
+            if u(1) and u(8) == 255:  # aspect_ratio_info_present_flag, aspect_ratio_idc: Extended_SAR
+                u(32)
+            if u(1):  # overscan_info_present_flag
+                u(1)
+            if u(1):  # video_signal_type_present_flag
+                u(4)
+                if u(1):  # colour_description_present_flag
+                    u(24)
+            if u(1):  # chroma_loc_info_present_flag
+                ue()
+                ue()
+            if u(1):  # timing_info_present_flag
+                ticks, scale = u(32), u(32)
+                fps = scale / (2.0 * ticks) if ticks else None
+    except (ValueError, IndexError):  # a VUI that runs out of bits has no usable timing
+        fps = None
+    return size, fps
+
+
+def sps_size(nal: bytes) -> tuple[int, int]:
+    return parse_sps(nal)[0]
 
 
 class FakeSitl(threading.Thread):
@@ -274,6 +318,30 @@ def main() -> int:
               and cam["landing"]["available"] and not cam["landing"]["own"], "DELETE: the fleet's settings again")
         check(call("GET", "/instances/999/camera")[0] == 404, "an unknown instance is a 404")
 
+        # --- a new picture size, and the frame and calibration that belong to it ------------------
+        # Every JPEG names the picture revision it was drawn for (X-Skysim-Picture-Revision), and
+        # GET .../camera and the intrinsics name the current one: a size change is a new revision,
+        # and what is served after it is a frame of the new size with the new revision.
+        rev = call("GET", path)[1]["picture"]["revision"]
+        for size, step in (((480, 270), 1), (FLEET[:2], 2)):
+            status, cam = (call("POST", path, {"size": f"{size[0]}x{size[1]}"}) if step == 1
+                           else call("DELETE", path))
+            check(status == 200 and cam["picture"]["revision"] == rev + step and picture_of(cam) == tuple(size),
+                  f"{size[0]}x{size[1]}: the picture size change is revision {rev + step}")
+            for _ in range(5):  # a cold frame can outlast camera.jpg's wait on a slow build: ask again
+                status, headers, jpeg = fetch(f"/instances/{BASE + 1}/camera.jpg")
+                if status != 404:
+                    break
+            intr = call("GET", f"/instances/{BASE + 1}/camera/intrinsics")[1]
+            check(status == 200 and jpeg_size(jpeg) == tuple(size)
+                  and headers.get("x-skysim-picture-revision") == str(rev + step)
+                  and intr["picture_revision"] == rev + step and (intr["width"], intr["height"]) == tuple(size),
+                  f"... camera.jpg is a {jpeg_size(jpeg)} frame of revision {headers.get('x-skysim-picture-revision')}, "
+                  f"the intrinsics say {intr['width']}x{intr['height']} revision {intr['picture_revision']}")
+            status, headers, part = fetch(f"/instances/{BASE + 1}/camera.mjpg", limit=1500)
+            check(status == 200 and f"X-Skysim-Picture-Revision: {rev + step}".encode() in part,
+                  "... and so does the MJPEG stream's first part")
+
         # --- the landing camera in flight ----------------------------------------------------
         receiver = Receiver(BASE)
         check(receiver.client.describe().status == 200 and receiver.client.play().status == 200,
@@ -297,7 +365,9 @@ def main() -> int:
         others_switched = []  # (instance, height) where the parked or landing-off vehicle switched
         off_top = 0.0  # the landing-off vehicle's greatest height
         switched_at: list[float] = []  # wall times of vehicle 54's mode changes (as polled)
+        switch_polls: list[tuple[float, float]] = []  # ... and the poll before each, that saw the old mode
         last_mode = None
+        last_poll = time.time()
         deadline = time.time() + 60
         while time.time() < deadline:
             cam = call("GET", f"/instances/{BASE}/camera")[1]
@@ -306,7 +376,9 @@ def main() -> int:
             timeline.append((round(height, 1), cam["now"]["mode"]))
             if last_mode is not None and cam["now"]["mode"] != last_mode:
                 switched_at.append(now)
+                switch_polls.append((last_poll, now))
             last_mode = cam["now"]["mode"]
+            last_poll = now
             # The parked vehicle and the one with its landing mode off, watched all the way up.
             for other in (BASE + 1, BASE + 2):
                 if call("GET", f"/instances/{other}/camera")[1]["landing"]["active"]:
@@ -344,11 +416,32 @@ def main() -> int:
         check(sizes == [OWN[:2]], "one RTSP session, one picture size throughout (landing or not)")
         check(all(f.idr for f in frames if any(n and n[0] & 0x1F == 7 for n in f.nals)),
               "every SPS rides on an IDR")
-        # Each switch (into landing, and back out) is an IDR: the frame rate changes, so the encoder
-        # does. Looked for from just before the poll that saw it to a second after.
+        # Each switch (into landing, and back out) changes the frame rate, so it builds a new encoder:
+        # the first access unit of the new mode is an IDR whose SPS times the new rate. The stream
+        # also sends IDRs of its own accord, so one in a window around the switch proves nothing;
+        # what does is the SPS. Going through every access unit in order, a change of the rate an SPS
+        # times from the SPS before it is where a mode begins — a periodic IDR repeats the rate it is
+        # in — so the changes must be exactly: into landing, then back to the normal rate, each on an
+        # IDR, each between the poll that saw the old mode and the one that saw the new.
         check(len(switched_at) == 2, f"two switches seen ({len(switched_at)})")
-        for k, t in enumerate(switched_at[:2]):
-            check(any(f.idr for f in frames if t - 0.5 <= f.received <= t + 1.0), f"an IDR at switch {k + 1}")
+        begins: list[tuple[object, float | None]] = []  # (access unit, the rate its SPS times)
+        for f in frames:
+            for nal in f.nals:
+                if nal and nal[0] & 0x1F == 7:
+                    rate = parse_sps(nal)[1]
+                    if not begins or begins[-1][1] is None or rate is None or abs(rate - begins[-1][1]) > 1e-3:
+                        begins.append((f, rate))
+        print(f"camera_modes_smoke: the rate each change of SPS timing began: {[r for _, r in begins]}")
+        expected = [OWN[2], LANDING[0], OWN[2]]
+        check(len(begins) == 3 and all(r is not None and abs(r - e) < 1e-3 for (_, r), e in zip(begins, expected)),
+              f"the SPS timed the normal rate, the landing rate, the normal rate again ({expected})")
+        if len(begins) == 3:
+            for k in range(2):
+                first = begins[k + 1][0]
+                opened, saw = switch_polls[k] if k < len(switch_polls) else (0.0, 0.0)
+                check(first.idr and opened - 0.5 <= first.received <= saw + 1.5,
+                      f"the first access unit of mode {k + 2} is an IDR with the new rate's SPS, "
+                      f"{first.received - saw:+.2f} s from the poll that saw the switch")
         # Frame spacing over RTP, away from the switches: the landing rate (5 fps, 200 ms) while it
         # was landing, the vehicle's own (8 fps, 125 ms) after.
         def spacing(t0: float, t1: float) -> float | None:

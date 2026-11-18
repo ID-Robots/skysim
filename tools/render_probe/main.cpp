@@ -68,11 +68,20 @@ struct Options {
     std::exit(2);
 }
 
-// A finite number, the whole of `text`, or usage(): atof reads "12," and "nan" without a word.
+// A finite number, the whole of `text`, or usage(): atof reads "12," and "nan" without a word. One
+// leading '+' is allowed, as atof allowed it ("--north +12.5"); from_chars takes only a '-', and a
+// second sign after the '+' ("+-1") is not a number.
 double number(const char *text, const char *flag) {
+    const char *begin = text;
+    if (*begin == '+') {
+        ++begin;
+        if (*begin == '+' || *begin == '-') {
+            usage(flag);
+        }
+    }
     const char *end = text + std::strlen(text);
     double v = 0.0;
-    const auto parsed = std::from_chars(text, end, v);
+    const auto parsed = std::from_chars(begin, end, v);
     if (parsed.ec != std::errc() || parsed.ptr != end || !std::isfinite(v)) {
         usage(flag);
     }

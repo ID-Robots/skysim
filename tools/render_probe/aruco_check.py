@@ -49,6 +49,14 @@ def detector():
     return lambda grey: cv2.aruco.detectMarkers(grey, dictionary, parameters=params)[:2]
 
 
+def num(value: float) -> str:
+    """`value` as the shortest text that reads back as the same number: 81 for 81.0, 81.00001 for
+    81.00001. (":g" keeps six digits, so 81.00001 and 81.00002 both came out as 81: one picture, one
+    file, for two cameras.) The render argument, the picture's name and the report all use it."""
+    text = repr(float(value))
+    return text[:-2] if text.endswith(".0") else text
+
+
 def focal_px(width: int, hfov_deg: float) -> float:
     return width * 0.5 / math.tan(math.radians(hfov_deg) * 0.5)
 
@@ -91,10 +99,10 @@ def main() -> int:
             for off in offsets:
                 if off > 0 and off + 0.6 > alt * math.tan(math.radians(hfov_deg) * 0.5):
                     continue  # the marker would be (partly) out of the picture at this height
-                name = f"dock_{width}x{height}_hfov{hfov_deg:g}_{alt:g}m" + (f"_east{off:g}m" if off else "")
+                name = f"dock_{width}x{height}_hfov{num(hfov_deg)}_{num(alt)}m" + (f"_east{num(off)}m" if off else "")
                 ppm = os.path.join(args.out, name + ".ppm")
                 cmd = [args.probe, "--tiles", args.tiles, "--raster", "--size", f"{width}x{height}", "--fov",
-                       f"{hfov_deg:g}", "--pitch", "-90", "--alt", f"{alt:g}", "--dock", f"0,{off:g}",
+                       num(hfov_deg), "--pitch", "-90", "--alt", num(alt), "--dock", f"0,{num(off)}",
                        "--threads", str(args.threads), "--out", ppm]
                 if args.cache > 0:
                     cmd += ["--cache", f"{args.cache:g}"]
@@ -129,7 +137,7 @@ def main() -> int:
     for r in rows:
         side = f"{r['side_px']} ({r['side_px_expected']})" if r["side_px"] is not None else \
             f"- ({r['side_px_expected']})"
-        lines.append(f"| {r['size']} HFOV {r['hfov']:g} | {r['height_m']:g} m | {r['offset_m']:g} m | "
+        lines.append(f"| {r['size']} HFOV {num(r['hfov'])} | {num(r['height_m'])} m | {num(r['offset_m'])} m | "
                      f"{r['px_per_cell']} | {'detected' if r['outer_228'] else 'no detect'} | "
                      f"{'detected' if r['inner_11'] else 'no detect'} | {side} |")
     table = "\n".join(lines) + "\n"

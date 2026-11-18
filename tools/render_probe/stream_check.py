@@ -45,6 +45,13 @@ API_PORT = 18704
 RTSP_PORT = 18705
 INSTANCE = 110
 
+# What holding an altitude means, for hold() to start a measurement and for every reply after it,
+# until the measurement ends: telemetry that is no more than FRESH_S old (replies still coming),
+# within HOLD_BAND_M of the height and moving at less than HOLD_SPEED_MS.
+FRESH_S = 0.2
+HOLD_BAND_M = 0.05
+HOLD_SPEED_MS = 0.05
+
 
 def api(path: str, body: dict | None = None, method: str = "GET"):
     data = json.dumps(body).encode() if body is not None else None
@@ -70,6 +77,7 @@ class FakeSitl(threading.Thread):
         self.done = threading.Event()
         self.integral = 0.0
         self.received = 0.0  # when the last state reply arrived (monotonic)
+        self.window: dict | None = None  # what the replies since hold() returned looked like
 
     def pwm(self) -> int:
         if self.state is None or self.target <= 0.0:
@@ -101,7 +109,18 @@ class FakeSitl(threading.Thread):
                 continue
             with self.lock:
                 self.state = state
-                self.received = time.monotonic()
+                now = time.monotonic()
+                w = self.window
+                if w is not None:
+                    try:
+                        w["gap"] = max(w["gap"], now - w["last"])
+                        w["deviation"] = max(w["deviation"], abs(-state["position"][2] - w["target"]))
+                        w["speed"] = max(w["speed"], abs(state["velocity"][2]))
+                        w["replies"] += 1
+                    except (KeyError, IndexError, TypeError):
+                        w["malformed"] += 1  # a reply without a position or velocity is not telemetry
+                    w["last"] = now
+                self.received = now
 
     def height(self) -> float:
         with self.lock:
@@ -114,15 +133,46 @@ class FakeSitl(threading.Thread):
         while time.time() < deadline:
             with self.lock:
                 s = self.state
-                fresh = time.monotonic() - self.received < 0.2  # replies still coming
-            if s is not None and fresh and abs(-s["position"][2] - target) < 0.05 and abs(s["velocity"][2]) < 0.05:
+                fresh = time.monotonic() - self.received < FRESH_S  # replies still coming
+            if (s is not None and fresh and abs(-s["position"][2] - target) < HOLD_BAND_M
+                    and abs(s["velocity"][2]) < HOLD_SPEED_MS):
                 steady = steady or time.time()
                 if time.time() - steady > 1.0:
+                    # Held — and the replies from here on are watched (end_window) until whoever
+                    # measures has finished: a hold that was true when this returned says nothing
+                    # about the seconds the stream is read for.
+                    with self.lock:
+                        self.window = {"target": target, "last": self.received, "gap": 0.0, "deviation": 0.0,
+                                       "speed": 0.0, "replies": 0, "malformed": 0}
                     return True
             else:
                 steady = None
             time.sleep(0.05)
         return False
+
+    def end_window(self) -> list[str]:
+        """Stops watching what hold() started to, and says why the hold did not last: nothing when
+        telemetry kept coming (never a gap of FRESH_S, and one that is that fresh now), and the
+        vehicle stayed inside the band and under the speed hold() asked for, the whole time."""
+        with self.lock:
+            w, self.window = self.window, None
+            now = time.monotonic()
+            last = self.received
+        if w is None:
+            return ["no hold was being watched"]
+        gap = max(w["gap"], now - max(last, w["last"]))  # the silence since the last reply counts
+        why = []
+        if w["replies"] == 0:
+            why.append("no telemetry at all")
+        if gap >= FRESH_S:
+            why.append(f"telemetry stale for {gap:.2f} s")
+        if w["malformed"]:
+            why.append(f"{w['malformed']} telemetry replies without a position")
+        if w["deviation"] >= HOLD_BAND_M:
+            why.append(f"{w['deviation']:.2f} m off the height")
+        if w["speed"] >= HOLD_SPEED_MS:
+            why.append(f"vertical speed {w['speed']:.2f} m/s")
+        return why
 
 
 class Reader(threading.Thread):
@@ -230,6 +280,16 @@ def main() -> int:
             time.sleep(1.0)  # past the switch and its IDR
             cam = api(f"/instances/{INSTANCE}/camera")
             frames = reader.collect(args.seconds)
+            # The hold must have lasted from hold() to here, the whole of the read: a vehicle that
+            # drifted off the height, or telemetry that stopped (the last reply repeated is a
+            # position nobody is measuring), makes the frames some other height's.
+            left = sitl.end_window()
+            if left:
+                print(f"stream_check: did not stay at {h:g} m while the stream was read "
+                      f"({'; '.join(left)}); not measured", flush=True)
+                failures.append(f"hold {h:g} m lost while reading ({left[0]})")
+                frames.clear()
+                continue
             if not frames:
                 failures.append(f"no decoded frames at {h:g} m")
             found = 0

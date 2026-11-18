@@ -360,9 +360,15 @@ class FakeSitl(threading.Thread):
         self.sock.settimeout(0.5)
         self.target = 0.0
         self.state: dict | None = None
+        self.received = 0.0  # when `state` arrived (time.monotonic())
         self.lock = threading.Lock()
         self.done = threading.Event()
         self.integral = 0.0
+
+    # A state reply older than this is not telemetry any more: replies come once per physics step
+    # (800 Hz), so half a second without one means skysim stopped answering, and whatever the last
+    # reply said is no longer how the vehicle is flying.
+    FRESH_S = 0.5
 
     def pwm(self) -> int:
         if self.state is None or self.target <= 0.0:
@@ -394,10 +400,13 @@ class FakeSitl(threading.Thread):
                 continue
             with self.lock:
                 self.state = state
+                self.received = time.monotonic()
 
     def snapshot(self) -> dict | None:
+        """The latest state reply, or None while there is none or the last one is older than FRESH_S."""
         with self.lock:
-            return dict(self.state) if self.state else None
+            fresh = self.state is not None and time.monotonic() - self.received < self.FRESH_S
+            return dict(self.state) if fresh else None
 
     def hold(self, target: float, timeout: float = 90.0) -> bool:
         """Fly to `target` metres up and wait until settled there: within 1 mm and 2 mm/s for a
@@ -414,7 +423,9 @@ class FakeSitl(threading.Thread):
         steady_since = None
         while time.time() < deadline:
             s = self.snapshot()
-            if s is not None:
+            if s is None:
+                steady_since = None  # no telemetry: one cached reply never settles a hover
+            else:
                 h, vz = -s["position"][2], -s["velocity"][2]
                 if abs(h - target) < 0.001 and abs(vz) < 0.002:
                     steady_since = steady_since or time.time()
