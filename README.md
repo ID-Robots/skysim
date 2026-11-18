@@ -268,8 +268,9 @@ pacing the others. A vehicle's own settings, at spawn (`POST /vehicles` `"camera
 [control plane table](#control-plane---api-port). For dock precision landing on dev:
 
 ```bash
-SKYSIM_CAMERA_FPS=30 SKYSIM_CAMERA_SIZE=1920x1080 SKYSIM_CAMERA_DRAW_SIZE=640x360 SKYSIM_CAMERA_FOV=81 \
-SKYSIM_CAMERA_LANDING_FPS=15 SKYSIM_CAMERA_LANDING_BITRATE=4000 SKYSIM_CAMERA_REST_FPS=2
+SKYSIM_CAMERA_FPS=15 SKYSIM_CAMERA_SIZE=1920x1080 SKYSIM_CAMERA_DRAW_SIZE=640x360 SKYSIM_CAMERA_FOV=81 \
+SKYSIM_CAMERA_LANDING_FPS=15 SKYSIM_CAMERA_LANDING_BITRATE=4000 SKYSIM_CAMERA_REST_FPS=2 \
+SKYSIM_CAMERA_THREADS=8   # every CPU of an 8-vCPU task, at background priority
 ```
 
 What a consumer has to accept, and what that costs:

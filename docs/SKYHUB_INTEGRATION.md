@@ -241,15 +241,15 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   instead of a constant, so a vehicle spawned with its own picture size is calibrated too. If the
   core reads the stream with OpenCV's `VideoCapture`, never give a vehicle a new picture size
   (`POST .../camera {"size":...}`) while it is being read: OpenCV 4.5/4.6 keeps returning the last
-  frame of the old size. The frame rate does change, 30 to 15 fps and back, at the landing zone's
-  edge (an IDR with new SPS, same size): OpenCV 4.6 reads straight through it
-  (`tools/render_probe/stream_check.py`); a Janus/WebRTC path was not tried.
+  frame of the old size. Where the normal and landing rates differ, the frame rate changes at the landing
+  zone's edge (an IDR with new SPS, same size): OpenCV 4.6 reads straight through it
+  (`tools/render_probe/stream_check.py`, 30 to 15 fps); a Janus/WebRTC path was not tried.
 - **[C6] Infrastructure** (terraform, the dev skysim task): the env of [S8] —
   `SKYSIM_CAMERA_SIZE=1920x1080 SKYSIM_CAMERA_DRAW_SIZE=640x360 SKYSIM_CAMERA_FOV=81
-  SKYSIM_CAMERA_FPS=30 SKYSIM_CAMERA_LANDING_FPS=15 SKYSIM_CAMERA_LANDING_BITRATE=4000
-  SKYSIM_CAMERA_REST_FPS=2` (and `SKYSIM_CAMERA_THREADS` left at its default, every CPU of the
-  task) — and the task size the PR's cost table gives; keep 16 GB (the lit-ground cache is
-  512 MB at most).
+  SKYSIM_CAMERA_FPS=15 SKYSIM_CAMERA_LANDING_FPS=15 SKYSIM_CAMERA_LANDING_BITRATE=4000
+  SKYSIM_CAMERA_REST_FPS=2 SKYSIM_CAMERA_THREADS=8` (the default would be 4 threads) — on the
+  same 8 vCPU / 16 GB task (README, "What the camera costs"; the lit-ground cache is 512 MB at
+  most).
 
 ### 3. skyhub_gateway_service
 - **[G1] Settings**: `SKYSIM_ENABLED`, `SKYSIM_URL` (default `http://127.0.0.1:8642`),
@@ -288,8 +288,8 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   pattern as `vehicle-command.service.ts:97`) + a collision counter on the SITL drone
   card. Nothing else: mission upload/start UI already works unchanged.
 - **[D2]** Simulated video (TASK-2661): nothing to change. The picture keeps its size; with the
-  dev settings of [S8] it is 1920x1080 (a 640x360 drawing scaled up outside the landing zone, so
-  it looks soft there) and its stream's frame rate drops to 15 fps while a drone lands.
+  dev settings of [S8] it is 1920x1080 at 15 fps (a 640x360 drawing scaled up outside the landing
+  zone, so it looks soft there).
 
 ## Test plan (this machine, staged)
 

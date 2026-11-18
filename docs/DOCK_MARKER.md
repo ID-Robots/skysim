@@ -218,6 +218,10 @@ default `DetectorParameters`, the observer1-sim dictionary as this repo's proofs
 | 1280x720 HFOV 81 | 228 | 228 | 228 | 228 | 228 | 228 and 11 |
 | 640x360 HFOV 78 | 228 (12.0 / 13.2) | no detect | 228 | 228 | 228 | 228 and 11 |
 
+The 1920x1080 pictures (JPEG copies of the lossless pictures the detector read) and the whole run
+are in [docs/dock_marker/](dock_marker/) (`probe_1920x1080_*.jpg`,
+[probe-opencv-4.6.0.md](dock_marker/probe-opencv-4.6.0.md)); `aruco_check.py` writes them again.
+
 So 1920x1080 is enough at 30 m, with the marker anywhere in the picture: nothing about the marker
 needed changing in the renderer (it is drawn from its own mip-mapped texture, box-filtered per
 pixel, untouched by the ground cache; the same table comes out with the cache off). 640x360
