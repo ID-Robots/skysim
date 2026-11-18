@@ -1548,7 +1548,7 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
               // frame and a calibration read apart belong together when both are equal (a size
               // change makes a new revision; frames of the old size are never served for the new
               // one, but one read just before may be; a replacement vehicle at the same instance
-              // counts its revisions again, under a new id).
+              // counts its revisions again, under a new id: ids are not reused within one run).
               out += ",\"vehicle\":" + std::to_string(v->id);
               out += ",\"picture_revision\":" + std::to_string(revision);
               out += ",\"fps\":";

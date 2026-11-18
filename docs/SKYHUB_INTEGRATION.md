@@ -178,7 +178,8 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
     MJPEG part carries `X-Skysim-Vehicle` and `X-Skysim-Picture-Revision`, and a frame and a
     calibration with the same vehicle and the same revision are for the same picture size (a size
     change makes a new revision; a replacement vehicle at the same instance has a new id and counts
-    its revisions from 0 again, so a client must match both values, not the revision alone). In the normal mode the picture is a 640x360 drawing scaled
+    its revisions from 0 again, so a client must match both values, not the revision alone). Ids
+    are unique within one skysim run and start again at 1 after a restart. In the normal mode the picture is a 640x360 drawing scaled
     up, so it is soft; in the landing mode it is sharp.
   - **Cost**: [README, "What the camera costs"](../README.md#what-the-camera-costs-task-2661) and
     `tools/bench/camera_cost.py`. `GET /metrics` `camera.landing` counts vehicles in the landing
