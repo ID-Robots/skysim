@@ -474,6 +474,23 @@ void RenderService::forget(uint32_t vehicle_id) {
     retired_.insert(vehicle_id);
 }
 
+void RenderService::note_watched(Clock::time_point now, size_t watched) {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    if (!in_burst_ || watched == burst_prev_watched_) {
+        return;
+    }
+    // The step so far, spent on the vehicles that were watched in it (record_pass books the rest of
+    // the step from here, on the new number): two vehicles asked for at t=0, one lapsing at t=3 and
+    // the next frame due at t=10 are 3 * 2 + 7 * 1 vehicle-seconds, not 10 * 2.
+    const double step_s = std::chrono::duration<double>(now - burst_prev_).count();
+    for (Window *w : {&stats_window_, &log_window_}) {
+        w->active_s += step_s;
+        w->vehicle_s += step_s * static_cast<double>(burst_prev_watched_);
+    }
+    burst_prev_ = now;
+    burst_prev_watched_ = watched;
+}
+
 void RenderService::record_pass(const Window &pass, Clock::time_point now) {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     stats_.frames_drawn += pass.drawn;
@@ -895,6 +912,7 @@ void RenderService::run() {
             continue;
         }
         drawing = true;
+        note_watched(started, wanted.size());
 
         // Whose frame is due. Each vehicle keeps its own cadence; the soonest one not yet due is
         // what the thread sleeps until (or until somebody new asks).

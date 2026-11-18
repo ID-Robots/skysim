@@ -109,7 +109,7 @@ class GroundCache {
     bool deferred() const { return deferred_.load(std::memory_order_relaxed); }
     // Whether drawing the frame begun last again from the same place can finish what it put off:
     // false when the tiles it used and the lighter-level ones it left unbuilt (those prepare()
-    // counted) do not fit the budget together, which evict() keeps to 90 % of. Such a view would
+    // counted) do not fit the cache's capacity together. Such a view would
     // build some of them, evict others, and put the rest off again every frame, so a camera that
     // holds still on it is better off keeping the picture it has (the heavier level's, a little
     // softer) than drawing it over and over. Always true without a budget, and for a frame that put

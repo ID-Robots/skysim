@@ -442,6 +442,33 @@ def main() -> int:
                 check(first.idr and opened - 0.5 <= first.received <= saw + 1.5,
                       f"the first access unit of mode {k + 2} is an IDR with the new rate's SPS, "
                       f"{first.received - saw:+.2f} s from the poll that saw the switch")
+        # And no access unit drawn in a mode is coded at another mode's rate. Where a mode begins is
+        # not a frame that says so: an old encoder that went on coding new-mode frames until the
+        # next periodic IDR rebuilt it would still show one change of rate on an IDR. So each access
+        # unit is tied to the mode it was drawn in by when: its capture time (RTP timestamp against
+        # the sender report) against the polls. The flip fell between the poll that last saw a mode
+        # and the poll that saw the next, so before the one and after the other (with a little for the
+        # two wall clocks) a frame's mode is known, and the rate its encoder was timing — the last
+        # SPS's — must be that mode's. Every such access unit is looked at, none sampled.
+        rate_in_force: list[float | None] = []
+        timing = None
+        for f in frames:
+            for nal in f.nals:
+                if nal and nal[0] & 0x1F == 7:
+                    timing = parse_sps(nal)[1]
+            rate_in_force.append(timing)
+        clock_s = 0.15
+        if len(switch_polls) == 2:
+            known_in = [(-float("inf"), switch_polls[0][0] - clock_s),
+                        (switch_polls[0][1] + clock_s, switch_polls[1][0] - clock_s),
+                        (switch_polls[1][1] + clock_s, float("inf"))]
+            for m, (lo, hi) in enumerate(known_in):
+                known = [(f, r) for f, r in zip(frames, rate_in_force)
+                         if (t := receiver.client.capture_time(f)) is not None and lo <= t <= hi]
+                wrong = [r for _, r in known if r is None or abs(r - expected[m]) > 1e-3]
+                check(len(known) > 0 and not wrong,
+                      f"all {len(known)} access units drawn in mode {m + 1} are coded at {expected[m]:g} fps"
+                      f" ({len(wrong)} are not: {sorted({r for r in wrong if r is not None})[:3]})")
         # Frame spacing over RTP, away from the switches: the landing rate (5 fps, 200 ms) while it
         # was landing, the vehicle's own (8 fps, 125 ms) after.
         def spacing(t0: float, t1: float) -> float | None:

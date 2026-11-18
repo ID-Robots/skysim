@@ -253,6 +253,11 @@ class RenderService {
 
     void run();
     void record_pass(const Window &pass, Clock::time_point now);
+    // The vehicles on the draw list are `watched` now, at a loop turn that may or may not draw
+    // anything. When that is not the number the last pass (or the last such change) saw, the time
+    // since was spent on that number: it is booked at once, so a demand that lapses between two
+    // passes — with no frame due to end the step there — does not count for the whole step.
+    void note_watched(Clock::time_point now, size_t watched);
     void go_idle();
     Clock::duration log_period() const;
     // When the deferred "camera: idle" line (with the frames since the last line) is due;

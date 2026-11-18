@@ -114,19 +114,25 @@ class FakeSitl(threading.Thread):
                 state = json.loads(reply.decode())
             except ValueError:
                 continue
-            if not has_telemetry(state):
-                continue  # not a state reply: it is not a position, and does not make the last one fresh
-            with self.lock:
-                self.state = state
-                now = time.monotonic()
-                w = self.window
-                if w is not None:
-                    w["gap"] = max(w["gap"], now - w["last"])
-                    w["deviation"] = max(w["deviation"], abs(-state["position"][2] - w["target"]))
-                    w["speed"] = max(w["speed"], abs(state["velocity"][2]))
-                    w["replies"] += 1
-                    w["last"] = now
-                self.received = now
+            self.accept(state)
+
+    def accept(self, state) -> None:
+        """A state reply arrived: it is the latest telemetry, and it counts in the window hold() opened
+        (if there is one). Not a state reply — no position, no velocity — it is ignored: it does not make
+        the last one fresh."""
+        if not has_telemetry(state):
+            return
+        with self.lock:
+            self.state = state
+            now = time.monotonic()
+            w = self.window
+            if w is not None:
+                w["gap"] = max(w["gap"], now - w["last"])
+                w["deviation"] = max(w["deviation"], abs(-state["position"][2] - w["target"]))
+                w["speed"] = max(w["speed"], abs(state["velocity"][2]))
+                w["replies"] += 1
+                w["last"] = now
+            self.received = now
 
     def height(self) -> float:
         with self.lock:
@@ -137,22 +143,25 @@ class FakeSitl(threading.Thread):
         deadline = time.time() + timeout
         steady = None
         while time.time() < deadline:
+            # The telemetry is read, judged and — when the hold has lasted — the window opened, all
+            # under the lock a reply is stored under (accept): no reply can come between "it is in the
+            # band" and the window that is to see every reply after, so one that is not in the band
+            # either is the one judged here, or is in the window.
             with self.lock:
                 s = self.state
                 fresh = time.monotonic() - self.received < FRESH_S  # replies still coming
-            if (s is not None and fresh and abs(-s["position"][2] - target) < HOLD_BAND_M
-                    and abs(s["velocity"][2]) < HOLD_SPEED_MS):
-                steady = steady or time.time()
-                if time.time() - steady > 1.0:
-                    # Held — and the replies from here on are watched (end_window) until whoever
-                    # measures has finished: a hold that was true when this returned says nothing
-                    # about the seconds the stream is read for.
-                    with self.lock:
+                if (s is not None and fresh and abs(-s["position"][2] - target) < HOLD_BAND_M
+                        and abs(s["velocity"][2]) < HOLD_SPEED_MS):
+                    steady = steady or time.time()
+                    if time.time() - steady > 1.0:
+                        # Held — and the replies from here on are watched (end_window) until whoever
+                        # measures has finished: a hold that was true when this returned says nothing
+                        # about the seconds the stream is read for.
                         self.window = {"target": target, "last": self.received, "gap": 0.0, "deviation": 0.0,
                                        "speed": 0.0, "replies": 0}
-                    return True
-            else:
-                steady = None
+                        return True
+                else:
+                    steady = None
             time.sleep(0.05)
         return False
 
@@ -220,7 +229,82 @@ class Reader(threading.Thread):
             return batch
 
 
+class _ReleaseHook:
+    """A lock that calls `after()` each time it is released: a place for a telemetry reply to arrive
+    exactly where hold() lets go of the lock."""
+
+    def __init__(self, after) -> None:
+        self._lock = threading.Lock()
+        self.after = after
+
+    def __enter__(self) -> "_ReleaseHook":
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._lock.release()
+        self.after()
+
+
+def selftest() -> int:
+    """hold() against a reply that is out of the band and arrives at the first moment hold() lets go
+    of the lock after a second of steady telemetry — between its check and (in a hold() that took
+    the lock twice) the opening of its window. The window must have seen it: end_window() names the
+    deviation. No simulator, no OpenCV."""
+    def in_band(sitl: FakeSitl, height: float) -> dict:
+        return {"position": [0.0, 0.0, -height], "velocity": [0.0, 0.0, 0.0]}
+
+    sitl = FakeSitl(0)
+    start = time.monotonic()
+    fired = threading.Event()
+    holder: list[threading.Thread] = []
+
+    def after_release() -> None:
+        # Only hold()'s thread, only once it has been steady for a second, and only the once.
+        if holder and threading.current_thread() is holder[0] and time.monotonic() - start >= 1.0 \
+                and not fired.is_set():
+            fired.set()
+            sitl.accept(in_band(sitl, 10.4))  # 0.4 m off the height
+
+    sitl.lock = _ReleaseHook(after_release)  # type: ignore[assignment]
+    stop = threading.Event()
+
+    def telemetry() -> None:
+        while not stop.is_set():
+            if not fired.is_set():
+                sitl.accept(in_band(sitl, 10.0))
+            time.sleep(0.01)
+
+    feeder = threading.Thread(target=telemetry, daemon=True)
+    feeder.start()
+    result: list[bool] = []
+
+    def run_hold() -> None:
+        result.append(sitl.hold(10.0, timeout=10.0))
+
+    runner = threading.Thread(target=run_hold, daemon=True)
+    holder.append(runner)
+    runner.start()
+    runner.join(timeout=15.0)
+    stop.set()
+    why = sitl.end_window() if result and result[0] else []
+    print(f"stream_check selftest: hold() returned {result}, the late reply was injected: {fired.is_set()}, "
+          f"the window says: {why}")
+    # Either hold() saw the reply before it opened the window (and held on, or gave up) or its
+    # window did: what must not happen is a hold that returned True with a window that missed it.
+    if not fired.is_set():
+        print("stream_check selftest: FAIL: the reply was never injected")
+        return 1
+    if result and result[0] and not any("off the height" in w for w in why):
+        print("stream_check selftest: FAIL: held, and the window missed the out-of-band reply")
+        return 1
+    print("stream_check selftest: OK")
+    return 0
+
+
 def main() -> int:
+    if "--selftest" in sys.argv[1:]:
+        return selftest()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sim", default="build/skysim")
     ap.add_argument("--args", default="--camera-fps 30 --camera-size 640x360 --camera-fov 78",

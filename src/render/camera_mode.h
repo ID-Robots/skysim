@@ -93,14 +93,20 @@ inline bool check_mode_patch(const CameraModePatch &patch, std::string *error) {
 
 // Whether a draw size has the picture's aspect ratio, the one rule the command line, a spawn's
 // "camera" and POST .../camera all hold a draw size to: its height is within half a pixel of the
-// picture's share of its width (what a size given by one side alone is rounded to, so one always
-// passes), or its width over its height is within 1 % of the picture's. A size of 0 is not a size.
+// picture's share of its width, or its width within half a pixel of the picture's share of its
+// height (what a size given by one side alone is rounded to, whichever side that is, so one
+// always passes: 33 high on a 1080x1920 picture is 19 wide, 18.56 rounded), or its width over its
+// height is within 1 % of the picture's. A size of 0 is not a size.
 inline bool same_aspect_ratio(int width, int height, int picture_width, int picture_height) {
     if (width <= 0 || height <= 0 || picture_width <= 0 || picture_height <= 0) {
         return false;
     }
     const double share = static_cast<double>(width) * picture_height / picture_width;
     if (std::fabs(static_cast<double>(height) - share) <= 0.5 + 1e-9) {
+        return true;
+    }
+    const double across = static_cast<double>(height) * picture_width / picture_height;
+    if (std::fabs(static_cast<double>(width) - across) <= 0.5 + 1e-9) {
         return true;
     }
     const double picture = static_cast<double>(picture_width) / picture_height;

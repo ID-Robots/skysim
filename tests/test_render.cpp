@@ -698,6 +698,25 @@ void test_camera_settings_checks() {
         const auto cam = service.configure(1, by_height, &error);
         CHECK(cam && cam->normal.width == 960 && cam->normal.height == 540);
     }
+    {
+        // A height given alone is rounded to a width the same way, and what it rounds to is accepted:
+        // 33 high on a 1080x1920 picture is 19 wide (18.56), which is 33.78 high at that picture's
+        // shape — more than half a pixel off the height, but under half a pixel off the width.
+        skysim::render::RenderService service(cfg);
+        CameraSettingsPatch portrait;
+        portrait.picture_width = 1080;
+        portrait.picture_height = 1920;
+        portrait.normal.height = 33;
+        const auto cam = service.configure(1, portrait, &error);
+        CHECK(cam && cam->normal.width == 19 && cam->normal.height == 33);
+        CHECK(skysim::render::same_aspect_ratio(19, 33, 1080, 1920));
+        CHECK(!skysim::render::same_aspect_ratio(21, 33, 1080, 1920)); // 3 px wider is another shape
+        CameraSettingsPatch narrow = portrait; // and a width alone: 17 wide is 30.2, so 30 high
+        narrow.normal = {};
+        narrow.normal.width = 17;
+        const auto again = service.configure(2, narrow, &error);
+        CHECK(again && again->normal.width == 17 && again->normal.height == 30);
+    }
 
     // A fleet the command line accepted — 640x363 at 1920x1080, 0.8 % off — is one the API leaves
     // alone: a POST of the rate and a DELETE both succeed instead of refusing it.
@@ -896,6 +915,191 @@ void test_picture_size_change() {
     std::printf("test_render: %d picture-size changes, %d frame(s) of the wrong size\n", rounds, wrong);
     CHECK(wrong == 0);
     CHECK(service.camera(3).picture_revision == 39); // 40 settings, the first the fleet's own size
+}
+
+// A frame drawn at the old picture size while POST .../camera changes it is dropped, not published
+// — made to happen on every round, not left to chance. Vehicle 1 (video) and vehicle 2 (JPEG) are
+// both due in every pass (a rate of 1000 fps is a period inside the scheduler's slack), 1 first.
+// Vehicle 1's video sink runs on the render thread between the two draws, so a size change made
+// there lands after the pass took its picture sizes and before vehicle 2's frame is published:
+// exactly the frame in flight. In the pass after, before vehicle 2 is drawn again, what camera.jpg
+// holds for it must be nothing: a frame there is the stale one.
+void test_stale_frame_dropped() {
+    using namespace std::chrono_literals;
+    using skysim::render::RenderService;
+    RenderService::Config cfg;
+    cfg.camera.width = 160;
+    cfg.camera.height = 90;
+    cfg.scene = skysim::render::load_scene("", 1);
+    cfg.fps = 1000.0;
+    cfg.threads = 1;
+    cfg.background_priority = false;
+    cfg.demand_window_s = 60.0;
+    constexpr int kRounds = 30;
+    std::atomic<RenderService *> service_ptr{nullptr};
+    std::atomic<bool> go{false};
+    std::atomic<int> rounds{0};
+    std::atomic<int> leaked{0};
+    std::atomic<int> exercised{0};
+    // Render thread only, from here on.
+    bool pending = false;
+    uint64_t work_at_change = 0;
+    cfg.video_sink = [&](uint32_t id, std::shared_ptr<const skysim::render::Image>, double,
+                         std::chrono::steady_clock::time_point, const skysim::render::CameraMode &) {
+        RenderService *service = service_ptr.load();
+        if (id != 1 || service == nullptr || !go.load()) {
+            return;
+        }
+        const auto camera = service->camera(2);
+        const uint64_t work = camera.frames_drawn + camera.frames_reused;
+        if (pending) {
+            // Vehicle 2's frame of the pass that changed its size: dropped, so nothing is stored.
+            if (!service->frame(2, 0, 0ms).jpeg.empty()) {
+                ++leaked;
+            }
+            // And vehicle 2 did have its turn in that pass: the race was run, not skipped.
+            if (work > work_at_change) {
+                ++exercised;
+            }
+            pending = false;
+            ++rounds;
+        }
+        if (rounds.load() < kRounds) {
+            skysim::render::CameraSettingsPatch size;
+            size.picture_width = rounds.load() % 2 == 0 ? 128 : 160;
+            size.picture_height = rounds.load() % 2 == 0 ? 72 : 90;
+            std::string error;
+            CHECK(service->configure(2, size, &error).has_value());
+            work_at_change = work;
+            pending = true;
+        }
+    };
+    RenderService service(cfg);
+    RenderService::Pose pose;
+    pose.position_ned = {0.0, 0.0, -20.0};
+    pose.vehicle_id = 1;
+    RenderService::Pose other = pose;
+    other.vehicle_id = 2;
+    service.publish_poses({pose, other});
+    service_ptr = &service;
+    service.want_video(1);
+    for (int i = 0; i < 400 && service.frame(2, 0, 50ms).jpeg.empty(); ++i) {
+    }
+    go = true;
+    for (int i = 0; i < 600 && rounds.load() < kRounds; ++i) {
+        std::this_thread::sleep_for(100ms);
+    }
+    go = false;
+    std::printf("test_render: %d size changes in a pass, %d with a frame of the old size stored, %d with "
+                "vehicle 2 in the pass\n",
+                rounds.load(), leaked.load(), exercised.load());
+    CHECK(rounds.load() == kRounds);
+    CHECK(leaked.load() == 0);
+    CHECK(exercised.load() == kRounds);
+}
+
+// The rate /metrics reports for a viewer that leaves between two passes. Two cameras are watched, one
+// of them is not asked for again and its demand lapses (0.3 s), and the next frame is not due until
+// 2.5 s: no pass ends the step the demand lapses in, so the step is booked when the watched set
+// changes (note_watched) — about 0.5 s of two vehicles and the rest of one, not all of it as two.
+void test_rate_when_a_viewer_leaves() {
+    using namespace std::chrono_literals;
+    skysim::render::RenderService::Config cfg;
+    cfg.camera.width = 64;
+    cfg.camera.height = 36;
+    cfg.scene = skysim::render::load_scene("", 1);
+    cfg.fps = 0.4; // a frame every 2.5 s
+    cfg.threads = 1;
+    cfg.background_priority = false;
+    cfg.demand_window_s = 0.3;
+    skysim::render::RenderService service(cfg);
+    skysim::render::RenderService::Pose pose;
+    pose.vehicle_id = 1;
+    pose.position_ned = {0.0, 0.0, -10.0};
+    skysim::render::RenderService::Pose other = pose;
+    other.vehicle_id = 2;
+    service.publish_poses({pose, other});
+    CHECK(!service.frame(1, 0, 30000ms).jpeg.empty()); // pass 1: vehicle 1 alone starts the run
+    CHECK(!service.frame(2, 0, 30000ms).jpeg.empty()); // pass 2: vehicle 2 joins, asked for once
+    const auto joined = std::chrono::steady_clock::now();
+    // Vehicle 1 stays asked for; vehicle 2's demand lapses. Its frame (and the first window) is due
+    // when vehicle 1's next one is, 2.5 s after pass 1.
+    for (int i = 0; i < 200 && service.stats().fps == 0.0; ++i) {
+        service.frame(1, 0, 0ms);
+        std::this_thread::sleep_for(50ms);
+    }
+    const double fps = service.stats().fps;
+    const double span = std::chrono::duration<double>(std::chrono::steady_clock::now() - joined).count();
+    std::printf("test_render: a camera that left %.1f s into a step of two: reported %.3f fps each\n", span,
+                fps);
+    // Frames over vehicle-seconds: 2 frames (vehicle 2's first, vehicle 1's second) in about 3.1
+    // vehicle-seconds, 0.65. Counting the whole step as two vehicles makes it 4.9: 0.41.
+    CHECK(fps > 0.53);
+    CHECK(fps < 0.9);
+}
+
+// The ground cache is trimmed only once it holds more than its capacity. A view whose tiles fit it,
+// even only just — more than the 90 % a trim leaves — is refined to the end: the older tiles go
+// first and the few of its own that a trim takes are built again by the next frame. One that does
+// not fit is not.
+void test_view_that_fits_is_refined() {
+    using skysim::render::GroundCache;
+    skysim::render::CameraConfig cc;
+    cc.width = 640;
+    cc.height = 360;
+    cc.fov_deg = 78.0;
+    cc.pitch_deg = -20.0;
+    const auto scene = skysim::render::load_scene("", 1);
+    const skysim::render::Camera camera(cc, {-60.0, 0.0, -25.0}, {1.0, 0.0, 0.0, 0.0});
+    const skysim::render::Rasterizer raster(cc);
+    skysim::core::ThreadPool pool(2);
+    // How many tiles the view reads, from a cache without a budget, until nothing is put off.
+    GroundCache whole(scene, 0);
+    int frames = 0;
+    do {
+        raster.render(*scene, camera, &pool, nullptr, true, nullptr, &whole);
+        ++frames;
+    } while (whole.deferred() && frames < 50);
+    const size_t tiles = whole.stats().tiles;
+    CHECK(!whole.deferred() && tiles > 100);
+    // The smallest capacity at which a cold first frame says it can be finished: the tiles it used
+    // plus those it put off, which does not depend on the capacity.
+    const auto first_frame = [&](size_t capacity_tiles) {
+        auto cache = std::make_unique<GroundCache>(scene, capacity_tiles * GroundCache::kTileBytes);
+        raster.render(*scene, camera, &pool, nullptr, true, nullptr, cache.get());
+        cache->evict();
+        return cache;
+    };
+    const auto can_finish = [&](size_t capacity_tiles) {
+        const auto cache = first_frame(capacity_tiles);
+        return cache->deferred() && cache->refinable();
+    };
+    size_t lo = 1;
+    size_t hi = 4 * tiles;
+    CHECK(!can_finish(lo) && can_finish(hi));
+    while (hi - lo > 1) {
+        const size_t mid = lo + (hi - lo) / 2;
+        (can_finish(mid) ? hi : lo) = mid;
+    }
+    const size_t fit = hi;
+    std::printf("test_render: a view of %zu tiles whole; its first frame counts %zu used and put off\n",
+                tiles, fit);
+    // About the tiles the view comes to hold, not a ninth more (the 90 % a trim leaves would put it a
+    // ninth higher): the cache is trimmed only past its whole capacity. A little over, as what the first
+    // frame puts off includes tiles the later ones turn out not to need.
+    CHECK(fit >= tiles && fit <= tiles + tiles / 10);
+    // At exactly that capacity the cache is never trimmed, though the view is more than the 90 % a
+    // trim leaves: it is refined to the end. One tile fewer and it cannot be (can_finish above).
+    const auto snug = first_frame(fit);
+    CHECK(snug->deferred() && snug->refinable());
+    int more = 1;
+    while (snug->deferred() && more < 50) {
+        raster.render(*scene, camera, &pool, nullptr, true, nullptr, snug.get());
+        snug->evict();
+        CHECK(snug->refinable());
+        ++more;
+    }
+    CHECK(!snug->deferred());
 }
 
 void test_resize() {
@@ -1614,6 +1818,9 @@ int main() {
     test_resize();
     test_camera_modes();
     test_picture_size_change();
+    test_stale_frame_dropped();
+    test_rate_when_a_viewer_leaves();
+    test_view_that_fits_is_refined();
     test_unfit_view_is_resent();
     test_buried_mesh_prefetch();
     test_camera_settings_checks();

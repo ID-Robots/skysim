@@ -456,6 +456,11 @@ if(Python3_FOUND)
     # the landing zone and back above it, on one session.
     add_test(NAME camera_modes_smoke
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/camera_modes_smoke.py $<TARGET_FILE:skysim>)
+    # The altitude-hold probe's own check (TASK-2661): hold() judges the telemetry and opens the
+    # window that watches the rest of it under one lock, so a reply cannot fall between. No simulator.
+    add_test(NAME stream_check_selftest
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/render_probe/stream_check.py --selftest)
+    set_tests_properties(stream_check_selftest PROPERTIES LABELS "unit" TIMEOUT 60)
     set_tests_properties(app_smoke app_churn survey_fixture rtsp_smoke camera_modes_smoke PROPERTIES
         LABELS "happy-path"
         TIMEOUT 180

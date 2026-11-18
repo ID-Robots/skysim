@@ -422,8 +422,11 @@ void GroundCache::evict() {
     if (deferred_.load(std::memory_order_relaxed)) {
         // The frame put tiles off. Whether a later one from the same place can build them and keep
         // them all: the tiles this frame used (they carry its number) and the ones it put off must
-        // fit together, or each frame evicts what the next one needs. Counted only for a frame that
-        // put tiles off, so a settled view costs no walk of the cache.
+        // fit the cache together, or each frame evicts what the next one needs. Against its whole
+        // capacity, not the 90 % evict() trims to: the cache is only trimmed once it holds more than
+        // its capacity, and a view that fits it fills (the older tiles go first, and the few of its
+        // own that the trim takes are built again by the next frame) and is not evicted from again.
+        // Counted only for a frame that put tiles off, so a settled view costs no walk of the cache.
         size_t used = 0;
         for (Shard &shard : shards_) {
             std::lock_guard<std::mutex> lock(shard.mutex);
@@ -431,7 +434,7 @@ void GroundCache::evict() {
                 used += entry.second->last_used.load(std::memory_order_relaxed) == now ? 1 : 0;
             }
         }
-        refinable_.store(used + deferred_tiles_.load(std::memory_order_relaxed) <= keep,
+        refinable_.store(used + deferred_tiles_.load(std::memory_order_relaxed) <= budget_bytes_ / kTileBytes,
                          std::memory_order_relaxed);
     }
     const size_t count = tile_count_.load(std::memory_order_relaxed);
