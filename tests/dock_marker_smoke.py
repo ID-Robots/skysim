@@ -398,6 +398,10 @@ class FakeSitl(threading.Thread):
                 state = json.loads(reply.decode())
             except ValueError:
                 continue
+            if not (isinstance(state, dict) and isinstance(state.get("position"), list)
+                    and isinstance(state.get("velocity"), list) and len(state["position"]) >= 3
+                    and len(state["velocity"]) >= 3):
+                continue  # not a state reply: nothing to fly by, and not fresh telemetry
             with self.lock:
                 self.state = state
                 self.received = time.monotonic()

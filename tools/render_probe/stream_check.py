@@ -60,6 +60,13 @@ def api(path: str, body: dict | None = None, method: str = "GET"):
         return json.loads(resp.read().decode() or "{}")
 
 
+def has_telemetry(state) -> bool:
+    """Whether a decoded reply has the position and velocity (three numbers each) the hold flies by."""
+    return isinstance(state, dict) and all(
+        isinstance(state.get(k), list) and len(state[k]) >= 3 and all(isinstance(v, (int, float)) for v in state[k][:3])
+        for k in ("position", "velocity"))
+
+
 class FakeSitl(threading.Thread):
     """JSON lockstep with an altitude hold on all four motors and the gimbal at -90 deg (the
     altitude hold tests/dock_marker_smoke.py flies with)."""
@@ -107,18 +114,17 @@ class FakeSitl(threading.Thread):
                 state = json.loads(reply.decode())
             except ValueError:
                 continue
+            if not has_telemetry(state):
+                continue  # not a state reply: it is not a position, and does not make the last one fresh
             with self.lock:
                 self.state = state
                 now = time.monotonic()
                 w = self.window
                 if w is not None:
-                    try:
-                        w["gap"] = max(w["gap"], now - w["last"])
-                        w["deviation"] = max(w["deviation"], abs(-state["position"][2] - w["target"]))
-                        w["speed"] = max(w["speed"], abs(state["velocity"][2]))
-                        w["replies"] += 1
-                    except (KeyError, IndexError, TypeError):
-                        w["malformed"] += 1  # a reply without a position or velocity is not telemetry
+                    w["gap"] = max(w["gap"], now - w["last"])
+                    w["deviation"] = max(w["deviation"], abs(-state["position"][2] - w["target"]))
+                    w["speed"] = max(w["speed"], abs(state["velocity"][2]))
+                    w["replies"] += 1
                     w["last"] = now
                 self.received = now
 
@@ -143,7 +149,7 @@ class FakeSitl(threading.Thread):
                     # about the seconds the stream is read for.
                     with self.lock:
                         self.window = {"target": target, "last": self.received, "gap": 0.0, "deviation": 0.0,
-                                       "speed": 0.0, "replies": 0, "malformed": 0}
+                                       "speed": 0.0, "replies": 0}
                     return True
             else:
                 steady = None
@@ -166,8 +172,6 @@ class FakeSitl(threading.Thread):
             why.append("no telemetry at all")
         if gap >= FRESH_S:
             why.append(f"telemetry stale for {gap:.2f} s")
-        if w["malformed"]:
-            why.append(f"{w['malformed']} telemetry replies without a position")
         if w["deviation"] >= HOLD_BAND_M:
             why.append(f"{w['deviation']:.2f} m off the height")
         if w["speed"] >= HOLD_SPEED_MS:

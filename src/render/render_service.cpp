@@ -745,7 +745,10 @@ void RenderService::run() {
             std::lock_guard<std::mutex> lock(settings_mutex_);
             for (auto it = settings_.begin(); it != settings_.end();) {
                 const Setting &st = it->second;
-                const bool own = st.picture || st.normal || st.landing || !st.landing_enabled;
+                // (A setting that has changed its vehicle's picture size stays, whatever it holds now:
+                // its revision must not start again from 0 and name two sizes by one number.)
+                const bool own = st.picture || st.normal || st.landing || !st.landing_enabled ||
+                                 st.picture_revision != 0;
                 it = !own && gone(it->first) ? settings_.erase(it) : std::next(it);
             }
             for (const Pose &pose : poses) {
