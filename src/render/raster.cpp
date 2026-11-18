@@ -253,6 +253,36 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
         }
     };
 
+    // The ground tiles this frame reads, gathered from every 8th pixel each way and built across
+    // the pool before any band starts (GroundCache::prepare); a tile only a pixel between the
+    // samples needs is built by its band, as before.
+    if (fast_ground) {
+        constexpr int kStride = 8;
+        std::vector<uint64_t> required;
+        std::vector<uint64_t> optional;
+        for (int y = kStride / 2; y < cfg_.height; y += kStride) {
+            const double cy = ((y + 0.5) / cfg_.height * 2.0 - 1.0) * camera.tan_half_y();
+            for (int x = kStride / 2; x < cfg_.width; x += kStride) {
+                const double cx = (x + 0.5) * step_x - tan_x;
+                const double rx = fwd[0] + down[0] * cy + right[0] * cx;
+                const double ry = fwd[1] + down[1] * cy + right[1] * cx;
+                const double rz = fwd[2] + down[2] * cy + right[2] * cx;
+                const double rn = std::sqrt(rx * rx + ry * ry + rz * rz);
+                if (!(rz > 1e-9 * rn)) {
+                    continue;
+                }
+                const double inv = 1.0 / rz;
+                const double along = height_m * inv;
+                if (along * rn > kMaxGroundM) {
+                    continue;
+                }
+                GroundCache::tiles_for(eye[0] + rx * along, eye[1] + ry * along,
+                                       std::min(footprint_k * inv * std::sqrt(inv), 1e3), required, optional);
+            }
+        }
+        ground_cache->prepare(required, optional, pool);
+    }
+
     // Eight rows a band, at most 256 bands: enough to balance a small pilot frame across the
     // workers, few enough that each band's scan of the screen-triangle list stays cheap.
     const int bands = pool != nullptr ? std::clamp(cfg_.height / 8, 1, 256) : 1;

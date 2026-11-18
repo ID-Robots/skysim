@@ -264,6 +264,47 @@ void test_ground_cache(const std::filesystem::path &tiles) {
         CHECK(same);
     }
 
+    // prepare(): the tiles a frame reads, gathered ahead (tiles_for) and built across a pool, are
+    // the tiles drawing then reads — it builds none of its own — with the same colours as tiles
+    // built on demand. Negative coordinates included: the keys round-trip.
+    {
+        GroundCache pre(scene, 0);
+        pre.begin_frame(1 << 30);
+        std::vector<uint64_t> required;
+        std::vector<uint64_t> optional;
+        const auto point = [](int k, double &n, double &e, double &fp) {
+            n = -3.0 + k * 0.05;
+            e = -7.0 + k * 0.031;
+            fp = 0.01 + k * 1e-4;
+        };
+        for (int k = 0; k < 200; ++k) {
+            double n, e, fp;
+            point(k, n, e, fp);
+            GroundCache::tiles_for(n, e, fp, required, optional);
+        }
+        skysim::core::ThreadPool helpers(3);
+        pre.prepare(required, optional, &helpers);
+        const uint64_t built = pre.stats().tiles_built;
+        CHECK(built > 0);
+        GroundCache lazy(scene, 0);
+        lazy.begin_frame(1 << 30);
+        GroundCache::Sampler a(pre);
+        GroundCache::Sampler b(lazy);
+        bool same = true;
+        for (int k = 0; k < 200; ++k) {
+            double n, e, fp;
+            point(k, n, e, fp);
+            double ca[3];
+            double cb[3];
+            a.lit(n, e, fp, ca);
+            b.lit(n, e, fp, cb);
+            same = same && ca[0] == cb[0] && ca[1] == cb[1] && ca[2] == cb[2];
+        }
+        CHECK(same);
+        CHECK(pre.stats().tiles_built == built);
+        CHECK(lazy.stats().tiles_built == built);
+    }
+
     // The rasteriser with the cache draws the picture without it, to within a byte or two: looking
     // straight down at the ground and the building's roof, and obliquely across the city. Once the
     // cache is warm the picture does not depend on the thread count.

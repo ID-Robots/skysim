@@ -4,13 +4,21 @@
 #include <cmath>
 #include <cstring>
 
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
+
 namespace skysim::render {
 namespace {
 
-// Lit colour is stored as 16-bit fixed point: 0..4 in steps of 1/16384, far finer than the 1/255
-// a frame is quantised to after haze, and room for any albedo under the brightest light.
-constexpr double kScale = 16384.0;
+// Lit colour is stored as 15-bit fixed point, four channels a texel (the fourth unused): 0..4 in
+// steps of 1/8192, far finer than the 1/255 a frame is quantised to after haze, with room for any
+// albedo under the brightest light. Fifteen bits and four channels because a texel is then one
+// 64-bit load, and two texels times two 14-bit bilinear weights are one SSE2 multiply-add of
+// signed 16-bit pairs (pmaddwd) into four exact 32-bit sums.
+constexpr double kScale = 8192.0;
 constexpr double kInvScale = 1.0 / kScale;
+constexpr int kChannels = 4;
 
 // The key packs (level, tile row, tile column) into 64 bits, 29 bits per index. Coordinates are
 // clamped well inside that range even on the finest level: ground a camera can see is within the
@@ -45,7 +53,7 @@ inline int64_t floor_int(double v) {
 struct GroundCache::Tile {
     std::atomic<uint8_t> state{0}; // 0 empty, 1 being built, 2 ready
     std::atomic<uint32_t> last_used{0};
-    std::array<uint16_t, static_cast<size_t>(kTile) * kTile * 3> rgb{};
+    std::array<uint16_t, static_cast<size_t>(kTile) * kTile * kChannels> rgb{};
 };
 
 GroundCache::GroundCache(std::shared_ptr<const RasterScene> scene, size_t budget_bytes)
@@ -55,6 +63,17 @@ uint64_t GroundCache::key_of(int level, int64_t ti, int64_t tj) {
     constexpr uint64_t kMask = (uint64_t{1} << 29) - 1;
     return (static_cast<uint64_t>(level - kMinLevel) << 58) | ((static_cast<uint64_t>(ti) & kMask) << 29) |
            (static_cast<uint64_t>(tj) & kMask);
+}
+
+void GroundCache::unkey(uint64_t key, int &level, int64_t &ti, int64_t &tj) {
+    constexpr uint64_t kMask = (uint64_t{1} << 29) - 1;
+    level = static_cast<int>(key >> 58) + kMinLevel;
+    // Sign-extend the 29-bit indices.
+    const auto extend = [](uint64_t v) {
+        return static_cast<int64_t>(v & (uint64_t{1} << 28) ? v | ~kMask : v);
+    };
+    ti = extend((key >> 29) & kMask);
+    tj = extend(key & kMask);
 }
 
 void GroundCache::level_of(double footprint_m, int &level, double &blend) {
@@ -97,11 +116,13 @@ void GroundCache::build(Tile &tile, int level, int64_t ti, int64_t tj) const {
             double c[3];
             // The colour WorldTexture and the light give a pixel exactly this texel's size there.
             scene_->lit_colour(kSurfaceGround, core::Vec3{n, e, 0.0}, s, c);
-            uint16_t *out = &tile.rgb[(static_cast<size_t>(li) * kTile + static_cast<size_t>(lj)) * 3];
+            uint16_t *out =
+                &tile.rgb[(static_cast<size_t>(li) * kTile + static_cast<size_t>(lj)) * kChannels];
             for (int k = 0; k < 3; ++k) {
                 const double v = c[k] > 0.0 ? c[k] * kScale + 0.5 : 0.0; // NaN to 0, like to_byte
-                out[k] = static_cast<uint16_t>(std::min(v, 65535.0));
+                out[k] = static_cast<uint16_t>(std::min(v, 32767.0));
             }
+            out[3] = 0;
         }
     }
 }
@@ -166,12 +187,12 @@ bool GroundCache::Sampler::bilinear(int level, double north_m, double east_m, bo
     const double v = std::clamp(east_m, -kMaxCoordM, kMaxCoordM) * inv - 0.5;
     const int64_t i0 = floor_int(u);
     const int64_t j0 = floor_int(v);
-    // Integer weights, 1/256 steps, summing to 65536: with 16-bit texels every product and the sum
-    // fit 32 bits exactly, and the blend costs integer multiply-adds instead of a dozen
-    // int-to-double conversions (which were most of a sample's time).
-    const auto wu = static_cast<uint32_t>((u - static_cast<double>(i0)) * 256.0 + 0.5);
-    const auto wv = static_cast<uint32_t>((v - static_cast<double>(j0)) * 256.0 + 0.5);
-    const uint32_t w[4] = {(256 - wu) * (256 - wv), (256 - wu) * wv, wu * (256 - wv), wu * wv};
+    // Integer weights in 1/128 steps, the four summing to 16384: with 15-bit texels every product
+    // and their sum fit a signed 32-bit integer exactly, so the SSE2 path and the scalar one give
+    // the same bits on every machine.
+    const auto wu = static_cast<int32_t>((u - static_cast<double>(i0)) * 128.0 + 0.5);
+    const auto wv = static_cast<int32_t>((v - static_cast<double>(j0)) * 128.0 + 0.5);
+    const int32_t w[4] = {(128 - wu) * (128 - wv), (128 - wu) * wv, wu * (128 - wv), wu * wv};
     // kTile is a power of two: >> floors (C++20 defines it on negatives) and & is the remainder.
     constexpr int kShift = 5;
     static_assert((1 << kShift) == kTile);
@@ -184,11 +205,12 @@ bool GroundCache::Sampler::bilinear(int level, double north_m, double east_m, bo
         if (t == nullptr) {
             return false;
         }
-        const uint16_t *p00 = &t->rgb[(static_cast<size_t>(li) * kTile + static_cast<size_t>(lj)) * 3];
+        const uint16_t *p00 =
+            &t->rgb[(static_cast<size_t>(li) * kTile + static_cast<size_t>(lj)) * kChannels];
         corners[0] = p00;
-        corners[1] = p00 + 3;
-        corners[2] = p00 + kTile * 3;
-        corners[3] = p00 + kTile * 3 + 3;
+        corners[1] = p00 + kChannels;
+        corners[2] = p00 + kTile * kChannels;
+        corners[3] = p00 + kTile * kChannels + kChannels;
     } else {
         for (int k = 0; k < 4; ++k) {
             const int64_t i = i0 + (k >> 1);
@@ -199,14 +221,29 @@ bool GroundCache::Sampler::bilinear(int level, double north_m, double east_m, bo
             }
             corners[k] = &t->rgb[(static_cast<size_t>(i & (kTile - 1)) * kTile +
                                   static_cast<size_t>(j & (kTile - 1))) *
-                                 3];
+                                 kChannels];
         }
     }
-    constexpr double kNorm = kInvScale / 65536.0;
+    int32_t acc[4];
+#if defined(__SSE2__)
+    // Two texels interleaved channel by channel, times their two weights, summed pairwise.
+    const auto pair = [](const uint16_t *a, const uint16_t *b, int32_t wa, int32_t wb) {
+        const __m128i ab = _mm_unpacklo_epi16(_mm_loadl_epi64(reinterpret_cast<const __m128i *>(a)),
+                                              _mm_loadl_epi64(reinterpret_cast<const __m128i *>(b)));
+        return _mm_madd_epi16(ab, _mm_set1_epi32(static_cast<int32_t>((static_cast<uint32_t>(wb) << 16) |
+                                                                      static_cast<uint32_t>(wa))));
+    };
+    _mm_storeu_si128(
+        reinterpret_cast<__m128i *>(acc),
+        _mm_add_epi32(pair(corners[0], corners[1], w[0], w[1]), pair(corners[2], corners[3], w[2], w[3])));
+#else
     for (int c = 0; c < 3; ++c) {
-        const uint32_t acc =
-            w[0] * corners[0][c] + w[1] * corners[1][c] + w[2] * corners[2][c] + w[3] * corners[3][c];
-        out[c] = static_cast<double>(acc) * kNorm;
+        acc[c] = w[0] * corners[0][c] + w[1] * corners[1][c] + w[2] * corners[2][c] + w[3] * corners[3][c];
+    }
+#endif
+    constexpr double kNorm = kInvScale / 16384.0;
+    for (int c = 0; c < 3; ++c) {
+        out[c] = static_cast<double>(acc[c]) * kNorm;
     }
     return true;
 }
@@ -238,6 +275,94 @@ void GroundCache::Sampler::lit(double north_m, double east_m, double footprint_m
     }
     for (int c = 0; c < 3; ++c) {
         out[c] = fine[c] + (coarse[c] - fine[c]) * blend;
+    }
+}
+
+void GroundCache::tiles_for(double north_m, double east_m, double footprint_m,
+                            std::vector<uint64_t> &required, std::vector<uint64_t> &optional) {
+    int level = 0;
+    double blend = 0.0;
+    level_of(footprint_m, level, blend);
+    constexpr double kSkip = 1.0 / 256.0; // as Sampler::lit decides
+    const auto add = [&](int lv, std::vector<uint64_t> &out) {
+        const double inv = kInverseSize.v[lv - kMinLevel];
+        const int64_t i0 = floor_int(std::clamp(north_m, -kMaxCoordM, kMaxCoordM) * inv - 0.5);
+        const int64_t j0 = floor_int(std::clamp(east_m, -kMaxCoordM, kMaxCoordM) * inv - 0.5);
+        // The bilinear footprint's corners: one tile, or its neighbours across a tile edge.
+        for (int64_t i = i0 >> 5; i <= (i0 + 1) >> 5; ++i) {
+            for (int64_t j = j0 >> 5; j <= (j0 + 1) >> 5; ++j) {
+                out.push_back(key_of(lv, i, j));
+            }
+        }
+    };
+    if (blend <= kSkip) {
+        add(level, required);
+    } else if (blend >= 1.0 - kSkip) {
+        add(level + 1, required);
+    } else {
+        add(blend < 0.5 ? level : level + 1, required);
+        add(blend < 0.5 ? level + 1 : level, optional);
+    }
+}
+
+void GroundCache::prepare(std::vector<uint64_t> &required, std::vector<uint64_t> &optional,
+                          core::ThreadPool *pool) {
+    const auto unique = [](std::vector<uint64_t> &v) {
+        std::sort(v.begin(), v.end());
+        v.erase(std::unique(v.begin(), v.end()), v.end());
+    };
+    unique(required);
+    unique(optional);
+    // The tiles to build now: present-and-ready ones are left alone; missing ones are made here
+    // (an optional one while the frame's budget lasts), so the workers below only fill them.
+    std::vector<std::pair<uint64_t, Tile *>> todo;
+    const uint32_t frame = frame_.load(std::memory_order_relaxed);
+    const auto take = [&](const std::vector<uint64_t> &keys, bool opt) {
+        for (const uint64_t key : keys) {
+            Shard &shard = shard_of(key);
+            std::lock_guard<std::mutex> lock(shard.mutex);
+            auto it = shard.tiles.find(key);
+            if (it == shard.tiles.end()) {
+                if (opt && optional_budget_.fetch_sub(1, std::memory_order_relaxed) <= 0) {
+                    continue;
+                }
+                it = shard.tiles.emplace(key, std::make_shared<Tile>()).first;
+                tile_count_.fetch_add(1, std::memory_order_relaxed);
+            }
+            it->second->last_used.store(frame, std::memory_order_relaxed);
+            if (it->second->state.load(std::memory_order_acquire) == 0) {
+                todo.emplace_back(key, it->second.get());
+            }
+        }
+    };
+    take(required, false);
+    take(optional, true);
+    if (todo.empty()) {
+        return;
+    }
+    std::atomic<size_t> next{0};
+    const auto work = [&](size_t, size_t) {
+        for (size_t k = next.fetch_add(1, std::memory_order_relaxed); k < todo.size();
+             k = next.fetch_add(1, std::memory_order_relaxed)) {
+            Tile &tile = *todo[k].second;
+            uint8_t empty = 0;
+            if (!tile.state.compare_exchange_strong(empty, 1, std::memory_order_acq_rel)) {
+                continue; // somebody else is filling it
+            }
+            int level = 0;
+            int64_t ti = 0;
+            int64_t tj = 0;
+            unkey(todo[k].first, level, ti, tj);
+            build(tile, level, ti, tj);
+            built_.fetch_add(1, std::memory_order_relaxed);
+            tile.state.store(2, std::memory_order_release);
+            tile.state.notify_all();
+        }
+    };
+    if (pool != nullptr && todo.size() > 1) {
+        pool->parallel_for(pool->size() + 1, work, true);
+    } else {
+        work(0, 1);
     }
 }
 

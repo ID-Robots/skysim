@@ -134,6 +134,35 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   route, and drive the gimbal pitch on servo output 10. Read the findings in DOCK_MARKER.md before
   trusting inner-marker detection with OpenCV 4.5.4's default parameters.
 
+- **[S8] Per-vehicle camera modes and the landing camera** (done; TASK-2661,
+  [`docs/DOCK_MARKER.md`](DOCK_MARKER.md#full-resolution-at-the-dock-task-2661)): a 1920x1080 picture
+  for every vehicle at 30 fps does not fit a task (about 0.5 s of CPU a frame before TASK-2661,
+  0.15-0.2 s now), so each vehicle draws its own mode — picture size, frame rate and, optionally,
+  stream bitrate — and switches to the landing camera only while it is in the air near its dock.
+  - **Fleet**: `SKYSIM_CAMERA_SIZE` / `SKYSIM_CAMERA_FPS` as before (the cheap mode).
+  - **Landing camera**: `SKYSIM_CAMERA_LANDING_SIZE` (e.g. `1920x1080`), `SKYSIM_CAMERA_LANDING_FPS`
+    (default the fleet's), `SKYSIM_CAMERA_LANDING_BITRATE` (kbit/s, default the stream's own),
+    `SKYSIM_CAMERA_LANDING_RADIUS` (25 m) and `SKYSIM_CAMERA_LANDING_HEIGHT` (40 m): drawn while a
+    vehicle is within the radius of its dock (`GET .../camera/dock`), at most the height above the
+    ground, and not at rest. Leaving takes 5 m more of either. A vehicle at rest on the ground (2 cm,
+    0.5 deg, 5 s) is back on its normal mode, and one spawned on its dock starts at rest; a hover
+    never counts as rest, so a SITL searching for the marker at 28.5 m keeps 1920x1080.
+  - **Per vehicle**: `POST /vehicles {"camera":{...}}` at spawn, and `GET` / `POST` / `DELETE
+    /instances/<n>/camera` (also `/vehicles/<id>/camera`) at run time: `width`, `height` (or
+    `"size":"WxH"`), `fps`, `bitrate_kbps` set its normal mode; `"landing":{...}` its own landing
+    camera; `"landing":false` turns the landing camera off for it. Bounds 16..3840 x 16..2160,
+    0.5..60 fps, 0 or 64..8000 kbit/s; out of bounds is `400` and changes nothing (and spawns
+    nothing). The settings belong to the vehicle and go when it despawns.
+  - **What a consumer sees**: the same endpoints and formats. Only the picture size changes, where
+    the mode does: the RTSP session carries on, and the first frame of the new size is an IDR with
+    the new SPS/PPS (the SDP's `sprop-parameter-sets` and `a=x-dimensions` describe the size at
+    DESCRIBE time); `camera.mjpg` parts and `camera.jpg` are JPEGs of the new size;
+    `GET .../camera/intrinsics` gives the picture now (`width`, `height`, `fx` ... scale with the
+    width, the HFOV is the fleet's) plus a `landing` object with the landing camera's pinhole.
+  - **Cost**: [README, "What the camera costs"](../README.md#what-the-camera-costs-task-2661) and
+    `tools/bench/camera_cost.py`. `GET /metrics` `camera.landing` counts vehicles on the landing
+    camera; `camera.ground_cache_mb` is the lit-ground cache (`SKYSIM_CAMERA_CACHE_MB`, 512).
+
 #### Using the still camera from a simulated survey (core, gateway)
 
 - **core `SurveyCaptureHandler`** (contract section 2): with `SKYSIM_URL` and

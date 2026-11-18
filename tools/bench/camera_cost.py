@@ -53,7 +53,7 @@ RtspClient = importlib.import_module("rtsp_client").RtspClient  # beside this fi
 # Outside every port and instance the tests and camera_bench.py use (see their headers).
 API_PORT = 18700
 RTSP_PORT = 18701
-BASE_INSTANCE = 100
+BASE_INSTANCE = 120  # udp 10202+: 10000-10099 is often some other service's (WebRTC)
 DT = 0.0025
 
 
@@ -78,7 +78,7 @@ def gimbal_pwm(pitch_deg: float) -> int:
 class FakeSitl(threading.Thread):
     """Answers every vehicle's JSON lockstep: one servo frame out per state reply in."""
 
-    def __init__(self, instances: list[int], pwm: int, gimbal_pitch: float | None) -> None:
+    def __init__(self, instances: list[int], pwm: list[int], gimbal_pitch: float | None) -> None:
         super().__init__(daemon=True)
         self.socks = []
         for i in instances:
@@ -86,16 +86,19 @@ class FakeSitl(threading.Thread):
             s.connect(("127.0.0.1", 9002 + 10 * i))
             self.socks.append(s)
         self.rate = round(1 / DT)
-        self.pwm = [pwm] * 4 + [1000] * 12
-        if gimbal_pitch is not None:
-            self.pwm[9] = gimbal_pwm(gimbal_pitch)  # servo 10: gimbal pitch
-            self.pwm[10] = 1500  # servo 11: gimbal yaw, along the nose
+        self.pwm = []
+        for motor in pwm:  # one motor PWM per vehicle
+            frame = [motor] * 4 + [1000] * 12
+            if gimbal_pitch is not None:
+                frame[9] = gimbal_pwm(gimbal_pitch)  # servo 10: gimbal pitch
+                frame[10] = 1500  # servo 11: gimbal yaw, along the nose
+            self.pwm.append(frame)
         self.count = [0] * len(self.socks)
         self.stop = False
 
     def send(self, k: int) -> None:
         self.count[k] += 1
-        self.socks[k].send(struct.pack("<HHI16H", 18458, self.rate, self.count[k], *self.pwm))
+        self.socks[k].send(struct.pack("<HHI16H", 18458, self.rate, self.count[k], *self.pwm[k]))
 
     def run(self) -> None:
         last = [0.0] * len(self.socks)
@@ -212,7 +215,14 @@ def run_one(args: argparse.Namespace, size: str, fps: float, vehicles: int) -> d
                     raise RuntimeError("the fleet did not appear in GET /vehicles")
                 time.sleep(0.1)
             instances = sorted(v["instance"] for v in api("/vehicles"))
-            sitl = FakeSitl(instances, args.pwm if args.state == "flying" else 1000, args.gimbal_pitch)
+            # --state parked: every vehicle rests on its dock; --parked N: the last N do, the rest fly.
+            parked = len(instances) if args.state == "parked" else min(args.parked, len(instances))
+            motors = [args.pwm] * (len(instances) - parked) + [1000] * parked
+            sitl = FakeSitl(instances, motors, args.gimbal_pitch)
+            # --landing-vehicles K: the landing camera (in --extra) for the first K vehicles only.
+            if args.landing_vehicles >= 0:
+                for i in instances[args.landing_vehicles:]:
+                    api(f"/instances/{i}/camera", {"landing": False}, "POST")
             sitl.start()
             time.sleep(args.settle)
 
@@ -261,7 +271,9 @@ def run_one(args: argparse.Namespace, size: str, fps: float, vehicles: int) -> d
         "size": size,
         "fps": fps,
         "vehicles": vehicles,
-        "state": args.state,
+        "state": args.state if not args.parked else f"{vehicles - min(args.parked, vehicles)} flying, "
+        f"{min(args.parked, vehicles)} parked",
+        "landing_now": (m1.get("camera") or {}).get("landing"),
         "cores": round(cores, 2),
         "idle_cores": round(idle_cores, 2),
         "camera_cores": round(camera_cores, 2),
@@ -306,6 +318,9 @@ def main() -> int:
     ap.add_argument("--configs", default="640x360@30,1280x720@30,1920x1080@10,1920x1080@15,1920x1080@30")
     ap.add_argument("--vehicles", default="1,4,8")
     ap.add_argument("--state", choices=("flying", "parked"), default="flying")
+    ap.add_argument("--parked", type=int, default=0, help="with --state flying: the last N vehicles stay parked")
+    ap.add_argument("--landing-vehicles", type=int, default=-1,
+                    help="the landing camera stays on for the first K vehicles only (-1: all)")
     ap.add_argument("--pwm", type=int, default=1600, help="motor PWM while flying")
     ap.add_argument("--gimbal-pitch", type=float, default=-90.0, help="degrees; -999 = no gimbal (fixed mount)")
     ap.add_argument("--threads", type=int, default=0, help="--camera-threads (0 = skysim's default)")

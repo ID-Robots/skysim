@@ -27,6 +27,7 @@
 // once each time its height halves, and building all of it in one frame stalled the stream for
 // most of a second. Read alone, the heavier level is the same ground a little softer, and by the
 // time it carries most of the weight it has long been filled.
+#include "core/thread_pool.h"
 #include "render/scene.h"
 
 #include <array>
@@ -47,8 +48,8 @@ class GroundCache {
     static constexpr int kTile = 32;
     static constexpr int kMinLevel = -12;
     static constexpr int kMaxLevel = 8;
-    // Bytes one tile holds (3 x 16-bit channels per texel), for sizing a budget.
-    static constexpr size_t kTileBytes = static_cast<size_t>(kTile) * kTile * 3 * sizeof(uint16_t);
+    // Bytes one tile holds (4 x 16-bit channels per texel), for sizing a budget.
+    static constexpr size_t kTileBytes = static_cast<size_t>(kTile) * kTile * 4 * sizeof(uint16_t);
 
     // `scene` must outlive the cache. budget_bytes = 0 means unbounded.
     GroundCache(std::shared_ptr<const RasterScene> scene, size_t budget_bytes);
@@ -96,6 +97,19 @@ class GroundCache {
     // frames, never while a Sampler of this cache is in use.
     void evict();
 
+    // The tiles a pixel at (north, east) with footprint `footprint_m` reads: the heavier level's
+    // (`required`) and the lighter one's (`optional`), as tile keys. For a frame to collect ahead.
+    static void tiles_for(double north_m, double east_m, double footprint_m, std::vector<uint64_t> &required,
+                          std::vector<uint64_t> &optional);
+    // Builds the tiles of `required`, and of `optional` as many as the frame's budget allows, that
+    // are not built yet, spread over `pool` (null: on the calling thread). A frame that collects
+    // them first (tiles_for over a sparse grid of its pixels) fills a new view on every thread at
+    // once; left to the drawing itself, the bands that reach a tile while another builds it wait,
+    // and a camera that climbs or descends — a new level every halving of its height — drew a
+    // cold frame on little more than one core. Keys may repeat. Call between begin_frame() and
+    // the drawing.
+    void prepare(std::vector<uint64_t> &required, std::vector<uint64_t> &optional, core::ThreadPool *pool);
+
     struct Stats {
         size_t tiles{0};
         size_t bytes{0};
@@ -116,6 +130,7 @@ class GroundCache {
     };
 
     static uint64_t key_of(int level, int64_t ti, int64_t tj);
+    static void unkey(uint64_t key, int &level, int64_t &ti, int64_t &tj);
     Shard &shard_of(uint64_t key) { return shards_[(key * 0x9E3779B97F4A7C15ULL) >> 58]; }
     const Tile *acquire(int level, int64_t ti, int64_t tj, uint64_t key, bool optional);
     void build(Tile &tile, int level, int64_t ti, int64_t tj) const;

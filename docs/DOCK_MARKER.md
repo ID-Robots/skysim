@@ -193,6 +193,43 @@ same table except at 5 m, where the 1920x1080 pictures decode the inner 11 inste
 `--analyse DIR` re-checks a capture with another OpenCV; CI re-checks its frames with Ubuntu
 22.04's 4.5.4.
 
+## Full resolution at the dock (TASK-2661)
+
+On dev (18.11) every SITL's aruco_landing took the RTL over at 30 m within 15 m of home, searched
+20 s and held at about 28.5 m: the pilot camera ran at 640x360, where a cell of the outer marker is
+1.5 px from 30 m. The real Observer camera is 1920x1080. Pixels per cell of the 1.00 m outer
+marker (9 cells across with its border, 0.111 m), straight down, `cell * fx / height`:
+
+| camera | fx | 30 m | 20 m | 10 m | 3 m |
+|---|---|---|---|---|---|
+| 640x360, HFOV 78 (dev until now) | 395.1 | 1.46 | 2.20 | 4.39 | 14.64 |
+| 1280x720, HFOV 81 | 749.3 | 2.78 | 4.16 | 8.33 | 27.75 |
+| 1920x1080, HFOV 81 (Observer 1, the landing camera) | 1124.0 | 4.16 | 6.24 | 12.49 | 41.63 |
+
+**Probe pictures.** `tools/render_probe/aruco_check.py` renders the view straight down onto the dock
+from each height with `tools/render_probe --dock` (the rasteriser and the marker exactly as the
+server draws them, ground cache on), saves the pictures and runs cv2.aruco on them (`DICT_7X7_250`,
+default `DetectorParameters`, the observer1-sim dictionary as this repo's proofs use it). OpenCV
+4.6.0, bench city, marker centred and 10 m off-centre (east, so still in the picture):
+
+| camera | 30 m | 30 m, 10 m off | 20 m | 20 m, 10 m off | 10 m | 3 m |
+|---|---|---|---|---|---|---|
+| 1920x1080 HFOV 81 | 228 (37.0 px of 37.5) | 228 | 228 (55.0 / 56.2) | 228 | 228 (111.0 / 112.4) | 228 (404 / 375) |
+| 1280x720 HFOV 81 | 228 | 228 | 228 | 228 | 228 | 228 and 11 |
+| 640x360 HFOV 78 | 228 (12.0 / 13.2) | no detect | 228 | 228 | 228 | 228 and 11 |
+
+So 1920x1080 is enough at 30 m, with the marker anywhere in the picture: nothing about the marker
+needed changing in the renderer (it is drawn from its own mip-mapped texture, box-filtered per
+pixel, untouched by the ground cache; the same table comes out with the cache off). 640x360
+decodes a centred, lossless picture at 1.5 px a cell and nothing else; what a consumer gets is an
+H.264 stream (below). The 3 m side of 404 px against 375 is finding 2 above (the quad framing the
+white border on darker ground); ID 11 is finding 1 (OpenCV 4.5/4.6's `minMarkerDistanceRate`).
+
+**What changed.** The landing camera (`SKYSIM_CAMERA_LANDING_SIZE=1920x1080`, README) draws the
+full-size picture only while a vehicle is in the air near its dock; the fleet stays on its cheap
+mode elsewhere. A warm 1920x1080 frame went from about 800 ms of CPU to 140-160 ms (the ground cache,
+README "What the camera costs").
+
 ## The proof
 
 `tests/dock_marker_smoke.py` (ctest `dock_marker_smoke`, label happy-path) starts skysim with the
