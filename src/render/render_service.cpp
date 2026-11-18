@@ -544,6 +544,11 @@ void RenderService::run() {
         std::shared_ptr<const Image> image;           // at the picture size
         int drawn_width{0};                           // the size it was drawn at
         int drawn_height{0};
+        // The ground cache put off none of its tiles (GroundCache::deferred). A frame that it put
+        // some off for — a cold one: the tiles it needed were built, the rest of the lighter level
+        // left to later frames — is not re-sent as it is when the vehicle holds still: it is drawn
+        // again, the cache warmer, until one is whole.
+        bool whole{false};
         std::vector<uint8_t> jpeg;
     };
     // How a vehicle is drawn now: its mode (size resolved), its picture size, and the rate its
@@ -850,9 +855,9 @@ void RenderService::run() {
             Drawn &d = last[pose->vehicle_id];
             const CameraMode &mode = w.draw.mode;
             const std::pair<int, int> &picture = w.draw.picture;
-            if (d.image && same_pose(d.pose, *pose) && d.markers == markers && d.drawn_width == mode.width &&
-                d.drawn_height == mode.height && d.image->width == picture.first &&
-                d.image->height == picture.second) {
+            if (d.image && d.whole && same_pose(d.pose, *pose) && d.markers == markers &&
+                d.drawn_width == mode.width && d.drawn_height == mode.height &&
+                d.image->width == picture.first && d.image->height == picture.second) {
                 ++pass.reused;
                 ++t.reused;
             } else {
@@ -877,6 +882,7 @@ void RenderService::run() {
                 d.drawn_height = mode.height;
                 d.pose = *pose;
                 d.markers = markers;
+                d.whole = !(ground_ && ground_->deferred());
                 d.jpeg.clear();
                 if (ground_) {
                     ground_->evict(); // between frames: no sampler of the cache is in use

@@ -139,6 +139,11 @@ const GroundCache::Tile *GroundCache::acquire(int level, int64_t ti, int64_t tj,
             // An optional tile is only made while the frame's budget lasts; the budget is spent here,
             // when it is made, so threads racing for the last of it cannot overspend it by much.
             if (optional && optional_budget_.fetch_sub(1, std::memory_order_relaxed) <= 0) {
+                // Put off to a later frame; but not once the frame is sealed: then a pixel between
+                // prepare()'s samples asked, and no frame builds an optional tile for that.
+                if (sealed_seq_.load(std::memory_order_relaxed) == kUnsealed) {
+                    deferred_.store(true, std::memory_order_relaxed);
+                }
                 return nullptr;
             }
             it = shard.tiles.emplace(key, std::make_shared<Tile>()).first;
@@ -352,7 +357,8 @@ void GroundCache::prepare(std::vector<uint64_t> &required, std::vector<uint64_t>
     unique(required);
     unique(optional);
     // The tiles to build now: present-and-ready ones are left alone; missing ones are made here
-    // (an optional one while the frame's budget lasts), so the workers below only fill them.
+    // (an optional one while the frame's budget lasts), so the workers below only fill them. The
+    // required ones it builds come out of that budget first: a cold frame builds what it must.
     std::vector<std::pair<uint64_t, Tile *>> todo;
     const uint32_t frame = frame_.load(std::memory_order_relaxed);
     const auto take = [&](const std::vector<uint64_t> &keys, bool opt) {
@@ -362,6 +368,7 @@ void GroundCache::prepare(std::vector<uint64_t> &required, std::vector<uint64_t>
             auto it = shard.tiles.find(key);
             if (it == shard.tiles.end()) {
                 if (opt && optional_budget_.fetch_sub(1, std::memory_order_relaxed) <= 0) {
+                    deferred_.store(true, std::memory_order_relaxed);
                     continue;
                 }
                 it = shard.tiles.emplace(key, std::make_shared<Tile>()).first;
@@ -374,6 +381,9 @@ void GroundCache::prepare(std::vector<uint64_t> &required, std::vector<uint64_t>
         }
     };
     take(required, false);
+    // (A frame's tiles: tens of thousands at the very most, an int whatever the budget.)
+    optional_budget_.fetch_sub(static_cast<int>(std::min<size_t>(todo.size(), 1u << 20)),
+                               std::memory_order_relaxed);
     take(optional, true);
     if (todo.empty()) {
         return;

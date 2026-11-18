@@ -26,7 +26,12 @@
 // reads the heavier level alone: a camera that descends needs the next finer level everywhere at
 // once each time its height halves, and building all of it in one frame stalled the stream for
 // most of a second. Read alone, the heavier level is the same ground a little softer, and by the
-// time it carries most of the weight it has long been filled.
+// time it carries most of the weight it has long been filled. The heavier level's tiles a frame
+// has to build come out of the same budget: a cold frame — the first one a camera draws, all of
+// its view new — builds what it must and little else, rather than twice that (a parked vehicle's
+// first 640x360 frame took 2.1 s in the Debug coverage build, past the 2 s camera.jpg waits).
+// A frame that left tiles of the lighter level unbuilt says so (deferred()), so a camera that
+// holds still draws again once they are there instead of re-sending the softer picture.
 #include "core/thread_pool.h"
 #include "render/scene.h"
 
@@ -83,8 +88,9 @@ class GroundCache {
         std::array<Entry, 16> memo_{};
     };
 
-    // Tiles a frame may build for the lighter of a pixel's two levels (see above): about 80 ms of
-    // one core, a quarter of a million texels.
+    // Tiles a frame may build for the lighter of a pixel's two levels (see above), less the
+    // heavier level's tiles prepare() had to build for it: about 80 ms of one core, a quarter of a
+    // million texels.
     static constexpr int kOptionalTilesPerFrame = 256;
 
     // Starts a frame: tiles touched from here on count as used by it, and it may build up to
@@ -92,8 +98,13 @@ class GroundCache {
     uint32_t begin_frame(int optional_tiles = kOptionalTilesPerFrame) {
         optional_budget_.store(optional_tiles, std::memory_order_relaxed);
         sealed_seq_.store(kUnsealed, std::memory_order_relaxed);
+        deferred_.store(false, std::memory_order_relaxed);
         return frame_.fetch_add(1, std::memory_order_relaxed) + 1;
     }
+    // Whether the frame begun last left a lighter-level tile it asked for unbuilt because its
+    // budget was spent: drawn again from the same place, it would blend more of that level in.
+    // Read after the frame is drawn.
+    bool deferred() const { return deferred_.load(std::memory_order_relaxed); }
     // From here to the next begin_frame, a pixel blends in a lighter level only from a tile that is
     // built now; nothing builds one for that, and a tile built later (as some pixel's heavier level)
     // does not count. So the picture does not depend on the order the bands run in. A frame calls
@@ -110,8 +121,9 @@ class GroundCache {
     // (`required`) and the lighter one's (`optional`), as tile keys. For a frame to collect ahead.
     static void tiles_for(double north_m, double east_m, double footprint_m, std::vector<uint64_t> &required,
                           std::vector<uint64_t> &optional);
-    // Builds the tiles of `required`, and of `optional` as many as the frame's budget allows, that
-    // are not built yet, spread over `pool` (null: on the calling thread). A frame that collects
+    // Builds the tiles of `required`, and of `optional` as many as the frame's budget allows once
+    // the required ones it builds are taken out of it, that are not built yet, spread over `pool`
+    // (null: on the calling thread). A frame that collects
     // them first (tiles_for over a sparse grid of its pixels) fills a new view on every thread at
     // once; left to the drawing itself, the bands that reach a tile while another builds it wait,
     // and a camera that climbs or descends — a new level every halving of its height — drew a
@@ -157,6 +169,7 @@ class GroundCache {
     std::array<Shard, kShards> shards_;
     std::atomic<uint32_t> frame_{0};
     std::atomic<int> optional_budget_{0};
+    std::atomic<bool> deferred_{false}; // this frame skipped a lighter-level tile for want of budget
     std::atomic<uint64_t> build_seq_{0};          // tiles built since start: each tile's stamp
     std::atomic<uint64_t> sealed_seq_{kUnsealed}; // build_seq_ at seal(); kUnsealed: not sealed
     std::atomic<size_t> tile_count_{0};

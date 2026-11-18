@@ -307,11 +307,12 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
     }
 
     // With a ground cache, three steps. Every band is filled first; then the ground tiles the frame
-    // reads are gathered from every 8th pixel each way — those no geometry covers, so a roof
-    // filling the picture costs no ground — and built across the pool at once
-    // (GroundCache::prepare: left to the bands, the ones that reach a tile another is building
-    // wait for it); then the bands are shaded. A tile only a pixel between the samples needs is
-    // built by its band.
+    // reads are gathered from every 8th pixel each way — those no geometry and no dock marker
+    // covers, so a roof filling the picture costs no ground, and nor does the marker a vehicle on
+    // its dock looks down at (most of that first frame, and half of its cold cost) — and built
+    // across the pool at once (GroundCache::prepare: left to the bands, the ones that reach a tile
+    // another is building wait for it); then the bands are shaded. A tile only a pixel between the
+    // samples needs is built by its band.
     std::vector<Band> filled(static_cast<size_t>(bands));
     std::vector<std::vector<uint64_t>> required(static_cast<size_t>(bands));
     std::vector<std::vector<uint64_t>> optional(static_cast<size_t>(bands));
@@ -343,9 +344,15 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
                 if (along * rn > kMaxGroundM) {
                     continue;
                 }
-                GroundCache::tiles_for(eye[0] + rx * along, eye[1] + ry * along,
-                                       std::min(footprint_k * inv * std::sqrt(inv), 1e3),
-                                       required[static_cast<size_t>(b)], optional[static_cast<size_t>(b)]);
+                const double north = eye[0] + rx * along;
+                const double east = eye[1] + ry * along;
+                const double footprint = std::min(footprint_k * inv * std::sqrt(inv), 1e3);
+                double marker = 0.0;
+                if (!marker_view.empty() && marker_view.albedo(x, y, north, east, footprint, marker) > 0.0) {
+                    continue; // a dock marker's plate: drawn without the cache (shade_band)
+                }
+                GroundCache::tiles_for(north, east, footprint, required[static_cast<size_t>(b)],
+                                       optional[static_cast<size_t>(b)]);
             }
         }
     });

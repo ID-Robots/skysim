@@ -260,7 +260,9 @@ size). A vehicle draws that picture in one of three modes:
 - **at rest**: a vehicle that has not moved (2 cm, half a degree) for 5 s on the ground — parked on
   its dock — is drawn in its normal mode at `SKYSIM_CAMERA_REST_FPS` (default `0`: its mode's rate).
   Its picture does not change, so this only saves re-sending and re-encoding it; its stream keeps
-  its frame rate. A vehicle spawned on its dock starts at rest.
+  its frame rate. A vehicle spawned on its dock starts at rest. "On the ground" is a height, not a
+  contact: its centre within 0.12 m of the ground plane (a quad resting there has it 0.07 m up), so
+  a hover held that low and that still for 5 s counts as at rest too.
 
 A mode keeps the picture's aspect ratio. Each vehicle is drawn on its own schedule, so a landing
 drawn at 1920x1080@15 and a fleet drawn at 640x360@30 share the render threads without one

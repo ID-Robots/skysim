@@ -13,6 +13,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -315,6 +316,83 @@ void test_ground_cache(const std::filesystem::path &tiles) {
         CHECK(lazy.stats().tiles_built == built);
     }
 
+    // A cold frame builds the tiles it must and, of the lighter level, only what those left of the
+    // frame's budget: the first frame a camera draws cost twice what drawing it without the cache
+    // does, and camera.jpg's first request gave up on it (a 404 in a Debug build). What a frame put
+    // off it says (deferred()); the frames after build it a budget at a time until nothing is.
+    {
+        std::vector<uint64_t> required;
+        std::vector<uint64_t> optional;
+        for (int k = 0; k < 4000; ++k) { // a frame's spread of points and footprints: both levels
+            GroundCache::tiles_for(-40.0 + 0.137 * k, 25.0 - 0.0655 * k, 0.004 * std::pow(1.0009, k),
+                                   required, optional);
+        }
+        std::vector<uint64_t> must = required;
+        std::sort(must.begin(), must.end());
+        must.erase(std::unique(must.begin(), must.end()), must.end());
+        std::vector<uint64_t> extra = optional;
+        std::sort(extra.begin(), extra.end());
+        extra.erase(std::unique(extra.begin(), extra.end()), extra.end());
+        std::vector<uint64_t> only_optional;
+        std::set_difference(extra.begin(), extra.end(), must.begin(), must.end(),
+                            std::back_inserter(only_optional));
+        const size_t r = must.size();
+        const size_t o = only_optional.size();
+        constexpr size_t kSpare = 10; // the budget beyond the required tiles in the first frame
+        CHECK(r > 0 && o > 3 * kSpare);
+        const int budget = static_cast<int>(r + kSpare);
+
+        GroundCache cold(scene, 0);
+        cold.begin_frame(budget);
+        std::vector<uint64_t> req = required;
+        std::vector<uint64_t> opt = optional;
+        cold.prepare(req, opt, nullptr);
+        CHECK(cold.stats().tiles_built == r + kSpare); // all it must, the budget's spare and no more
+        CHECK(cold.deferred());
+        // The next frames build none of the required again and the rest of the lighter level a
+        // budget at a time; once nothing is put off, a frame says so.
+        size_t frames = 1;
+        while (cold.deferred() && frames < 100) {
+            cold.begin_frame(budget);
+            CHECK(!cold.deferred()); // a new frame has put nothing off yet
+            req = required;
+            opt = optional;
+            const uint64_t before = cold.stats().tiles_built;
+            cold.prepare(req, opt, nullptr);
+            CHECK(cold.stats().tiles_built - before <= static_cast<uint64_t>(budget));
+            ++frames;
+        }
+        CHECK(!cold.deferred());
+        CHECK(cold.stats().tiles_built == r + o);
+        CHECK(frames == 2 + (o - kSpare - 1) / static_cast<size_t>(budget));
+
+        // With the budget for all of it, nothing is put off; a lighter-level tile asked for while
+        // drawing is put off once the frame's budget is spent, but not once it is sealed (no frame
+        // builds an optional tile then, so there is nothing to wait for).
+        GroundCache roomy(scene, 0);
+        roomy.begin_frame(1 << 30);
+        req = required;
+        opt = optional;
+        roomy.prepare(req, opt, nullptr);
+        CHECK(!roomy.deferred());
+        GroundCache lazy(scene, 0);
+        lazy.begin_frame(0);
+        {
+            GroundCache::Sampler s(lazy);
+            double c[3];
+            s.lit(3.3, -7.1, 0.03125 * std::pow(2.0, 0.3), c); // between two levels: wants the lighter
+        }
+        CHECK(lazy.deferred());
+        lazy.begin_frame(0);
+        lazy.seal();
+        {
+            GroundCache::Sampler s(lazy);
+            double c[3];
+            s.lit(-13.3, 17.1, 0.03125 * std::pow(2.0, 0.3), c);
+        }
+        CHECK(!lazy.deferred());
+    }
+
     // The rasteriser with the cache draws the picture without it, to within a byte or two: looking
     // straight down at the ground and the building's roof, and obliquely across the city. Once the
     // cache is warm the picture does not depend on the thread count.
@@ -337,6 +415,7 @@ void test_ground_cache(const std::filesystem::path &tiles) {
         for (int f = 0; f < 30; ++f) { // until the lighter levels are built too
             cached = raster.render(*scene, camera, &pool, &cached_surface, true, nullptr, &warm);
         }
+        CHECK(!warm.deferred());
         int max_diff = 0;
         const double mean = mean_abs_diff(plain, cached, &max_diff);
         std::printf("test_render: pitch %.0f: cached vs direct mean %.3f, max %d levels\n", pitch, mean,
@@ -346,6 +425,69 @@ void test_ground_cache(const std::filesystem::path &tiles) {
         const auto serial = raster.render(*scene, camera, nullptr, nullptr, true, nullptr, &warm);
         CHECK(serial.rgb == cached.rgb);
     }
+}
+
+// A vehicle that holds still is drawn again until its frame had every ground tile it asked for,
+// and only then re-sent as it is: its cold first frame — the tiles it needed, the lighter level
+// put off (GroundCache::deferred) — is not the picture it keeps. The frames are the ones a
+// Rasterizer with a cache of its own draws from the same place: the first, then until none puts
+// anything off.
+void test_still_camera_settles() {
+    using namespace std::chrono_literals;
+    using skysim::render::GroundCache;
+    skysim::render::CameraConfig cc;
+    cc.width = 640;
+    cc.height = 360;
+    cc.fov_deg = 78.0;
+    cc.pitch_deg = -20.0; // oblique: many tiles of both levels, more than a frame builds
+    const auto scene = skysim::render::load_scene("", 1);
+    const skysim::core::Vec3 position{-60.0, 0.0, -25.0};
+    const skysim::core::Quat level{1.0, 0.0, 0.0, 0.0};
+    constexpr size_t kCacheBytes = 64u << 20;
+
+    const skysim::render::Camera camera(cc, position, level);
+    const skysim::render::Rasterizer raster(cc);
+    skysim::core::ThreadPool pool(2);
+    GroundCache cache(scene, kCacheBytes);
+    skysim::render::Image image = raster.render(*scene, camera, &pool, nullptr, true, nullptr, &cache);
+    const uint64_t cold_tiles = cache.stats().tiles_built;
+    CHECK(cache.deferred()); // the case in point
+    uint64_t frames = 1;
+    while (cache.deferred() && frames < 50) {
+        cache.evict();
+        image = raster.render(*scene, camera, &pool, nullptr, true, nullptr, &cache);
+        ++frames;
+    }
+    CHECK(!cache.deferred() && frames >= 2);
+    std::printf(
+        "test_render: a still oblique 640x360 camera settles in %llu frames (cold frame %llu tiles)\n",
+        static_cast<unsigned long long>(frames), static_cast<unsigned long long>(cold_tiles));
+
+    skysim::render::RenderService::Config cfg;
+    cfg.camera = cc;
+    cfg.scene = scene;
+    cfg.fps = 50.0;
+    cfg.threads = 2;
+    cfg.background_priority = false;
+    cfg.ground_cache_bytes = kCacheBytes;
+    const auto settled = skysim::render::encode_jpeg(image, cfg.quality);
+    skysim::render::RenderService service(cfg);
+    skysim::render::RenderService::Pose pose;
+    pose.vehicle_id = 4;
+    pose.position_ned = position;
+    pose.quat_ned_frd = level;
+    service.publish_poses({pose});
+    // Generous waits: a cold 640x360 frame is a few seconds in the -O0 coverage build.
+    auto frame = service.frame(4, 0, 30000ms);
+    CHECK(!frame.jpeg.empty());
+    for (int i = 0; i < 400 && service.stats().frames_reused == 0; ++i) {
+        frame = service.frame(4, frame.seq, 10000ms);
+    }
+    const auto stats = service.stats();
+    CHECK(stats.frames_reused > 0);
+    CHECK(stats.frames_drawn == frames); // drawn while a frame put tiles off, not once more
+    frame = service.frame(4, frame.seq, 10000ms);
+    CHECK(frame.jpeg == settled); // the warm picture is the one re-sent
 }
 
 // --- TASK-2661: per-vehicle camera modes and the landing camera ------------------------------
@@ -1153,6 +1295,7 @@ int main() {
     }
 
     test_ground_cache(dir);
+    test_still_camera_settles();
     test_resize();
     test_camera_modes();
     test_picture_size_change();
