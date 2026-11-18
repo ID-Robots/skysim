@@ -1050,13 +1050,22 @@ void test_video_camera_modes() {
     CHECK(r && r->status == 200);
     std::this_thread::sleep_for(100ms);
 
-    const auto feed = [&](const CameraMode &m, int frames, int t0) {
+    // Pictures at the mode's rate. With `each`, every picture is waited for until it is encoded
+    // (bounded), so a slow runner cannot let one replace another in the stream's one-picture
+    // mailbox and turn an exact count into a race; the capture times keep the mode's cadence.
+    const auto feed = [&](const CameraMode &m, int frames, int t0, bool each = true) {
         const auto start = std::chrono::steady_clock::now();
         for (int i = 0; i < frames; ++i) {
             const auto at = start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                                         std::chrono::duration<double>(i / m.fps));
             std::this_thread::sleep_until(at);
+            const uint64_t encoded = video.stats().frames_encoded;
             video.on_frame(40, std::make_shared<Image>(card(m.width, m.height, t0 + i)), 0.0, at, m);
+            const auto deadline = std::chrono::steady_clock::now() + 2000ms;
+            while (each && video.stats().frames_encoded == encoded &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(2ms);
+            }
         }
         std::this_thread::sleep_for(150ms);
     };
@@ -1125,13 +1134,52 @@ void test_video_camera_modes() {
     }
     CHECK(video.encoder(4, 40).settings.bitrate_kbps == 1200);
 
+    // A change of rate alone, at one picture size (the landing mode's at the fleet's picture): a
+    // new encoder all the same, its first frame an IDR whose SPS times the new rate.
+    const CameraMode slower{96, 64, 10.0, 0};
+    {
+        std::lock_guard<std::mutex> lock(mode_mutex);
+        mode = slower;
+    }
+    feed(slower, 3, 400);
+    frames = received(3);
+    CHECK(frames.size() == 3 && frames[0].has(kNalIdr) && !frames[1].has(kNalIdr));
+    if (!frames.empty()) {
+        const SpsInfo sps = sps_of(frames[0]);
+        CHECK(sps.ok && sps.width == 96 && sps.height == 64);
+        // x264 writes the frame rate as time_scale / (2 * num_units_in_tick).
+        CHECK(sps.timing_info && sps.num_units_in_tick > 0 &&
+              std::fabs(static_cast<double>(sps.time_scale) / (2.0 * sps.num_units_in_tick) - 10.0) < 1e-6);
+    }
+    {
+        std::lock_guard<std::mutex> lock(mode_mutex);
+        mode = CameraMode{96, 64, 20.0, 0};
+    }
+    feed(CameraMode{96, 64, 20.0, 0}, 2, 500);
+    received(2);
+
     // A POSTed fps is a cap below the camera's rate: 5 of 20 fps is every fourth picture.
     EncoderPatch patch;
     patch.fps = 5.0;
     st = video.encoder(4, 40, &patch);
     CHECK(st.settings.fps == 5.0 && st.max_fps == 20.0);
+    // A bitrate-only POST while the camera runs slower than the cap keeps the cap as it was.
+    {
+        std::lock_guard<std::mutex> lock(mode_mutex);
+        mode = CameraMode{96, 64, 4.0, 0};
+    }
+    EncoderPatch rate_only;
+    rate_only.bitrate_kbps = 900.0;
+    st = video.encoder(4, 40, &rate_only);
+    CHECK(st.settings.fps == 4.0 && st.max_fps == 4.0); // the camera's 4 for now
+    {
+        std::lock_guard<std::mutex> lock(mode_mutex);
+        mode = CameraMode{96, 64, 20.0, 0};
+    }
+    st = video.encoder(4, 40);
+    CHECK(st.settings.fps == 5.0 && st.settings.bitrate_kbps == 900); // the cap of 5 again, not 4
     before = video.stats();
-    feed(CameraMode{96, 64, 20.0, 0}, 20, 300);
+    feed(CameraMode{96, 64, 20.0, 0}, 20, 300, false); // decimated: most pictures are never encoded
     const uint64_t encoded = video.stats().frames_encoded - before.frames_encoded;
     CHECK(encoded >= 4 && encoded <= 6);
     c.close();

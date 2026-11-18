@@ -15,6 +15,7 @@
 //
 //   render_probe --tiles build/demo_map/tiles --raster --size 1920x1080 --fov 81 --pitch -90 \
 //                --alt 30 --dock 0,0 --cache 256 --threads 4 --repeat 5 --out /tmp/dock_30m.ppm
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -67,6 +68,17 @@ struct Options {
     std::exit(2);
 }
 
+// A finite number, the whole of `text`, or usage(): atof reads "12," and "nan" without a word.
+double number(const char *text, const char *flag) {
+    const char *end = text + std::strlen(text);
+    double v = 0.0;
+    const auto parsed = std::from_chars(text, end, v);
+    if (parsed.ec != std::errc() || parsed.ptr != end || !std::isfinite(v)) {
+        usage(flag);
+    }
+    return v;
+}
+
 Options parse(int argc, char **argv) {
     Options o;
     for (int i = 1; i < argc; ++i) {
@@ -81,15 +93,15 @@ Options parse(int argc, char **argv) {
         } else if (std::strcmp(argv[i], "--out") == 0) {
             o.out = value("--out");
         } else if (std::strcmp(argv[i], "--north") == 0) {
-            o.north = std::atof(value("--north"));
+            o.north = number(value("--north"), "--north wants a number");
         } else if (std::strcmp(argv[i], "--east") == 0) {
-            o.east = std::atof(value("--east"));
+            o.east = number(value("--east"), "--east wants a number");
         } else if (std::strcmp(argv[i], "--alt") == 0) {
-            o.alt = std::atof(value("--alt"));
+            o.alt = number(value("--alt"), "--alt wants a number");
         } else if (std::strcmp(argv[i], "--yaw") == 0) {
-            o.yaw_deg = std::atof(value("--yaw"));
+            o.yaw_deg = number(value("--yaw"), "--yaw wants a number");
         } else if (std::strcmp(argv[i], "--pitch") == 0) {
-            o.pitch_deg = std::atof(value("--pitch"));
+            o.pitch_deg = number(value("--pitch"), "--pitch wants a number");
         } else if (std::strcmp(argv[i], "--raster") == 0) {
             o.raster = true;
         } else if (std::strcmp(argv[i], "--threads") == 0) {
@@ -99,18 +111,24 @@ Options parse(int argc, char **argv) {
         } else if (std::strcmp(argv[i], "--quality") == 0) {
             o.quality = std::atoi(value("--quality"));
         } else if (std::strcmp(argv[i], "--dock") == 0) {
-            const char *v = value("--dock");
-            const char *comma = std::strchr(v, ',');
-            if (comma == nullptr) {
+            const std::string v = value("--dock");
+            const size_t comma = v.find(',');
+            if (comma == std::string::npos) {
                 usage("--dock wants N,E (metres)");
             }
             o.dock = true;
-            o.dock_north = std::atof(v);
-            o.dock_east = std::atof(comma + 1);
+            o.dock_north = number(v.substr(0, comma).c_str(), "--dock wants N,E (metres)");
+            o.dock_east = number(v.substr(comma + 1).c_str(), "--dock wants N,E (metres)");
         } else if (std::strcmp(argv[i], "--cache") == 0) {
-            o.cache_mb = std::atof(value("--cache"));
+            o.cache_mb = number(value("--cache"), "--cache wants MB");
+            // 0 is off; otherwise room for at least one tile, and no more than a 64-bit size holds.
+            if (o.cache_mb != 0.0 &&
+                (o.cache_mb * 1048576.0 < static_cast<double>(skysim::render::GroundCache::kTileBytes) ||
+                 o.cache_mb > 1048576.0)) {
+                usage("--cache must be 0 (off) or 0.01..1048576 MB");
+            }
         } else if (std::strcmp(argv[i], "--fov") == 0) {
-            o.fov_deg = std::atof(value("--fov"));
+            o.fov_deg = number(value("--fov"), "--fov wants a number");
         } else if (std::strcmp(argv[i], "--size") == 0) {
             const char *v = value("--size");
             const char *x = std::strchr(v, 'x');

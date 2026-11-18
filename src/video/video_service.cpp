@@ -110,11 +110,16 @@ void VideoService::remember_parameter_sets(const std::tuple<int, int, double> &k
 }
 
 EncoderSettings VideoService::effective(const Stream &s) const {
+    return effective_for(s, camera_fps(s), s.camera_bitrate_kbps);
+}
+
+EncoderSettings VideoService::effective_for(const Stream &s, double camera_fps,
+                                            int camera_bitrate_kbps) const {
     EncoderSettings e = s.settings;
-    const double cam = std::max(camera_fps(s), kMinFps);
+    const double cam = std::max(camera_fps > 0.0 ? camera_fps : cfg_.max_fps, kMinFps);
     e.fps = s.fps_set ? std::clamp(s.settings.fps, kMinFps, cam) : cam;
-    if (s.camera_bitrate_kbps > 0) {
-        e.bitrate_kbps = std::clamp(s.camera_bitrate_kbps, kMinBitrateKbps, kMaxBitrateKbps);
+    if (camera_bitrate_kbps > 0) {
+        e.bitrate_kbps = std::clamp(camera_bitrate_kbps, kMinBitrateKbps, kMaxBitrateKbps);
     }
     return e;
 }
@@ -203,9 +208,13 @@ VideoService::StreamState VideoService::encoder(int instance, uint32_t vehicle_i
         if (patch != nullptr) {
             // Clamped against the camera's rate now, like every POST: a cap, which a faster mode
             // later (the landing camera's, say) does not lift.
-            const EncoderSettings next = apply_patch(s.settings, *patch, camera_fps(s));
+            EncoderSettings next = apply_patch(s.settings, *patch, camera_fps(s));
             if (patch->fps && std::isfinite(*patch->fps)) {
                 s.fps_set = true;
+            } else {
+                // A POST that names no fps keeps the stored cap as it was, not clamped to the rate
+                // the camera has now (a landing mode's lower one would otherwise stick).
+                next.fps = s.settings.fps;
             }
             set_settings(s, next);
         }
@@ -334,14 +343,20 @@ void VideoService::on_frame(uint32_t vehicle_id, std::shared_ptr<const render::I
     }
     // The camera this picture was drawn by: its size is the picture's, its rate and bitrate the
     // mode's (TASK-2661). A picture with no mode keeps what the stream knew.
-    s.camera_width = image->width;
-    s.camera_height = image->height;
-    if (mode.fps > 0.0) {
-        if (std::fabs(mode.fps - s.camera_fps) > 1e-9) {
-            s.have_due = false;
+    // Only the vehicle the stream's settings are for describes it: a last picture from the one that
+    // held the instance before (until housekeeping rebinds) is still sent, but says nothing about
+    // the new one's camera.
+    const bool owner = s.settings_owner == 0 || s.settings_owner == vehicle_id;
+    if (owner) {
+        s.camera_width = image->width;
+        s.camera_height = image->height;
+        if (mode.fps > 0.0) {
+            if (std::fabs(mode.fps - s.camera_fps) > 1e-9) {
+                s.have_due = false;
+            }
+            s.camera_fps = mode.fps;
+            s.camera_bitrate_kbps = mode.bitrate_kbps;
         }
-        s.camera_fps = mode.fps;
-        s.camera_bitrate_kbps = mode.bitrate_kbps;
     }
     // Below the render rate, take pictures on a schedule of the stream's own rate, with half a
     // render period of slack either way so render jitter neither doubles nor skips a frame.
@@ -365,6 +380,10 @@ void VideoService::on_frame(uint32_t vehicle_id, std::shared_ptr<const render::I
     s.pending = std::move(image);
     s.pending_sim_s = sim_time_s;
     s.pending_at = drawn;
+    // The rate and bitrate this picture was drawn for go with it: a camera refresh before the
+    // worker takes it (an encoder route, a DESCRIBE) must not re-describe it.
+    s.pending_fps = mode.fps > 0.0 ? mode.fps : camera_fps(s);
+    s.pending_bitrate_kbps = mode.fps > 0.0 ? mode.bitrate_kbps : s.camera_bitrate_kbps;
     if (!s.queued && !s.busy) {
         s.queued = true;
         ready_.push_back(s.instance);
@@ -395,7 +414,7 @@ void VideoService::worker() {
         const Clock::time_point captured = s.pending_at;
         const double sim_time_s = s.pending_sim_s;
         std::unique_ptr<H264Encoder> enc = std::move(s.encoder);
-        const EncoderSettings settings = effective(s);
+        const EncoderSettings settings = effective_for(s, s.pending_fps, s.pending_bitrate_kbps);
         // A keyframe when asked for (a new receiver, a forced IDR, a new camera), and on the
         // stream's wall-clock interval, with half a frame of slack so a 1 s interval at 10 fps is
         // every tenth frame rather than every eleventh.

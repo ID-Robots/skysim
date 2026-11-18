@@ -294,11 +294,24 @@ def main() -> int:
         saw_landing = saw_after = False
         landing_metrics = 0
         intrinsics_ok = False
+        others_switched = []  # (instance, height) where the parked or landing-off vehicle switched
+        off_top = 0.0  # the landing-off vehicle's greatest height
+        switched_at: list[float] = []  # wall times of vehicle 54's mode changes (as polled)
+        last_mode = None
         deadline = time.time() + 60
         while time.time() < deadline:
             cam = call("GET", f"/instances/{BASE}/camera")[1]
+            now = time.time()
             height = -call("GET", f"/instances/{BASE}/camera/dock")[1]["vehicle_pose"]["offset_ned"][2]
             timeline.append((round(height, 1), cam["now"]["mode"]))
+            if last_mode is not None and cam["now"]["mode"] != last_mode:
+                switched_at.append(now)
+            last_mode = cam["now"]["mode"]
+            # The parked vehicle and the one with its landing mode off, watched all the way up.
+            for other in (BASE + 1, BASE + 2):
+                if call("GET", f"/instances/{other}/camera")[1]["landing"]["active"]:
+                    others_switched.append(other)
+            off_top = max(off_top, -call("GET", f"/instances/{BASE + 2}/camera/dock")[1]["vehicle_pose"]["offset_ned"][2])
             if cam["landing"]["active"]:
                 saw_landing = True
                 landing_metrics = max(landing_metrics, call("GET", "/metrics")[1]["camera"]["landing"])
@@ -314,11 +327,14 @@ def main() -> int:
         check(saw_after, f"above {LANDING_HEIGHT + MARGIN:g} m it draws its own mode again")
         check(landing_metrics >= 1, "/metrics camera.landing counts it")
         check(intrinsics_ok, "the intrinsics route: the same picture, drawn full size at the landing rate")
+        check(not others_switched, f"neither the parked vehicle nor the landing-off one switched ({others_switched})")
+        check(off_top > LANDING_HEIGHT, f"... the landing-off one climbed through the zone (to {off_top:.1f} m)")
         time.sleep(2.0)  # frames of its own mode after the switch back
         receiver.stop = True
         receiver.join(timeout=5)
+        frames = receiver.client.frames
         sizes = []
-        for f in receiver.client.frames:
+        for f in frames:
             for nal in f.nals:
                 if nal and nal[0] & 0x1F == 7:
                     size = sps_size(nal)
@@ -326,20 +342,31 @@ def main() -> int:
                         sizes.append(size)
         print(f"camera_modes_smoke: picture sizes over the RTSP session, in order: {sizes}")
         check(sizes == [OWN[:2]], "one RTSP session, one picture size throughout (landing or not)")
-        idr_at_switch = all(f.idr for k, f in enumerate(receiver.client.frames)
-                            if any(n and n[0] & 0x1F == 7 for n in f.nals))
-        check(idr_at_switch, "every SPS rides on an IDR")
-        # Frame spacing over RTP: the landing rate (5 fps, 200 ms) in the zone, the vehicle's own
-        # (8 fps, 125 ms) elsewhere.
-        steps = [(b.rtp_ts - a.rtp_ts) / 90.0 for a, b in zip(receiver.client.frames, receiver.client.frames[1:])]
-        check(any(180 < s < 220 for s in steps) and any(110 < s < 140 for s in steps),
-              "frames 200 ms apart while landing and 125 ms apart in its normal mode")
+        check(all(f.idr for f in frames if any(n and n[0] & 0x1F == 7 for n in f.nals)),
+              "every SPS rides on an IDR")
+        # Each switch (into landing, and back out) is an IDR: the frame rate changes, so the encoder
+        # does. Looked for from just before the poll that saw it to a second after.
+        check(len(switched_at) == 2, f"two switches seen ({len(switched_at)})")
+        for k, t in enumerate(switched_at[:2]):
+            check(any(f.idr for f in frames if t - 0.5 <= f.received <= t + 1.0), f"an IDR at switch {k + 1}")
+        # Frame spacing over RTP, away from the switches: the landing rate (5 fps, 200 ms) while it
+        # was landing, the vehicle's own (8 fps, 125 ms) after.
+        def spacing(t0: float, t1: float) -> float | None:
+            window = [f for f in frames if t0 <= f.received <= t1]
+            steps = sorted((b.rtp_ts - a.rtp_ts) / 90.0 for a, b in zip(window, window[1:]))
+            return steps[len(steps) // 2] if steps else None
+
+        if len(switched_at) == 2:
+            landing_step = spacing(switched_at[0] + 1.0, switched_at[1] - 0.5)
+            normal_step = spacing(switched_at[1] + 1.0, time.time())
+            check(landing_step is not None and 180 < landing_step < 220,
+                  f"frames {landing_step} ms apart while landing (200)")
+            check(normal_step is not None and 110 < normal_step < 140,
+                  f"frames {normal_step} ms apart in its normal mode after (125)")
 
         cam = call("GET", f"/instances/{BASE + 1}/camera")[1]
         check(not cam["landing"]["active"] and cam["now"]["mode"] == "normal" and cam["now"]["resting"],
-              "the parked vehicle never switched, and rests")
-        cam = call("GET", f"/instances/{BASE + 2}/camera")[1]
-        check(not cam["landing"]["active"], "the vehicle with its landing camera off never switched")
+              "the parked vehicle rests")
         check(call("DELETE", f"/vehicles/{climbing['id']}")[0] == 200, "despawn")
         status, _ = call("POST", "/vehicles", {"instance": BASE})
         time.sleep(0.3)

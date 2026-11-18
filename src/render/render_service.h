@@ -21,6 +21,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace skysim::render {
@@ -89,7 +90,8 @@ class RenderService {
         int quality{70};
         // The landing mode (TASK-2661): a vehicle within landing_radius_m of its dock (its
         // DockBoard dock; where it spawned, Pose::home, without one) and at most landing_height_m
-        // above the ground, and not at rest, draws `landing` instead of its normal mode (its size 0:
+        // above the ground, once it is off the ground (0.3 m up), draws `landing` instead of its
+        // normal mode until it leaves the zone or comes to rest on the ground (its size 0:
         // the picture size). Leaving takes landing_margin_m more of either, so a vehicle on the
         // boundary does not flap. Off while landing.fps is 0 (a vehicle can still be given one).
         CameraMode landing{};
@@ -234,6 +236,7 @@ class RenderService {
         uint64_t intervals{0};
         double active_s{0.0};
         uint64_t delivered{0};
+        double vehicle_s{0.0}; // active_s weighted by the vehicles watched: the fps denominator
         uint64_t drawn{0};
         uint64_t reused{0};
         double render_ms_sum{0.0};
@@ -294,6 +297,7 @@ class RenderService {
 
     mutable std::mutex settings_mutex_;
     std::unordered_map<uint32_t, Setting> settings_;
+    std::unordered_set<uint32_t> retired_; // forgotten vehicles: configure() refuses them
     size_t tiles_loaded_{0};
 
     mutable std::mutex poses_mutex_;

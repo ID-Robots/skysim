@@ -149,7 +149,8 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
     `SKYSIM_CAMERA_LANDING_FPS` (default the fleet's), `SKYSIM_CAMERA_LANDING_BITRATE` (kbit/s,
     default the stream's own), `SKYSIM_CAMERA_LANDING_RADIUS` (25 m), `SKYSIM_CAMERA_LANDING_HEIGHT`
     (40 m): drawn while a vehicle is within the radius of its dock (`GET .../camera/dock`), at most
-    the height above the ground, and not at rest. Leaving takes 5 m more of either. A hover never
+    the height above the ground, from when it leaves the ground (0.3 m up) until it leaves the zone or
+    comes to rest on the ground again. Leaving the zone takes 5 m more of either. A hover never
     counts as rest, so a SITL searching for the marker at 28.5 m keeps it.
   - **At rest**: `SKYSIM_CAMERA_REST_FPS` (default 0 = off): a vehicle still (2 cm, 0.5 deg) for 5 s
     on the ground is drawn — re-sent — at this rate. Its stream keeps its nominal frame rate (the
@@ -248,8 +249,9 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   `SKYSIM_CAMERA_SIZE=1920x1080 SKYSIM_CAMERA_DRAW_SIZE=640x360 SKYSIM_CAMERA_FOV=81
   SKYSIM_CAMERA_FPS=15 SKYSIM_CAMERA_LANDING_FPS=15 SKYSIM_CAMERA_LANDING_BITRATE=4000
   SKYSIM_CAMERA_REST_FPS=2 SKYSIM_CAMERA_THREADS=8` (the default would be 4 threads) — on the
-  same 8 vCPU / 16 GB task (README, "What the camera costs"; the lit-ground cache is 512 MB at
-  most).
+  same 8 vCPU / 16 GB task (README, "What the camera costs"). The lit-ground cache keeps 512 MB
+  between frames; while a frame is drawn it can briefly hold that frame's new tiles on top (tens of
+  MB at 1920x1080), which 16 GB has room for.
 
 ### 3. skyhub_gateway_service
 - **[G1] Settings**: `SKYSIM_ENABLED`, `SKYSIM_URL` (default `http://127.0.0.1:8642`),

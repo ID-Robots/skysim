@@ -3,18 +3,18 @@
 //
 // A vehicle's picture has one size, the fleet's (--camera-size) unless it was given its own: what
 // camera.jpg, camera.mjpg, the RTSP stream and the intrinsics have, from the first frame to the
-// last. What changes is how it is drawn. A mode is the size the picture is drawn at — scaled up to
-// the picture size when smaller — its frame rate and its stream's bitrate. A vehicle draws its
-// normal mode (--camera-draw-size, --camera-fps), the landing mode (--camera-landing-*) while it is
-// in the air near its dock, where the dock marker needs every pixel, and its normal mode at the
-// rest rate (--camera-rest-fps) while it sits still on the ground. So a consumer sees the same
-// endpoints, formats and picture size throughout: OpenCV's FFmpeg capture, for one, does not follow
-// a picture that changes size mid-stream (it keeps returning the last frame of the old size).
+// last (H.264 crops an odd width or height down to even, at the right and bottom edge). What changes is how
+// it is drawn. A mode is the size the picture is drawn at — scaled up to the picture size when smaller — its
+// frame rate and its stream's bitrate. A vehicle draws its normal mode (--camera-draw-size, --camera-fps),
+// the landing mode (--camera-landing-*) while it is in the air near its dock, where the dock marker needs
+// every pixel, and its normal mode at the rest rate (--camera-rest-fps) while it sits still on the ground. So
+// a consumer sees the same endpoints, formats and picture size throughout: OpenCV's FFmpeg capture, for one,
+// does not follow a picture that changes size mid-stream (it keeps returning the last frame of the old size).
 #include <charconv>
 #include <cstdint>
-#include <cstring>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace skysim::render {
 
@@ -51,11 +51,12 @@ struct CameraModePatch {
     bool empty() const { return !width && !height && !fps && !bitrate_kbps; }
 };
 
-// "WxH" as two whole numbers, exactly: nothing before, between or after them but the 'x', and
-// each within int (a number too long is refused, not wrapped into range as sscanf's %d would).
-inline bool parse_wxh(const char *text, int &width, int &height) {
-    const char *end = text + std::strlen(text);
-    const auto w = std::from_chars(text, end, width);
+// "WxH" as two whole numbers, exactly: nothing before, between or after them but the 'x' (a NUL
+// inside a JSON string included), and each within int (a number too long is refused, not wrapped
+// into range as sscanf's %d would).
+inline bool parse_wxh(std::string_view text, int &width, int &height) {
+    const char *end = text.data() + text.size();
+    const auto w = std::from_chars(text.data(), end, width);
     if (w.ec != std::errc() || w.ptr == end || *w.ptr != 'x') {
         return false;
     }

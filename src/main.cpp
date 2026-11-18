@@ -1608,7 +1608,13 @@ int main(int argc, char **argv) {
                 opt.camera_landing
                     ? (std::to_string(rcfg.landing.width > 0 ? rcfg.landing.width : opt.camera_width) + "x" +
                        std::to_string(rcfg.landing.height > 0 ? rcfg.landing.height : opt.camera_height) +
-                       " @ " + std::to_string(static_cast<int>(rcfg.landing.fps + 0.5)) + " fps" +
+                       " @ " +
+                       [](double fps) {
+                           char text[32];
+                           std::snprintf(text, sizeof(text), "%.1f", fps);
+                           return std::string(text);
+                       }(rcfg.landing.fps) +
+                       " fps" +
                        (rcfg.landing.bitrate_kbps > 0
                             ? ", " + std::to_string(rcfg.landing.bitrate_kbps) + " kbps"
                             : std::string()) +

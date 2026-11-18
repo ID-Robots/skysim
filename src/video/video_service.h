@@ -100,8 +100,10 @@ class VideoService {
         std::function<uint32_t(int instance)> resolve;
         // Keep drawing this vehicle for a stream (RenderService::want_video). Same.
         std::function<void(uint32_t vehicle_id)> want_frames;
-        // The vehicle's camera mode now (RenderService::mode_now), for a DESCRIBE or an encoder
-        // route before its next picture says. Optional; without it the Config's size and rate.
+        // What the vehicle's stream carries now — its picture size, and its mode's nominal frame
+        // rate and bitrate (RenderService::stream_mode, not mode_now: that one is the draw size and
+        // the rest rate) — for a DESCRIBE or an encoder route before its next picture says.
+        // Optional; without it the Config's size and rate.
         std::function<render::CameraMode(uint32_t vehicle_id)> camera;
     };
 
@@ -184,6 +186,8 @@ class VideoService {
         std::shared_ptr<const render::Image> pending;
         double pending_sim_s{0.0};
         Clock::time_point pending_at{};
+        double pending_fps{0.0}; // the camera rate and bitrate it was drawn for
+        int pending_bitrate_kbps{0};
         bool queued{false};
         bool busy{false};
 
@@ -208,6 +212,8 @@ class VideoService {
     // The settings a stream encodes at now: its fps capped by (or following) the camera's rate,
     // the camera mode's bitrate over its own when the mode names one.
     EncoderSettings effective(const Stream &s) const;
+    // The same for a camera rate and bitrate other than the stream's latest (a queued picture's).
+    EncoderSettings effective_for(const Stream &s, double camera_fps, int camera_bitrate_kbps) const;
     double camera_fps(const Stream &s) const { return s.camera_fps > 0.0 ? s.camera_fps : cfg_.max_fps; }
     int camera_width(const Stream &s) const { return s.camera_width > 0 ? s.camera_width : cfg_.width; }
     int camera_height(const Stream &s) const { return s.camera_height > 0 ? s.camera_height : cfg_.height; }

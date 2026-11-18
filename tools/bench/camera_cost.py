@@ -95,12 +95,19 @@ class FakeSitl(threading.Thread):
             self.pwm.append(frame)
         self.count = [0] * len(self.socks)
         self.stop = False
+        self.error: str | None = None
 
     def send(self, k: int) -> None:
         self.count[k] += 1
         self.socks[k].send(struct.pack("<HHI16H", 18458, self.rate, self.count[k], *self.pwm[k]))
 
     def run(self) -> None:
+        try:
+            self.lockstep()
+        except Exception as e:  # noqa: BLE001 - kept, so a run whose vehicles never flew is not reported
+            self.error = f"{type(e).__name__}: {e}"
+
+    def lockstep(self) -> None:
         last = [0.0] * len(self.socks)
         for k in range(len(self.socks)):
             self.send(k)
@@ -233,15 +240,27 @@ def run_one(args: argparse.Namespace, size: str, fps: float, vehicles: int) -> d
             receivers = [Receiver(i) for i in instances]
             for r in receivers:
                 r.start()
+            # Every receiver playing before the clock starts: one still in PLAY would count its
+            # start-up as lost frames.
+            deadline = time.monotonic() + 20
+            while any(r.frames == 0 for r in receivers):
+                failed = [r.error for r in receivers if r.error]
+                if failed or time.monotonic() > deadline:
+                    raise RuntimeError(f"receivers did not start: {failed or 'no frame within 20 s'}")
+                time.sleep(0.05)
             time.sleep(args.warmup)
             m0 = api("/metrics")
             f0 = [r.frames for r in receivers]
+            b0 = [r.bytes for r in receivers]
             c0, t0 = cpu_s(sim.pid), time.monotonic()
             time.sleep(args.seconds)
             c1, t1 = cpu_s(sim.pid), time.monotonic()
             f1 = [r.frames for r in receivers]
+            b1 = [r.bytes for r in receivers]
             m1 = api("/metrics")
             failed = [r.error for r in receivers if r.error]
+            if sitl.error:
+                failed.append(f"stand-in SITL: {sitl.error}")
             if failed:
                 raise RuntimeError(f"{len(failed)} receiver(s) failed: {failed}")
         finally:
@@ -258,6 +277,8 @@ def run_one(args: argparse.Namespace, size: str, fps: float, vehicles: int) -> d
                 sim.kill()
                 sim.wait()
     secs = t1 - t0
+    uniform = (parked in (0, vehicles) and args.landing_vehicles < 0
+               and not any(flag in args.extra for flag in ("--camera-landing", "--camera-rest-fps")))
     cores = (c1 - c0) / secs
     camera_cores = max(cores - idle_cores, 0.0)
     rates = [(b - a) / secs for a, b in zip(f0, f1)]
@@ -271,8 +292,8 @@ def run_one(args: argparse.Namespace, size: str, fps: float, vehicles: int) -> d
         "size": size,
         "fps": fps,
         "vehicles": vehicles,
-        "state": args.state if not args.parked else f"{vehicles - min(args.parked, vehicles)} flying, "
-        f"{min(args.parked, vehicles)} parked",
+        "state": "parked" if parked == vehicles else ("flying" if parked == 0 else
+                                                      f"{vehicles - parked} flying, {parked} parked"),
         "landing_now": (m1.get("camera") or {}).get("landing"),
         "cores": round(cores, 2),
         "idle_cores": round(idle_cores, 2),
@@ -285,12 +306,15 @@ def run_one(args: argparse.Namespace, size: str, fps: float, vehicles: int) -> d
         "render_ms_max": round(cam1.get("render_ms_max", 0.0), 1),
         "h264_ms": round((m1.get("video") or {}).get("encode_ms", 0.0), 2),
         "cpu_ms_per_frame": round(cpu_ms_per_frame, 1) if cpu_ms_per_frame is not None else None,
+        # Only where every vehicle was asked for `fps`: a fleet that mixes rates (parked at the rest
+        # rate, landing at the landing rate) has no one target to scale to.
         "cores_for_target": round(cpu_ms_per_frame * fps * vehicles / 1000.0, 2)
-        if cpu_ms_per_frame is not None
+        if cpu_ms_per_frame is not None and uniform
         else None,
         "tick_p99_us": m1.get("tick_p99_us"),
         "freezes": m1.get("freezes", 0) - m0.get("freezes", 0),
-        "kbps_each": round(sum(r.bytes for r in receivers) * 8 / 1000 / max(secs, 1e-9) / max(len(receivers), 1), 1),
+        "kbps_each": round(sum(b - a for a, b in zip(b0, b1)) * 8 / 1000 / max(secs, 1e-9)
+                           / max(len(receivers), 1), 1),
     }
 
 
@@ -321,7 +345,7 @@ def main() -> int:
     ap.add_argument("--parked", type=int, default=0, help="with --state flying: the last N vehicles stay parked")
     ap.add_argument("--landing-vehicles", type=int, default=-1,
                     help="the landing camera stays on for the first K vehicles only (-1: all)")
-    ap.add_argument("--pwm", type=int, default=1600, help="motor PWM while flying")
+    ap.add_argument("--pwm", type=int, default=1600, help="motor PWM while flying (1000..2000 us)")
     ap.add_argument("--gimbal-pitch", type=float, default=-90.0, help="degrees; -999 = no gimbal (fixed mount)")
     ap.add_argument("--threads", type=int, default=0, help="--camera-threads (0 = skysim's default)")
     ap.add_argument("--video-threads", type=int, default=2)
@@ -336,6 +360,8 @@ def main() -> int:
     ap.add_argument("--json", default="")
     ap.add_argument("--markdown", default="")
     args = ap.parse_args()
+    if not 1000 <= args.pwm <= 2000:
+        ap.error("--pwm must be 1000..2000")
     if args.gimbal_pitch <= -999:
         args.gimbal_pitch = None
     if args.viewer_cpus:

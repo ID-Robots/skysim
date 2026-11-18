@@ -528,6 +528,13 @@ std::string encoder_json(const EncoderState &e) {
 
 // --- per-vehicle pilot camera (TASK-2661) ------------------------------------------------------
 
+// A member that is there and not null: GET writes null for what does not apply (a landing mode
+// that is not available), so a body that sends GET's answer back changes nothing with it.
+const radio::json::Value *field(const radio::json::Value &obj, const char *name) {
+    const radio::json::Value *v = obj.find(name);
+    return v != nullptr && !v->is_null() ? v : nullptr;
+}
+
 // A size out of a JSON object: `w_name` and `h_name` as whole numbers, or `size_name` as "WxH".
 // Each optional; `width`/`height` are left alone for what is absent.
 bool parse_size_fields(const radio::json::Value &obj, const char *w_name, const char *h_name,
@@ -542,33 +549,33 @@ bool parse_size_fields(const radio::json::Value &obj, const char *w_name, const 
         field = static_cast<int>(v.number);
         return true;
     };
-    if (const radio::json::Value *size = obj.find(size_name)) {
+    if (const radio::json::Value *size = field(obj, size_name)) {
         int w = 0;
         int h = 0;
-        if (!size->is_string() || !render::parse_wxh(size->text.c_str(), w, h)) {
+        if (!size->is_string() || !render::parse_wxh(size->text, w, h)) {
             error = std::string(size_name) + " must be a string WxH, e.g. \"1920x1080\"";
             return false;
         }
         width = w;
         height = h;
     }
-    if (const radio::json::Value *v = obj.find(w_name); v != nullptr && !whole(*v, w_name, width)) {
+    if (const radio::json::Value *v = field(obj, w_name); v != nullptr && !whole(*v, w_name, width)) {
         return false;
     }
-    if (const radio::json::Value *v = obj.find(h_name); v != nullptr && !whole(*v, h_name, height)) {
+    if (const radio::json::Value *v = field(obj, h_name); v != nullptr && !whole(*v, h_name, height)) {
         return false;
     }
     return true;
 }
 
 // One camera mode's fields out of a JSON object: its draw size (draw_width and draw_height, or
-// "draw":"WxH"), fps and bitrate_kbps; each optional. Other members are ignored, so what GET gave
-// can be sent back with one field changed.
+// "draw":"WxH"), fps and bitrate_kbps; each optional, null counting as absent. Other members are
+// ignored, so what GET gave can be sent back with one field changed.
 bool parse_mode_fields(const radio::json::Value &obj, render::CameraModePatch &out, std::string &error) {
     if (!parse_size_fields(obj, "draw_width", "draw_height", "draw", out.width, out.height, error)) {
         return false;
     }
-    if (const radio::json::Value *v = obj.find("bitrate_kbps")) {
+    if (const radio::json::Value *v = field(obj, "bitrate_kbps")) {
         if (!v->is_number() || !std::isfinite(v->number) || v->number != std::floor(v->number) ||
             std::fabs(v->number) > 1e6) {
             error = "bitrate_kbps must be a whole number";
@@ -576,7 +583,7 @@ bool parse_mode_fields(const radio::json::Value &obj, render::CameraModePatch &o
         }
         out.bitrate_kbps = static_cast<int>(v->number);
     }
-    if (const radio::json::Value *v = obj.find("fps")) {
+    if (const radio::json::Value *v = field(obj, "fps")) {
         if (!v->is_number() || !std::isfinite(v->number)) {
             error = "fps must be a number";
             return false;
@@ -610,7 +617,7 @@ bool parse_camera_settings(const radio::json::Value &obj, render::CameraSettings
     if (!parse_mode_fields(obj, patch.normal, error)) {
         return false;
     }
-    if (const radio::json::Value *normal = obj.find("normal")) {
+    if (const radio::json::Value *normal = field(obj, "normal")) {
         if (!normal->is_object()) {
             error = "normal must be an object";
             return false;
@@ -620,7 +627,7 @@ bool parse_camera_settings(const radio::json::Value &obj, render::CameraSettings
             return false;
         }
     }
-    if (const radio::json::Value *landing = obj.find("landing")) {
+    if (const radio::json::Value *landing = field(obj, "landing")) {
         if (landing->type == radio::json::Value::Type::kBool) {
             patch.landing_enabled = landing->boolean;
         } else if (landing->is_object()) {
@@ -628,7 +635,7 @@ bool parse_camera_settings(const radio::json::Value &obj, render::CameraSettings
                 error = "landing: " + error;
                 return false;
             }
-            if (const radio::json::Value *enabled = landing->find("enabled")) {
+            if (const radio::json::Value *enabled = field(*landing, "enabled")) {
                 if (enabled->type != radio::json::Value::Type::kBool) {
                     error = "landing.enabled must be true or false";
                     return false;
@@ -689,7 +696,11 @@ std::string camera_json(const VehicleInfo &v, const render::VehicleCameraState &
     out += ",\"active\":";
     out += flag(c.landing_active);
     out += ',';
-    append_mode(out, c.landing);
+    if (c.landing_available) {
+        append_mode(out, c.landing);
+    } else {
+        out += "\"draw_width\":null,\"draw_height\":null,\"fps\":null,\"bitrate_kbps\":null";
+    }
     out += ",\"radius_m\":";
     radio::json::append_number(out, c.landing_radius_m);
     out += ",\"height_m\":";
@@ -698,7 +709,7 @@ std::string camera_json(const VehicleInfo &v, const render::VehicleCameraState &
     radio::json::append_number(out, c.rest_fps);
     out += ",\"watched\":";
     out += flag(c.watched);
-    out += ",\"fps\":";
+    out += ",\"achieved_fps\":";
     radio::json::append_number(out, c.fps);
     out += ",\"render_ms\":";
     radio::json::append_number(out, c.render_ms);
@@ -978,20 +989,22 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
         cmd.request.launch_process = parse_launch_process(req.body);
         cmd.request.instance = parse_instance(req.body);
         cmd.request.battery = parse_battery(req.body);
-        // The vehicle's own camera (TASK-2661), checked here so a bad one spawns nothing.
-        if (req.body.find("\"camera\"") != std::string::npos) {
+        // The vehicle's own camera (TASK-2661), checked here so a bad one spawns nothing. Looked
+        // up in the decoded body (a key may be written with escapes); a body that is not JSON
+        // keeps spawning as it always has, unless it says "camera", which then cannot be read.
+        // With the camera off (no camera_check) it is ignored, as the spawn would ignore it.
+        if (snapshots.camera_check && req.body.find_first_not_of(" \t\r\n") != std::string::npos) {
             std::string error;
             std::string parse_error;
             const auto doc = radio::json::parse(req.body, parse_error);
-            const radio::json::Value *camera = doc ? doc->find("camera") : nullptr;
-            if (!doc) {
+            if (!doc && req.body.find("camera") != std::string::npos) {
                 reply_error(res, 400, "invalid JSON: " + parse_error);
                 return;
             }
-            if (camera != nullptr && !camera->is_null()) {
+            const radio::json::Value *camera = doc ? field(*doc, "camera") : nullptr;
+            if (camera != nullptr) {
                 render::CameraSettingsPatch patch;
-                if (!parse_camera_settings(*camera, patch, error) ||
-                    (snapshots.camera_check && !snapshots.camera_check(patch, &error))) {
+                if (!parse_camera_settings(*camera, patch, error) || !snapshots.camera_check(patch, &error)) {
                     reply_error(res, 400, "camera: " + error);
                     return;
                 }

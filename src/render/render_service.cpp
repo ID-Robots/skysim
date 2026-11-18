@@ -71,9 +71,15 @@ bool moved(const RenderService::Pose &a, const RenderService::Pose &b) {
            std::fabs(a.gimbal_yaw_rad - b.gimbal_yaw_rad) > kTurnRad;
 }
 
-// Only a vehicle this close to the ground can be at rest: one holding a hover over its dock, as an
-// autopilot searching for the marker does, keeps the landing camera however still it holds.
-constexpr double kRestHeightM = 1.0;
+// Only a vehicle this close to the ground can be at rest — on it, in practice: a quad rests with
+// its centre 0.075 m up. One holding a hover over its dock, even a low one as an autopilot
+// aligning for the last metre does, keeps the landing mode however still it holds.
+constexpr double kRestHeightM = 0.3;
+
+// The longest the render thread sleeps with vehicles in the fleet: poses keep arriving without
+// waking it, and a vehicle that takes off from rest (2 fps, or 0.1) or enters the landing zone
+// must not wait a rest period for its new mode — nor must GET .../camera report a stale one.
+constexpr auto kModeRefresh = std::chrono::milliseconds(250);
 
 // `m` with the given fields of `patch`, each checked against the bounds in camera_mode.h. False
 // (and `m` unchanged) with `error` naming the first field out of bounds.
@@ -95,6 +101,26 @@ CameraMode sized(CameraMode m, std::pair<int, int> picture) {
     if (m.width <= 0 || m.height <= 0) {
         m.width = picture.first;
         m.height = picture.second;
+    }
+    return m;
+}
+
+// The draw size has the picture's aspect ratio to the nearest pixel (0 = the picture's own).
+bool same_aspect(const CameraMode &m, std::pair<int, int> picture) {
+    const CameraMode r = sized(m, picture);
+    const double height = static_cast<double>(r.width) * picture.second / picture.first;
+    return std::fabs(static_cast<double>(r.height) - height) <= 0.5 + 1e-9;
+}
+
+// A draw size given by one side only: the other is the picture's aspect ratio of it. (Either side
+// 0 alone would otherwise read as "the picture's size" for both.)
+CameraMode complete(CameraMode m, std::pair<int, int> picture) {
+    if (m.width > 0 && m.height <= 0) {
+        m.height =
+            static_cast<int>(std::lround(static_cast<double>(m.width) * picture.second / picture.first));
+    } else if (m.height > 0 && m.width <= 0) {
+        m.width =
+            static_cast<int>(std::lround(static_cast<double>(m.height) * picture.first / picture.second));
     }
     return m;
 }
@@ -209,9 +235,7 @@ RenderService::Stats RenderService::stats() const {
 }
 
 double RenderService::Window::fps() const {
-    return active_s > 0.0
-               ? static_cast<double>(delivered) / active_s / static_cast<double>(std::max<size_t>(watched, 1))
-               : 0.0;
+    return vehicle_s > 0.0 ? static_cast<double>(delivered) / vehicle_s : 0.0;
 }
 
 // --- per-vehicle camera modes (TASK-2661) --------------------------------------------------
@@ -273,10 +297,21 @@ RenderService::VehicleCamera RenderService::describe(const Setting *s) const {
 std::optional<RenderService::VehicleCamera>
 RenderService::configure(uint32_t vehicle_id, const CameraPatch &patch, std::string *error) {
     std::lock_guard<std::mutex> lock(settings_mutex_);
+    if (retired_.count(vehicle_id) != 0) {
+        if (error != nullptr) {
+            error->clear(); // not a bad request: no such vehicle
+        }
+        return std::nullopt;
+    }
     const auto it = settings_.find(vehicle_id);
     Setting next = it != settings_.end() ? it->second : Setting{};
     if (!apply(next, patch, error)) {
         return std::nullopt;
+    }
+    if (picture_of(&next) != picture_of(it != settings_.end() ? &it->second : nullptr)) {
+        // A new picture size: the JPEG kept for camera.jpg is the old size, and a reader of it
+        // must wait for one of the new size rather than be handed it with the new intrinsics.
+        frames_.erase(vehicle_id);
     }
     Setting &stored = settings_[vehicle_id];
     stored.picture = next.picture;
@@ -311,35 +346,34 @@ bool RenderService::apply(Setting &next, const CameraPatch &patch, std::string *
         if (!apply_mode_patch(m, patch.normal, error)) {
             return false;
         }
-        next.normal = m;
+        next.normal = complete(m, picture_of(&next));
     }
     if (!patch.landing.empty()) {
-        // From the vehicle's own landing mode, else the fleet's, else its normal mode: a patch that
-        // names only a frame rate still needs a picture size to start from.
+        // From the vehicle's own landing mode, else the fleet's, else a full-size drawing at its
+        // normal rate: a landing mode is for drawing every pixel.
         CameraMode m =
-            next.landing ? *next.landing : (usable(cfg_.landing) ? cfg_.landing : normal_of(&next));
+            next.landing ? *next.landing
+                         : (usable(cfg_.landing) ? cfg_.landing : CameraMode{0, 0, normal_of(&next).fps, 0});
         if (!apply_mode_patch(m, patch.landing, error)) {
             return false;
         }
-        next.landing = m;
+        next.landing = complete(m, picture_of(&next));
         next.landing_enabled = true; // giving it a landing camera is asking for one
     }
     if (patch.landing_enabled) {
         next.landing_enabled = *patch.landing_enabled;
     }
-    // A mode drawn at another aspect ratio than the picture's would be stretched to it.
+    // A mode drawn at another aspect ratio than the picture's would be stretched to it, and its
+    // pixels would no longer be the picture's pinhole (the intrinsics route's fx = fy): the draw
+    // height must be the draw width's share of the picture's, to the nearest pixel.
     const std::pair<int, int> picture = picture_of(&next);
-    const double aspect = static_cast<double>(picture.first) / static_cast<double>(picture.second);
-    const auto same_aspect = [aspect, picture](const CameraMode &m) {
-        const CameraMode r = sized(m, picture);
-        return std::fabs(static_cast<double>(r.width) / static_cast<double>(r.height) - aspect) <=
-               0.01 * aspect;
-    };
     const std::optional<CameraMode> landing = landing_of(&next);
-    if (!same_aspect(normal_of(&next)) || (landing && !same_aspect(*landing))) {
+    if (!same_aspect(normal_of(&next), picture) || (landing && !same_aspect(*landing, picture))) {
         if (error != nullptr) {
             *error = "a mode's draw size must have the picture's aspect ratio (" +
-                     std::to_string(picture.first) + "x" + std::to_string(picture.second) + ")";
+                     std::to_string(picture.first) + "x" + std::to_string(picture.second) +
+                     ": a draw height of the width times " + std::to_string(picture.second) + "/" +
+                     std::to_string(picture.first) + ", to the nearest pixel)";
         }
         return false;
     }
@@ -363,6 +397,9 @@ CameraMode RenderService::stream_mode(uint32_t vehicle_id) const {
 void RenderService::forget(uint32_t vehicle_id) {
     std::lock_guard<std::mutex> lock(settings_mutex_);
     settings_.erase(vehicle_id);
+    // A camera POST that read the fleet before this despawn and lands after it must not bring the
+    // settings back: ids are never reused, so a gone one stays gone.
+    retired_.insert(vehicle_id);
 }
 
 void RenderService::record_pass(const Window &pass, Clock::time_point now) {
@@ -384,6 +421,9 @@ void RenderService::record_pass(const Window &pass, Clock::time_point now) {
             ++w->intervals;
             w->active_s += step_s;
             w->delivered += pass.drawn + pass.reused;
+            // Each step weighted by the vehicles watched in it: one that joins for a pass adds a
+            // pass's worth of time, not a whole window's.
+            w->vehicle_s += step_s * static_cast<double>(pass.watched);
         }
         w->landing = std::max(w->landing, pass.landing);
         w->drawn += pass.drawn;
@@ -520,6 +560,7 @@ void RenderService::run() {
         bool landing{false};
         bool due_set{false};
         Clock::time_point next_due{};
+        double due_fps{0.0}; // the rate next_due was set at: a new rate starts a new cadence now
         bool counting{false};
         Clock::time_point count_since{};
         uint64_t counted{0};
@@ -547,6 +588,7 @@ void RenderService::run() {
         bool inside;
         bool outside;
         bool at_rest;
+        bool airborne;
     };
     std::unordered_map<uint32_t, Place> places;
     bool drawing = false;
@@ -608,7 +650,7 @@ void RenderService::run() {
             places[pose.vehicle_id] = {
                 distance <= cfg_.landing_radius_m && height <= cfg_.landing_height_m,
                 !(distance <= cfg_.landing_radius_m + margin && height <= cfg_.landing_height_m + margin),
-                started - t.moved_at >= settle && height <= kRestHeightM};
+                started - t.moved_at >= settle && height <= kRestHeightM, height > kRestHeightM};
         }
 
         // Each vehicle's mode now. Runtime-only entries of vehicles that have gone are dropped
@@ -629,7 +671,9 @@ void RenderService::run() {
                 const std::optional<CameraMode> landing = landing_of(&st);
                 if (!landing) {
                     t.landing = false;
-                } else if (!t.landing && place.inside && !place.at_rest) {
+                } else if (!t.landing && place.inside && place.airborne) {
+                    // Off the ground near its dock. Not before: a parked vehicle whose autopilot
+                    // starts driving its gimbal moves, but it is not landing.
                     t.landing = true;
                 } else if (t.landing && (place.outside || place.at_rest)) {
                     t.landing = false;
@@ -706,6 +750,17 @@ void RenderService::run() {
                 t.fps = 0.0;
             }
         }
+        {
+            // ... and what GET .../camera reports for them says so (their frame counts stay).
+            std::lock_guard<std::mutex> lock(settings_mutex_);
+            for (auto &[id, st] : settings_) {
+                if (std::none_of(wanted.begin(), wanted.end(),
+                                 [id = id](const Wanted &w) { return w.pose->vehicle_id == id; })) {
+                    st.watched = false;
+                    st.fps = 0.0;
+                }
+            }
+        }
 
         if (wanted.empty()) {
             {
@@ -735,6 +790,11 @@ void RenderService::run() {
                 deadline = std::min(deadline, started + std::chrono::duration_cast<Clock::duration>(
                                                             std::chrono::duration<double>(1.0 / fps)));
             }
+            if (!poses.empty()) {
+                // Nobody watching, but the fleet's modes are still followed (no drawing), so
+                // GET .../camera and an RTSP DESCRIBE say the mode a vehicle is in now.
+                deadline = std::min(deadline, started + kModeRefresh);
+            }
             if (deadline == Clock::time_point::max()) {
                 wake_.wait(lock, woken);
             } else {
@@ -749,7 +809,10 @@ void RenderService::run() {
         due.clear();
         auto next_wake = Clock::time_point::max();
         for (const Wanted &w : wanted) {
-            const Track &t = tracks[w.pose->vehicle_id];
+            Track &t = tracks[w.pose->vehicle_id];
+            if (t.due_set && t.due_fps != w.draw.fps) {
+                t.due_set = false; // off rest, into landing, a new setting: due now, at the new rate
+            }
             if (!t.due_set || t.next_due <= started + kSlack) {
                 due.push_back(&w);
             } else {
@@ -758,7 +821,7 @@ void RenderService::run() {
         }
         if (due.empty()) {
             std::unique_lock<std::mutex> lock(demand_mutex_);
-            wake_.wait_until(lock, next_wake, [&] {
+            wake_.wait_until(lock, std::min(next_wake, started + kModeRefresh), [&] {
                 return stop_.load(std::memory_order_relaxed) || demand_epoch_ != seen_epoch;
             });
             continue;
@@ -855,6 +918,7 @@ void RenderService::run() {
                 std::chrono::duration<double>(1.0 / std::max(w.draw.fps, 0.1)));
             t.next_due = t.due_set ? std::max(t.next_due + period, started) : started + period;
             t.due_set = true;
+            t.due_fps = w.draw.fps;
             if (!t.counting) {
                 t.counting = true;
                 t.count_since = started;

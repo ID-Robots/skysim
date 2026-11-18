@@ -15,7 +15,9 @@ of the point below the camera, as when the landing takes over within 15 m of hom
   python3 tools/render_probe/aruco_check.py --probe build/render_probe --tiles build/demo_map/tiles \\
       --out /tmp/aruco_probe --report /tmp/aruco_probe/report.md
 
-Exit status 1 when a 1920x1080 picture from 30 m or lower misses ID 228 (centred marker).
+Pictures go to --out (a new private temporary directory when it is not given) as PNG,
+dock_<W>x<H>_hfov<F>_<height>m[_east<offset>m].png. Exit status 1 when a 1920x1080 picture with the
+marker centred, from any height asked for between 3 and 30 m, misses the outer marker, ID 228.
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ import math
 import os
 import subprocess
 import sys
+import tempfile
 
 try:
     import cv2
@@ -58,7 +61,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--probe", default="build/render_probe")
     ap.add_argument("--tiles", required=True)
-    ap.add_argument("--out", default="/tmp/aruco_probe")
+    ap.add_argument("--out", default="", help="where the pictures go (default: a new private temporary directory)")
     ap.add_argument("--report", default="")
     ap.add_argument("--heights", default="30,20,10,3")
     ap.add_argument("--sizes", default="1920x1080@81,1280x720@81,640x360@78",
@@ -71,7 +74,10 @@ def main() -> int:
     if cv2 is None:
         print("aruco_check: needs python3 OpenCV (cv2) and numpy", file=sys.stderr)
         return 2
+    if not args.out:
+        args.out = tempfile.mkdtemp(prefix="aruco_probe_")  # private: nobody else's directory
     os.makedirs(args.out, exist_ok=True)
+    print(f"aruco_check: pictures in {args.out}", flush=True)
     detect = detector()
     heights = [float(h) for h in args.heights.split(",") if h]
     offsets = [0.0] + ([args.offset] if args.offset > 0 else [])
@@ -85,7 +91,7 @@ def main() -> int:
             for off in offsets:
                 if off > 0 and off + 0.6 > alt * math.tan(math.radians(hfov_deg) * 0.5):
                     continue  # the marker would be (partly) out of the picture at this height
-                name = f"dock_{width}x{height}_{alt:g}m" + (f"_east{off:g}m" if off else "")
+                name = f"dock_{width}x{height}_hfov{hfov_deg:g}_{alt:g}m" + (f"_east{off:g}m" if off else "")
                 ppm = os.path.join(args.out, name + ".ppm")
                 cmd = [args.probe, "--tiles", args.tiles, "--raster", "--size", f"{width}x{height}", "--fov",
                        f"{hfov_deg:g}", "--pitch", "-90", "--alt", f"{alt:g}", "--dock", f"0,{off:g}",
@@ -131,8 +137,8 @@ def main() -> int:
     if args.report:
         with open(args.report, "w") as fh:
             fh.write(table)
-    misses = [r for r in rows if r["size"] == "1920x1080" and r["offset_m"] == 0 and r["height_m"] <= 30
-              and r["height_m"] >= 3 and not r["outer_228"] and not r["inner_11"]]
+    misses = [r for r in rows if r["size"] == "1920x1080" and r["offset_m"] == 0 and 3 <= r["height_m"] <= 30
+              and not r["outer_228"]]
     return 1 if misses else 0
 
 

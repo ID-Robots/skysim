@@ -96,6 +96,14 @@ bool looks_like_ground(const Px &p) { return p.g > p.b + 12; }
 // --- TASK-2661: the lit-ground cache and the fast ground path --------------------------------
 
 double mean_abs_diff(const skysim::render::Image &a, const skysim::render::Image &b, int *max_diff) {
+    // Pictures of different sizes, or empty ones, are as different as pictures get: never "0".
+    if (a.width != b.width || a.height != b.height || a.rgb.empty() ||
+        a.rgb.size() != static_cast<size_t>(a.width) * a.height * 3 || a.rgb.size() != b.rgb.size()) {
+        if (max_diff != nullptr) {
+            *max_diff = 255;
+        }
+        return 255.0;
+    }
     double sum = 0.0;
     int worst = 0;
     for (size_t i = 0; i < a.rgb.size() && i < b.rgb.size(); ++i) {
@@ -351,6 +359,9 @@ void test_resize() {
     src.rgb = {0, 0, 0, 200, 0, 0, 0, 200, 0, 200, 200, 0};
     const Image up = skysim::render::resize_bilinear(src, 4, 4);
     CHECK(up.width == 4 && up.height == 4 && up.rgb.size() == 48);
+    if (up.rgb.size() != 48) {
+        return; // the pixel checks below would read past the end
+    }
     CHECK(up.rgb[0] == 0 && up.rgb[1] == 0 && up.rgb[2] == 0);                 // top-left: src (0,0)
     CHECK(up.rgb[(0 * 4 + 3) * 3] == 200 && up.rgb[(0 * 4 + 3) * 3 + 1] == 0); // top-right: src (1,0)
     CHECK(up.rgb[(3 * 4 + 3) * 3] == 200 && up.rgb[(3 * 4 + 3) * 3 + 1] == 200);
@@ -507,6 +518,10 @@ void test_camera_modes() {
             service.want_video(2);
             std::this_thread::sleep_for(20ms);
         }
+        // Exactly at the target at the end, however the last sleep fell.
+        z = target;
+        a.position_ned = {0.0, 0.0, z};
+        service.publish_poses({a, b});
     };
     {
         std::lock_guard<std::mutex> lock(mutex);

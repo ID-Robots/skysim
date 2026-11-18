@@ -220,9 +220,21 @@ default `DetectorParameters`, the observer1-sim dictionary as this repo's proofs
 
 The 1920x1080 pictures (JPEG copies of the lossless pictures the detector read) and the whole run
 are in [docs/dock_marker/](dock_marker/) (`probe_1920x1080_*.jpg`,
-[probe-opencv-4.6.0.md](dock_marker/probe-opencv-4.6.0.md)); `aruco_check.py` writes them again.
+[probe-opencv-4.6.0.md](dock_marker/probe-opencv-4.6.0.md)). To make them again:
 
-So 1920x1080 is enough at 30 m, with the marker anywhere in the picture: nothing about the marker
+```bash
+python3 tools/render_probe/aruco_check.py --probe build/render_probe --tiles build/bench_city/tiles \
+    --out /tmp/probe --report docs/dock_marker/probe-opencv-4.6.0.md
+# the committed JPEGs are those PNGs at quality 90:
+python3 -c "import cv2; [cv2.imwrite(f'docs/dock_marker/probe_1920x1080_{h}m.jpg', \
+    cv2.imread(f'/tmp/probe/dock_1920x1080_hfov81_{h}m.png'), [cv2.IMWRITE_JPEG_QUALITY, 90]) for h in (30, 20, 10, 3)]"
+```
+
+(The bench city is `python3 tools/cooker/pretile.py build/bench_city_obj --extent 1000` cooked with
+`tile_cooker`.)
+
+So 1920x1080 is enough at 30 m, with the marker under the camera or 10 m to the side (the two
+placements tested): nothing about the marker
 needed changing in the renderer (it is drawn from its own mip-mapped texture, box-filtered per
 pixel, untouched by the ground cache; the same table comes out with the cache off). 640x360
 decodes a centred, lossless picture at 1.5 px a cell and nothing else; what a consumer gets is an

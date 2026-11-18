@@ -91,7 +91,16 @@ class GroundCache {
     // `optional_tiles` tiles nobody strictly needs yet. Returns its number.
     uint32_t begin_frame(int optional_tiles = kOptionalTilesPerFrame) {
         optional_budget_.store(optional_tiles, std::memory_order_relaxed);
+        sealed_seq_.store(kUnsealed, std::memory_order_relaxed);
         return frame_.fetch_add(1, std::memory_order_relaxed) + 1;
+    }
+    // From here to the next begin_frame, a pixel blends in a lighter level only from a tile that is
+    // built now; nothing builds one for that, and a tile built later (as some pixel's heavier level)
+    // does not count. So the picture does not depend on the order the bands run in. A frame calls
+    // it after prepare(), before drawing.
+    void seal() {
+        optional_budget_.store(0, std::memory_order_relaxed);
+        sealed_seq_.store(build_seq_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     }
     // Drops least recently used tiles until the cache is within its budget again. Call between
     // frames, never while a Sampler of this cache is in use.
@@ -108,7 +117,9 @@ class GroundCache {
     // and a camera that climbs or descends — a new level every halving of its height — drew a
     // cold frame on little more than one core. Keys may repeat. Call between begin_frame() and
     // the drawing.
-    void prepare(std::vector<uint64_t> &required, std::vector<uint64_t> &optional, core::ThreadPool *pool);
+    // caller_runs = false keeps the calling thread out of the building (ThreadPool::parallel_for).
+    void prepare(std::vector<uint64_t> &required, std::vector<uint64_t> &optional, core::ThreadPool *pool,
+                 bool caller_runs = true);
 
     struct Stats {
         size_t tiles{0};
@@ -137,12 +148,17 @@ class GroundCache {
     // Builds a tile this thread claimed (state 1) and marks it ready; should building throw, it
     // goes back to empty, its waiters are woken, and the exception goes on.
     void fill(Tile &tile, int level, int64_t ti, int64_t tj);
+    // Whether an optional lookup may use `tile` (see seal()).
+    bool optional_ok(const Tile &tile) const;
+    static constexpr uint64_t kUnsealed = ~uint64_t{0};
 
     std::shared_ptr<const RasterScene> scene_;
     size_t budget_bytes_;
     std::array<Shard, kShards> shards_;
     std::atomic<uint32_t> frame_{0};
     std::atomic<int> optional_budget_{0};
+    std::atomic<uint64_t> build_seq_{0};          // tiles built since start: each tile's stamp
+    std::atomic<uint64_t> sealed_seq_{kUnsealed}; // build_seq_ at seal(); kUnsealed: not sealed
     std::atomic<size_t> tile_count_{0};
     std::atomic<uint64_t> built_{0};
     std::atomic<uint64_t> evicted_{0};

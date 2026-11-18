@@ -253,16 +253,83 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
         }
     };
 
-    // The ground tiles this frame reads, gathered from every 8th pixel each way and built across
-    // the pool before any band starts (GroundCache::prepare); a tile only a pixel between the
-    // samples needs is built by its band, as before.
-    if (fast_ground) {
-        constexpr int kStride = 8;
-        std::vector<uint64_t> required;
-        std::vector<uint64_t> optional;
-        for (int y = kStride / 2; y < cfg_.height; y += kStride) {
+    // Eight rows a band, at most 256 bands: enough to balance a small pilot frame across the
+    // workers, few enough that each band's scan of the screen-triangle list stays cheap.
+    const int bands = pool != nullptr ? std::clamp(cfg_.height / 8, 1, 256) : 1;
+    const auto make_band = [&](int b, Band &band) {
+        band.y0 = cfg_.height * b / bands;
+        band.y1 = cfg_.height * (b + 1) / bands;
+        if (band.y0 >= band.y1) {
+            return false;
+        }
+        const size_t n = static_cast<size_t>(cfg_.width) * static_cast<size_t>(band.y1 - band.y0);
+        band.depth.assign(n, std::numeric_limits<float>::infinity());
+        band.ids.assign(n, kSurfaceGround);
+        fill(tris, cfg_.width, band);
+        return true;
+    };
+    // Runs fn(b) for every band, taken as threads come free (on the pool as caller_runs says).
+    const auto each_band = [&](const auto &fn) {
+        if (pool == nullptr) {
+            for (int b = 0; b < bands; ++b) {
+                fn(b);
+            }
+            return;
+        }
+        const size_t workers = pool->size() + (caller_runs ? 1 : 0);
+        std::atomic<int> next_band{0};
+        pool->parallel_for(
+            workers,
+            [&](size_t begin, size_t end) {
+                for (size_t w = begin; w < end; ++w) {
+                    for (int b = next_band.fetch_add(1, std::memory_order_relaxed); b < bands;
+                         b = next_band.fetch_add(1, std::memory_order_relaxed)) {
+                        fn(b);
+                    }
+                }
+            },
+            caller_runs);
+    };
+
+    if (!fast_ground) {
+        // Fill and shade each band in one go, its buffers its own.
+        each_band([&](int b) {
+            Band band;
+            if (make_band(b, band)) {
+                std::optional<GroundCache::Sampler> sampler;
+                if (ground_cache != nullptr) {
+                    sampler.emplace(*ground_cache);
+                }
+                shade_band(band, sampler ? &*sampler : nullptr);
+            }
+        });
+        return image;
+    }
+
+    // With a ground cache, three steps. Every band is filled first; then the ground tiles the frame
+    // reads are gathered from every 8th pixel each way — those no geometry covers, so a roof
+    // filling the picture costs no ground — and built across the pool at once
+    // (GroundCache::prepare: left to the bands, the ones that reach a tile another is building
+    // wait for it); then the bands are shaded. A tile only a pixel between the samples needs is
+    // built by its band.
+    std::vector<Band> filled(static_cast<size_t>(bands));
+    std::vector<std::vector<uint64_t>> required(static_cast<size_t>(bands));
+    std::vector<std::vector<uint64_t>> optional(static_cast<size_t>(bands));
+    constexpr int kStride = 8;
+    each_band([&](int b) {
+        Band &band = filled[static_cast<size_t>(b)];
+        if (!make_band(b, band)) {
+            return;
+        }
+        for (int y = band.y0; y < band.y1; ++y) {
+            if (y % kStride != kStride / 2) {
+                continue;
+            }
             const double cy = ((y + 0.5) / cfg_.height * 2.0 - 1.0) * camera.tan_half_y();
             for (int x = kStride / 2; x < cfg_.width; x += kStride) {
+                if (band.ids[static_cast<size_t>(y - band.y0) * cfg_.width + static_cast<size_t>(x)] >= 0) {
+                    continue; // geometry in front: no ground read here
+                }
                 const double cx = (x + 0.5) * step_x - tan_x;
                 const double rx = fwd[0] + down[0] * cy + right[0] * cx;
                 const double ry = fwd[1] + down[1] * cy + right[1] * cx;
@@ -277,50 +344,30 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
                     continue;
                 }
                 GroundCache::tiles_for(eye[0] + rx * along, eye[1] + ry * along,
-                                       std::min(footprint_k * inv * std::sqrt(inv), 1e3), required, optional);
+                                       std::min(footprint_k * inv * std::sqrt(inv), 1e3),
+                                       required[static_cast<size_t>(b)], optional[static_cast<size_t>(b)]);
             }
         }
-        ground_cache->prepare(required, optional, pool);
+    });
+    std::vector<uint64_t> all_required;
+    std::vector<uint64_t> all_optional;
+    for (int b = 0; b < bands; ++b) {
+        all_required.insert(all_required.end(), required[static_cast<size_t>(b)].begin(),
+                            required[static_cast<size_t>(b)].end());
+        all_optional.insert(all_optional.end(), optional[static_cast<size_t>(b)].begin(),
+                            optional[static_cast<size_t>(b)].end());
     }
-
-    // Eight rows a band, at most 256 bands: enough to balance a small pilot frame across the
-    // workers, few enough that each band's scan of the screen-triangle list stays cheap.
-    const int bands = pool != nullptr ? std::clamp(cfg_.height / 8, 1, 256) : 1;
-    const auto do_band = [&](int b) {
-        Band band;
-        band.y0 = cfg_.height * b / bands;
-        band.y1 = cfg_.height * (b + 1) / bands;
-        if (band.y0 >= band.y1) {
-            return;
+    ground_cache->prepare(all_required, all_optional, pool, caller_runs);
+    // From here the lighter levels a pixel may blend in are the ones built now: shading builds
+    // only tiles a pixel needs, and those do not change which pixels blend (GroundCache::seal).
+    ground_cache->seal();
+    each_band([&](int b) {
+        Band &band = filled[static_cast<size_t>(b)];
+        if (band.y0 < band.y1) {
+            GroundCache::Sampler sampler(*ground_cache);
+            shade_band(band, &sampler);
         }
-        const size_t n = static_cast<size_t>(cfg_.width) * static_cast<size_t>(band.y1 - band.y0);
-        band.depth.assign(n, std::numeric_limits<float>::infinity());
-        band.ids.assign(n, kSurfaceGround);
-        fill(tris, cfg_.width, band);
-        std::optional<GroundCache::Sampler> sampler;
-        if (ground_cache != nullptr) {
-            sampler.emplace(*ground_cache);
-        }
-        shade_band(band, sampler ? &*sampler : nullptr);
-    };
-
-    if (pool != nullptr) {
-        const size_t workers = pool->size() + (caller_runs ? 1 : 0);
-        std::atomic<int> next_band{0};
-        pool->parallel_for(
-            workers,
-            [&](size_t begin, size_t end) {
-                for (size_t w = begin; w < end; ++w) {
-                    for (int b = next_band.fetch_add(1, std::memory_order_relaxed); b < bands;
-                         b = next_band.fetch_add(1, std::memory_order_relaxed)) {
-                        do_band(b);
-                    }
-                }
-            },
-            caller_runs);
-    } else {
-        do_band(0);
-    }
+    });
     return image;
 }
 

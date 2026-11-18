@@ -69,6 +69,7 @@ class FakeSitl(threading.Thread):
         self.lock = threading.Lock()
         self.done = threading.Event()
         self.integral = 0.0
+        self.received = 0.0  # when the last state reply arrived (monotonic)
 
     def pwm(self) -> int:
         if self.state is None or self.target <= 0.0:
@@ -100,6 +101,7 @@ class FakeSitl(threading.Thread):
                 continue
             with self.lock:
                 self.state = state
+                self.received = time.monotonic()
 
     def height(self) -> float:
         with self.lock:
@@ -112,7 +114,8 @@ class FakeSitl(threading.Thread):
         while time.time() < deadline:
             with self.lock:
                 s = self.state
-            if s is not None and abs(-s["position"][2] - target) < 0.05 and abs(s["velocity"][2]) < 0.05:
+                fresh = time.monotonic() - self.received < 0.2  # replies still coming
+            if s is not None and fresh and abs(-s["position"][2] - target) < 0.05 and abs(s["velocity"][2]) < 0.05:
                 steady = steady or time.time()
                 if time.time() - steady > 1.0:
                     return True
@@ -129,6 +132,8 @@ class Reader(threading.Thread):
         super().__init__(daemon=True)
         os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
         self.cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"OpenCV could not open {url}")
         self.lock = threading.Lock()
         self.frames: list = []  # (time, frame) while collecting
         self.collecting = False
@@ -157,7 +162,8 @@ class Reader(threading.Thread):
         time.sleep(seconds)
         with self.lock:
             self.collecting = False
-            return list(self.frames)
+            batch, self.frames = self.frames, []  # handed over, not kept: a 1080p batch is ~0.5 GB
+            return batch
 
 
 def main() -> int:
@@ -190,6 +196,7 @@ def main() -> int:
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     sitl = reader = None
     rows = []
+    failures: list[str] = []
     try:
         deadline = time.time() + 20
         while True:
@@ -210,25 +217,37 @@ def main() -> int:
         reader = Reader(f"rtsp://127.0.0.1:{RTSP_PORT}/instances/{INSTANCE}/main.264")
         reader.start()
         time.sleep(2.0)
+        if not reader.sizes:
+            raise RuntimeError("OpenCV decoded no frame from the stream")
+        time.sleep(2.0)
         for h in [float(x) for x in args.heights.split(",") if x]:
             held = sitl.hold(h)
+            if not held:
+                # Not at the height asked for: nothing measured is labelled with it.
+                print(f"stream_check: did not hold {h:g} m (at {sitl.height():.1f} m); not measured", flush=True)
+                failures.append(f"hold {h:g} m")
+                continue
             time.sleep(1.0)  # past the switch and its IDR
             cam = api(f"/instances/{INSTANCE}/camera")
             frames = reader.collect(args.seconds)
+            if not frames:
+                failures.append(f"no decoded frames at {h:g} m")
             found = 0
             for _, frame in frames:
                 ids = detect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
                 found += 1 if ids is not None and 228 in ids.ravel().tolist() else 0
             size = f"{frames[-1][1].shape[1]}x{frames[-1][1].shape[0]}" if frames else "-"
+            count = len(frames)
             if args.save and frames:
                 os.makedirs(args.save, exist_ok=True)
                 name = f"{args.label or 'stream'}_{h:g}m" + (f"_east{args.offset:g}m" if args.offset else "")
                 cv2.imwrite(os.path.join(args.save, name + ".png"), frames[-1][1])
+            frames.clear()  # released before the next height's batch arrives
             row = {"label": args.label, "height_m": h, "offset_m": args.offset, "held": held,
                    "mode": cam["now"]["mode"],
                    "camera": f"{cam['now']['draw_width']}x{cam['now']['draw_height']}@{cam['now']['fps']:g}",
-                   "decoded_size": size, "frames": len(frames),
-                   "fps": round(len(frames) / args.seconds, 1), "detected_228": found}
+                   "decoded_size": size, "frames": count,
+                   "fps": round(count / args.seconds, 1), "detected_228": found}
             rows.append(row)
             print(json.dumps(row), flush=True)
     finally:
@@ -251,7 +270,10 @@ def main() -> int:
     if args.json:
         with open(args.json, "w") as f:
             json.dump({"label": args.label, "args": args.args, "opencv": cv2.__version__, "sizes": sizes,
-                       "rows": rows}, f, indent=2)
+                       "rows": rows, "failures": failures}, f, indent=2)
+    if failures:
+        print(f"stream_check: not measured as asked: {', '.join(failures)}")
+        return 1
     return 0
 
 
