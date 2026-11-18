@@ -464,6 +464,21 @@ const VehicleInfo *find_instance(const std::vector<VehicleInfo> &vehicles, const
     return nullptr;
 }
 
+// The vehicle with the id named in a route, or null (the whole number, as find_instance reads it).
+const VehicleInfo *find_vehicle(const std::vector<VehicleInfo> &vehicles, const std::string &key) {
+    uint64_t number = 0;
+    const auto parsed = std::from_chars(key.data(), key.data() + key.size(), number);
+    if (parsed.ec != std::errc() || parsed.ptr != key.data() + key.size() || number > 0xFFFFFFFFULL) {
+        return nullptr;
+    }
+    for (const auto &v : vehicles) {
+        if (static_cast<uint64_t>(v.id) == number) {
+            return &v;
+        }
+    }
+    return nullptr;
+}
+
 // A POST /camera/encoder body: a JSON object whose bitrate_kbps, fps and keyframe_interval_s,
 // when present, are numbers. Other members are ignored, so a client can send back what GET
 // gave it with one field changed. An empty body changes nothing.
@@ -508,6 +523,152 @@ std::string encoder_json(const EncoderState &e) {
         ",\"width\":" + std::to_string(e.width) + ",\"height\":" + std::to_string(e.height) + ",\"max_fps\":";
     radio::json::append_number(out, e.max_fps);
     out += ",\"clients\":" + std::to_string(e.clients) + "}";
+    return out;
+}
+
+// --- per-vehicle pilot camera (TASK-2661) ------------------------------------------------------
+
+// One camera mode's fields out of a JSON object: width, height ("size":"WxH" for both), fps,
+// bitrate_kbps; each optional. Sizes and the bitrate must be whole numbers. Other members are
+// ignored, so what GET gave can be sent back with one field changed.
+bool parse_mode_fields(const radio::json::Value &obj, render::CameraModePatch &out, std::string &error) {
+    const auto whole = [&error](const radio::json::Value &v, const char *name, std::optional<int> &field) {
+        if (!v.is_number() || !std::isfinite(v.number) || v.number != std::floor(v.number) ||
+            std::fabs(v.number) > 1e6) {
+            error = std::string(name) + " must be a whole number";
+            return false;
+        }
+        field = static_cast<int>(v.number);
+        return true;
+    };
+    if (const radio::json::Value *size = obj.find("size")) {
+        int w = 0;
+        int h = 0;
+        char tail = 0;
+        if (!size->is_string() || std::sscanf(size->text.c_str(), "%dx%d%c", &w, &h, &tail) != 2) {
+            error = "size must be a string WxH, e.g. \"1920x1080\"";
+            return false;
+        }
+        out.width = w;
+        out.height = h;
+    }
+    if (const radio::json::Value *v = obj.find("width"); v != nullptr && !whole(*v, "width", out.width)) {
+        return false;
+    }
+    if (const radio::json::Value *v = obj.find("height"); v != nullptr && !whole(*v, "height", out.height)) {
+        return false;
+    }
+    if (const radio::json::Value *v = obj.find("bitrate_kbps");
+        v != nullptr && !whole(*v, "bitrate_kbps", out.bitrate_kbps)) {
+        return false;
+    }
+    if (const radio::json::Value *v = obj.find("fps")) {
+        if (!v->is_number() || !std::isfinite(v->number)) {
+            error = "fps must be a number";
+            return false;
+        }
+        out.fps = v->number;
+    }
+    return render::check_mode_patch(out, &error);
+}
+
+// A camera settings body (POST .../camera, POST /vehicles "camera"): the vehicle's normal mode's
+// fields at the top level or in "normal", and "landing" as such an object (the vehicle's own
+// landing camera) or a boolean (turn the landing camera on or off for it).
+bool parse_camera_settings(const radio::json::Value &obj, render::CameraSettingsPatch &patch,
+                           std::string &error) {
+    if (!obj.is_object()) {
+        error = "camera settings must be a JSON object";
+        return false;
+    }
+    if (!parse_mode_fields(obj, patch.normal, error)) {
+        return false;
+    }
+    if (const radio::json::Value *normal = obj.find("normal")) {
+        if (!normal->is_object()) {
+            error = "normal must be an object";
+            return false;
+        }
+        if (!parse_mode_fields(*normal, patch.normal, error)) {
+            error = "normal: " + error;
+            return false;
+        }
+    }
+    if (const radio::json::Value *landing = obj.find("landing")) {
+        if (landing->type == radio::json::Value::Type::kBool) {
+            patch.landing_enabled = landing->boolean;
+        } else if (landing->is_object()) {
+            if (!parse_mode_fields(*landing, patch.landing, error)) {
+                error = "landing: " + error;
+                return false;
+            }
+            if (const radio::json::Value *enabled = landing->find("enabled")) {
+                if (enabled->type != radio::json::Value::Type::kBool) {
+                    error = "landing.enabled must be true or false";
+                    return false;
+                }
+                patch.landing_enabled = enabled->boolean;
+            }
+        } else {
+            error = "landing must be an object or true/false";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool parse_camera_body(const std::string &body, render::CameraSettingsPatch &patch, std::string &error) {
+    if (body.find_first_not_of(" \t\r\n") == std::string::npos) {
+        return true; // changes nothing
+    }
+    std::string parse_error;
+    const auto doc = radio::json::parse(body, parse_error);
+    if (!doc) {
+        error = "invalid JSON: " + parse_error;
+        return false;
+    }
+    return parse_camera_settings(*doc, patch, error);
+}
+
+void append_mode(std::string &out, const render::CameraMode &m) {
+    out += "\"width\":" + std::to_string(m.width) + ",\"height\":" + std::to_string(m.height) + ",\"fps\":";
+    radio::json::append_number(out, m.fps);
+    out += ",\"bitrate_kbps\":" + std::to_string(m.bitrate_kbps);
+}
+
+std::string camera_json(const VehicleInfo &v, const render::VehicleCameraState &c, double hfov_deg) {
+    std::string out = "{\"instance\":" + std::to_string(v.instance) + ",\"vehicle\":" + std::to_string(v.id) +
+                      ",\"hfov_deg\":";
+    radio::json::append_number(out, hfov_deg);
+    out += ",\"now\":{\"mode\":";
+    out += c.landing_active ? "\"landing\"," : "\"normal\",";
+    append_mode(out, c.now);
+    out += "},\"normal\":{";
+    append_mode(out, c.normal);
+    out += ",\"own\":";
+    out += c.normal_own ? "true" : "false";
+    out += "},\"landing\":{\"available\":";
+    out += c.landing_available ? "true" : "false";
+    out += ",\"enabled\":";
+    out += c.landing_enabled ? "true" : "false";
+    out += ",\"own\":";
+    out += c.landing_own ? "true" : "false";
+    out += ",\"active\":";
+    out += c.landing_active ? "true" : "false";
+    out += ',';
+    append_mode(out, c.landing);
+    out += ",\"radius_m\":";
+    radio::json::append_number(out, c.landing_radius_m);
+    out += ",\"height_m\":";
+    radio::json::append_number(out, c.landing_height_m);
+    out += "},\"watched\":";
+    out += c.watched ? "true" : "false";
+    out += ",\"fps\":";
+    radio::json::append_number(out, c.fps);
+    out += ",\"render_ms\":";
+    radio::json::append_number(out, c.render_ms);
+    out += ",\"frames_drawn\":" + std::to_string(c.frames_drawn) +
+           ",\"frames_reused\":" + std::to_string(c.frames_reused) + "}";
     return out;
 }
 
@@ -782,6 +943,25 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
         cmd.request.launch_process = parse_launch_process(req.body);
         cmd.request.instance = parse_instance(req.body);
         cmd.request.battery = parse_battery(req.body);
+        // The vehicle's own camera (TASK-2661), checked here so a bad one spawns nothing.
+        if (req.body.find("\"camera\"") != std::string::npos) {
+            std::string error;
+            std::string parse_error;
+            const auto doc = radio::json::parse(req.body, parse_error);
+            const radio::json::Value *camera = doc ? doc->find("camera") : nullptr;
+            if (!doc) {
+                reply_error(res, 400, "invalid JSON: " + parse_error);
+                return;
+            }
+            if (camera != nullptr && !camera->is_null()) {
+                render::CameraSettingsPatch patch;
+                if (!parse_camera_settings(*camera, patch, error)) {
+                    reply_error(res, 400, "camera: " + error);
+                    return;
+                }
+                cmd.camera = patch;
+            }
+        }
         auto future = cmd.done.get_future();
         queue.push(Command{std::move(cmd)});
         if (future.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
@@ -1153,7 +1333,53 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
                                "application/json");
            });
 
-    // The pilot camera's pinhole (TASK-2562): fx, fy, cx, cy and zero distortion, as OpenCV takes
+    // A vehicle's pilot camera (TASK-2661): its picture size and frame rate, its landing camera and
+    // what it draws now. POST changes the fields it names for this vehicle (400 for one out of
+    // bounds, and then nothing changes); DELETE puts the vehicle back on the fleet's settings. By
+    // instance like the camera's other settings, and by vehicle id like camera.jpg. The settings
+    // belong to the vehicle: the next one at the instance starts from the fleet's.
+    const auto camera_route = [snapshots](const httplib::Request &req, httplib::Response &res,
+                                          bool by_vehicle, int method) {
+        if (!snapshots.camera_settings || !snapshots.vehicles) {
+            reply_error(res, 404, "camera disabled (--camera-fps)");
+            return;
+        }
+        render::CameraSettingsPatch patch;
+        std::string error;
+        if (method == 1 && !parse_camera_body(req.body, patch, error)) {
+            reply_error(res, 400, error);
+            return;
+        }
+        patch.reset = method == 2;
+        const std::vector<VehicleInfo> vehicles = snapshots.vehicles();
+        const VehicleInfo *v = by_vehicle ? find_vehicle(vehicles, req.matches[1].str())
+                                          : find_instance(vehicles, req.matches[1].str());
+        if (v == nullptr) {
+            reply_error(res, 404, by_vehicle ? "no such vehicle" : "no such instance");
+            return;
+        }
+        const std::optional<render::VehicleCameraState> state =
+            snapshots.camera_settings(*v, patch.empty() ? nullptr : &patch, &error);
+        if (!state) {
+            reply_error(res, error.empty() ? 404 : 400, error.empty() ? "no camera for this vehicle" : error);
+            return;
+        }
+        res.set_content(camera_json(*v, *state, snapshots.camera_intrinsics.hfov_deg), "application/json");
+    };
+    for (const bool by_vehicle : {false, true}) {
+        const std::string path = by_vehicle ? R"(/vehicles/(\d+)/camera)" : R"(/instances/(\d+)/camera)";
+        s.Get(path, [camera_route, by_vehicle](const httplib::Request &req, httplib::Response &res) {
+            camera_route(req, res, by_vehicle, 0);
+        });
+        s.Post(path, [camera_route, by_vehicle](const httplib::Request &req, httplib::Response &res) {
+            camera_route(req, res, by_vehicle, 1);
+        });
+        s.Delete(path, [camera_route, by_vehicle](const httplib::Request &req, httplib::Response &res) {
+            camera_route(req, res, by_vehicle, 2);
+        });
+    }
+
+    // The pilot camera's pinhole (TASK-2562), fx, fy, cx, cy and zero distortion, as OpenCV takes
     // them, plus the stream's picture and the vehicle's gimbal now. With w, h and hfov (each
     // optional, the still defaults otherwise) it is a survey still's instead.
     s.Get(R"(/instances/(\d+)/camera/intrinsics)",
@@ -1197,15 +1423,39 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
                   reply_error(res, 404, "camera disabled (--camera-fps)");
                   return;
               }
-              std::string out = intrinsics_json("pilot", c.width, c.height, c.hfov_deg);
+              // The picture the vehicle's camera draws now (TASK-2661): its own size and rate, or the
+              // landing camera's while it lands. The lens is the fleet's.
+              int width = c.width;
+              int height = c.height;
+              double fps = c.fps;
+              const std::optional<render::VehicleCameraState> cam =
+                  snapshots.camera_settings ? snapshots.camera_settings(*v, nullptr, nullptr) : std::nullopt;
+              if (cam) {
+                  width = cam->now.width;
+                  height = cam->now.height;
+                  fps = cam->now.fps;
+              }
+              std::string out = intrinsics_json("pilot", width, height, c.hfov_deg);
               out += ",\"fps\":";
-              append_value(out, c.fps);
+              append_value(out, fps);
               if (c.stream_width > 0) {
-                  out += ",\"stream\":{\"width\":" + std::to_string(c.stream_width) +
-                         ",\"height\":" + std::to_string(c.stream_height) + ",\"path\":\"/instances/" +
+                  out += ",\"stream\":{\"width\":" + std::to_string(width & ~1) +
+                         ",\"height\":" + std::to_string(height & ~1) + ",\"path\":\"/instances/" +
                          std::to_string(v->instance) + "/main.264\"}";
               } else {
                   out += ",\"stream\":null";
+              }
+              // The landing camera's pinhole as well, when the vehicle has one, so a consumer that
+              // loads its calibration once has the one a landing is drawn through too.
+              if (cam && cam->landing_available) {
+                  out += ",\"landing\":" + intrinsics_json("pilot-landing", cam->landing.width,
+                                                           cam->landing.height, c.hfov_deg);
+                  out += ",\"fps\":";
+                  append_value(out, cam->landing.fps);
+                  out += ",\"active\":";
+                  out += cam->landing_active ? "true}" : "false}";
+              } else {
+                  out += ",\"landing\":null";
               }
               // Where the camera looks now: the vehicle's gimbal as its last servo frame drove it, or the
               // fixed mount on a vehicle that drives none.
@@ -1302,16 +1552,18 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
     s.Get("/metrics", [snapshots](const httplib::Request &, httplib::Response &res) {
         const MetricsInfo m = snapshots.metrics();
         // The pilot camera's achieved rate and per-frame cost, or null when it is off.
-        char camera[384] = "null";
+        char camera[512] = "null";
         if (m.camera.enabled) {
             const CameraMetrics &c = m.camera;
             std::snprintf(camera, sizeof(camera),
                           "{\"target_fps\":%.1f,\"fps\":%.2f,\"watched\":%zu,\"render_ms\":%.2f,"
                           "\"render_ms_max\":%.2f,\"encode_ms\":%.2f,\"threads\":%d,\"frames_drawn\":%llu,"
-                          "\"frames_reused\":%llu}",
-                          c.target_fps, c.fps, c.watched, c.render_ms, c.render_ms_max, c.encode_ms, c.threads,
-                          static_cast<unsigned long long>(c.frames_drawn),
-                          static_cast<unsigned long long>(c.frames_reused));
+                          "\"frames_reused\":%llu,\"landing\":%zu,\"ground_cache_mb\":%.1f,"
+                          "\"ground_cache_budget_mb\":%.0f,\"ground_tiles_built\":%llu}",
+                          c.target_fps, c.fps, c.watched, c.render_ms, c.render_ms_max, c.encode_ms,
+                          c.threads, static_cast<unsigned long long>(c.frames_drawn),
+                          static_cast<unsigned long long>(c.frames_reused), c.landing, c.ground_cache_mb,
+                          c.ground_cache_budget_mb, static_cast<unsigned long long>(c.ground_tiles_built));
         }
         // The H.264/RTSP streams, or null when RTSP video is off.
         char video[384] = "null";

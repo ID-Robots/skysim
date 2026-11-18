@@ -450,7 +450,12 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/dock_visibility_smoke.py $<TARGET_FILE:skysim>
                      --frames ${CMAKE_BINARY_DIR}/dock_visibility_frames ${_dock_smoke_args})
     set_tests_properties(dock_visibility_smoke PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
-    set_tests_properties(app_smoke app_churn survey_fixture rtsp_smoke PROPERTIES
+    # Per-vehicle camera modes and the landing camera (TASK-2661): spawn with a camera, change and
+    # reset it over the API, and a vehicle flown up from its dock switches its RTSP picture size in
+    # the landing zone and back above it, on one session.
+    add_test(NAME camera_modes_smoke
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/camera_modes_smoke.py $<TARGET_FILE:skysim>)
+    set_tests_properties(app_smoke app_churn survey_fixture rtsp_smoke camera_modes_smoke PROPERTIES
         LABELS "happy-path"
         TIMEOUT 180
         RUN_SERIAL TRUE

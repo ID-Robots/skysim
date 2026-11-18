@@ -63,6 +63,16 @@ if [[ -n "${SKYSIM_CAMERA_FPS:-}" ]]; then
     add_if_set SKYSIM_CAMERA_FOV --camera-fov
     add_if_set SKYSIM_CAMERA_PITCH --camera-pitch
     add_if_set SKYSIM_CAMERA_RANGE --camera-range
+    # The landing camera (TASK-2661): what a vehicle draws while it is in the air near its dock,
+    # e.g. SKYSIM_CAMERA_LANDING_SIZE=1920x1080 SKYSIM_CAMERA_LANDING_FPS=15
+    # SKYSIM_CAMERA_LANDING_BITRATE=4000; the radius and height of that zone around the dock;
+    # SKYSIM_CAMERA_CACHE_MB the lit-ground cache (default 512, 0 = off).
+    add_if_set SKYSIM_CAMERA_LANDING_SIZE --camera-landing-size
+    add_if_set SKYSIM_CAMERA_LANDING_FPS --camera-landing-fps
+    add_if_set SKYSIM_CAMERA_LANDING_BITRATE --camera-landing-bitrate
+    add_if_set SKYSIM_CAMERA_LANDING_RADIUS --camera-landing-radius
+    add_if_set SKYSIM_CAMERA_LANDING_HEIGHT --camera-landing-height
+    add_if_set SKYSIM_CAMERA_CACHE_MB --camera-cache-mb
     # The camera as H.264 over RTSP (TASK-2561), rtsp://<host>:8554/instances/<n>/main.264:
     # SKYSIM_RTSP_PORT (default 8554; 0 = off), SKYSIM_RTSP_BIND (default: the API bind),
     # SKYSIM_VIDEO_THREADS (encoder threads; default one per four CPUs). SKYSIM_CAMERA_MJPEG=0

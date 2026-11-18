@@ -50,7 +50,7 @@ VideoService::VideoService(const Config &cfg, Hooks hooks) : cfg_(cfg), hooks_(s
     };
     // DESCRIBE's parameter sets for the default rate, made here rather than on the RTSP thread
     // when the first receiver asks.
-    parameter_sets(cfg_.defaults.fps);
+    parameter_sets(cfg_.width, cfg_.height, cfg_.defaults.fps);
     rtsp_ = std::make_unique<RtspServer>(cfg_.rtsp, std::move(rh));
     for (int i = 0; i < cfg_.threads; ++i) {
         workers_.emplace_back([this] { worker(); });
@@ -86,19 +86,50 @@ VideoService::Stream &VideoService::stream_for(int instance) {
     if (inserted) {
         it->second.instance = instance;
         it->second.settings = cfg_.defaults;
+        // Defaults below the camera's rate are a cap like a POSTed one; at it, the stream follows
+        // the camera wherever its mode takes it.
+        it->second.fps_set = cfg_.defaults.fps < cfg_.max_fps - 1e-9;
     }
     return it->second;
 }
 
 void VideoService::set_settings(Stream &s, const EncoderSettings &next) {
     if (std::fabs(next.fps - s.settings.fps) > 1e-9) {
-        s.rebuild = true;
-        s.have_due = false;
-    }
-    if (next.bitrate_kbps != s.settings.bitrate_kbps) {
-        s.rebitrate = true;
+        s.have_due = false; // the worker sees the new rate and builds a new encoder for it
     }
     s.settings = next;
+}
+
+EncoderSettings VideoService::effective(const Stream &s) const {
+    EncoderSettings e = s.settings;
+    const double cam = std::max(camera_fps(s), kMinFps);
+    e.fps = s.fps_set ? std::clamp(s.settings.fps, kMinFps, cam) : cam;
+    if (s.camera_bitrate_kbps > 0) {
+        e.bitrate_kbps = std::clamp(s.camera_bitrate_kbps, kMinBitrateKbps, kMaxBitrateKbps);
+    }
+    return e;
+}
+
+void VideoService::refresh_camera(int instance, uint32_t vehicle_id) {
+    if (vehicle_id == 0 || !hooks_.camera) {
+        return;
+    }
+    const render::CameraMode mode = hooks_.camera(vehicle_id);
+    if (mode.width <= 0 || mode.height <= 0 || !(mode.fps > 0.0)) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    Stream &s = stream_for(instance);
+    if (s.settings_owner != 0 && s.settings_owner != vehicle_id) {
+        return; // another vehicle holds the instance now; its own pictures will say
+    }
+    if (std::fabs(mode.fps - s.camera_fps) > 1e-9) {
+        s.have_due = false;
+    }
+    s.camera_width = mode.width;
+    s.camera_height = mode.height;
+    s.camera_fps = mode.fps;
+    s.camera_bitrate_kbps = mode.bitrate_kbps;
 }
 
 void VideoService::adopt(Stream &s, uint32_t vehicle_id) {
@@ -108,6 +139,11 @@ void VideoService::adopt(Stream &s, uint32_t vehicle_id) {
     // A new vehicle at this instance: the last one's settings were for it, not this one.
     if (s.settings_owner != 0) {
         set_settings(s, cfg_.defaults);
+        s.fps_set = cfg_.defaults.fps < cfg_.max_fps - 1e-9;
+        s.camera_width = 0; // the new vehicle's camera says on its first picture or refresh
+        s.camera_height = 0;
+        s.camera_fps = 0.0;
+        s.camera_bitrate_kbps = 0;
     }
     s.settings_owner = vehicle_id;
 }
@@ -135,29 +171,40 @@ void VideoService::bind_vehicle(Stream &s, uint32_t vehicle_id) {
 
 VideoService::StreamState VideoService::state_of(const Stream &s) const {
     StreamState st;
-    st.settings = s.settings;
-    st.width = cfg_.width & ~1;
-    st.height = cfg_.height & ~1;
-    st.max_fps = cfg_.max_fps;
+    st.settings = effective(s);
+    st.width = camera_width(s) & ~1;
+    st.height = camera_height(s) & ~1;
+    st.max_fps = camera_fps(s);
     st.clients = s.clients;
     return st;
 }
 
 VideoService::StreamState VideoService::encoder(int instance, uint32_t vehicle_id,
                                                 const EncoderPatch *patch) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        adopt(stream_for(instance), vehicle_id);
+    }
+    refresh_camera(instance, vehicle_id);
     StreamState st;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         Stream &s = stream_for(instance);
         adopt(s, vehicle_id);
         if (patch != nullptr) {
-            set_settings(s, apply_patch(s.settings, *patch, cfg_.max_fps));
+            // Clamped against the camera's rate now, like every POST: a cap, which a faster mode
+            // later (the landing camera's, say) does not lift.
+            const EncoderSettings next = apply_patch(s.settings, *patch, camera_fps(s));
+            if (patch->fps && std::isfinite(*patch->fps)) {
+                s.fps_set = true;
+            }
+            set_settings(s, next);
         }
         st = state_of(s);
     }
     // A new rate has new parameter sets: made here, on the caller's (HTTP) thread, so the next
     // DESCRIBE finds them ready instead of opening an encoder on the RTSP thread.
-    parameter_sets(st.settings.fps);
+    parameter_sets(st.width, st.height, st.settings.fps);
     return st;
 }
 
@@ -169,10 +216,11 @@ size_t VideoService::request_keyframe(int instance, uint32_t vehicle_id) {
     return s.clients;
 }
 
-std::optional<VideoService::ParameterSets> VideoService::parameter_sets(double fps) {
+std::optional<VideoService::ParameterSets> VideoService::parameter_sets(int width, int height, double fps) {
+    const auto key = std::make_tuple(width & ~1, height & ~1, fps);
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto it = parameter_sets_.find(fps);
+        auto it = parameter_sets_.find(key);
         if (it != parameter_sets_.end()) {
             return it->second;
         }
@@ -180,8 +228,8 @@ std::optional<VideoService::ParameterSets> VideoService::parameter_sets(double f
     // Made outside the lock: opening an encoder takes milliseconds. The stream's own encoder
     // writes the same SPS and PPS — they depend on the size and rate, not on the bitrate.
     EncoderConfig ec;
-    ec.width = cfg_.width;
-    ec.height = cfg_.height;
+    ec.width = width;
+    ec.height = height;
     ec.fps = fps;
     ec.bitrate_kbps = cfg_.defaults.bitrate_kbps;
     ec.preset = cfg_.preset;
@@ -191,7 +239,7 @@ std::optional<VideoService::ParameterSets> VideoService::parameter_sets(double f
     }
     ParameterSets ps{enc->sps(), enc->pps(), enc->width(), enc->height()};
     std::lock_guard<std::mutex> lock(mutex_);
-    parameter_sets_.try_emplace(fps, ps);
+    parameter_sets_.try_emplace(key, ps);
     return ps;
 }
 
@@ -200,16 +248,27 @@ std::optional<RtspServer::StreamInfo> VideoService::describe(int instance) {
     if (id == 0) {
         return std::nullopt;
     }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        adopt(stream_for(instance), id);
+    }
+    // The SDP names the picture the vehicle's camera draws now; should it change size later, the
+    // stream's next IDR carries the new SPS (the sprop-parameter-sets are only where it starts).
+    refresh_camera(instance, id);
     EncoderSettings settings;
+    int width = 0;
+    int height = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         Stream &s = stream_for(instance);
         adopt(s, id);
-        settings = s.settings;
+        settings = effective(s);
+        width = camera_width(s);
+        height = camera_height(s);
     }
-    // Normally cached already (at startup for the default rate, by the control route for any
-    // other); made here, on the RTSP thread, only if making them failed before.
-    const auto ps = parameter_sets(settings.fps);
+    // Normally cached already (at startup for the fleet's mode, by the control route for any
+    // other); made here, on the RTSP thread, when the camera's mode is new.
+    const auto ps = parameter_sets(width, height, settings.fps);
     if (!ps) {
         return std::nullopt;
     }
@@ -248,7 +307,7 @@ void VideoService::playing(int instance, bool on) {
 }
 
 void VideoService::on_frame(uint32_t vehicle_id, std::shared_ptr<const render::Image> image,
-                            double sim_time_s, Clock::time_point drawn) {
+                            double sim_time_s, Clock::time_point drawn, const render::CameraMode &mode) {
     if (!image || image->empty()) {
         return;
     }
@@ -264,11 +323,24 @@ void VideoService::on_frame(uint32_t vehicle_id, std::shared_ptr<const render::I
     if (s.clients == 0) {
         return;
     }
+    // The camera this picture was drawn by: its size is the picture's, its rate and bitrate the
+    // mode's (TASK-2661). A picture with no mode keeps what the stream knew.
+    s.camera_width = image->width;
+    s.camera_height = image->height;
+    if (mode.fps > 0.0) {
+        if (std::fabs(mode.fps - s.camera_fps) > 1e-9) {
+            s.have_due = false;
+        }
+        s.camera_fps = mode.fps;
+        s.camera_bitrate_kbps = mode.bitrate_kbps;
+    }
     // Below the render rate, take pictures on a schedule of the stream's own rate, with half a
     // render period of slack either way so render jitter neither doubles nor skips a frame.
-    if (s.settings.fps < cfg_.max_fps - 1e-9) {
-        const auto period = seconds(1.0 / s.settings.fps);
-        const auto slack = seconds(0.5 / cfg_.max_fps);
+    const double cam_fps = camera_fps(s);
+    const EncoderSettings eff = effective(s);
+    if (eff.fps < cam_fps - 1e-9) {
+        const auto period = seconds(1.0 / eff.fps);
+        const auto slack = seconds(0.5 / cam_fps);
         if (!s.have_due || drawn - s.next_due > period) {
             s.next_due = drawn;
             s.have_due = true;
@@ -314,9 +386,7 @@ void VideoService::worker() {
         const Clock::time_point captured = s.pending_at;
         const double sim_time_s = s.pending_sim_s;
         std::unique_ptr<H264Encoder> enc = std::move(s.encoder);
-        const EncoderSettings settings = s.settings;
-        const bool rebuild = !enc || s.rebuild;
-        const bool rebitrate = s.rebitrate;
+        const EncoderSettings settings = effective(s);
         // A keyframe when asked for (a new receiver, a forced IDR, a new camera), and on the
         // stream's wall-clock interval, with half a frame of slack so a 1 s interval at 10 fps is
         // every tenth frame rather than every eleventh.
@@ -324,20 +394,24 @@ void VideoService::worker() {
                                                 seconds(settings.keyframe_interval_s - 0.5 / settings.fps);
         bool force = s.force_idr || idr_due;
         s.force_idr = false;
-        s.rebuild = false;
-        s.rebitrate = false;
         lock.unlock();
 
+        // The picture's size or the stream's fps changed: a new encoder, and an IDR with the new
+        // SPS/PPS, which is how a receiver learns of a new picture size (TASK-2661). A new
+        // bitrate is applied in place.
+        const bool rebuild = !enc || enc->width() != (image->width & ~1) ||
+                             enc->height() != (image->height & ~1) ||
+                             std::fabs(enc->config().fps - settings.fps) > 1e-9;
         if (rebuild) {
             EncoderConfig ec;
-            ec.width = cfg_.width;
-            ec.height = cfg_.height;
+            ec.width = image->width;
+            ec.height = image->height;
             ec.fps = settings.fps;
             ec.bitrate_kbps = settings.bitrate_kbps;
             ec.preset = cfg_.preset;
             enc = H264Encoder::create(ec);
             force = true;
-        } else if (rebitrate) {
+        } else if (enc->config().bitrate_kbps != settings.bitrate_kbps) {
             enc->set_bitrate(settings.bitrate_kbps);
         }
         auto au = std::make_shared<AccessUnit>();
@@ -352,7 +426,7 @@ void VideoService::worker() {
 
         lock.lock();
         if (rebuild && enc) {
-            parameter_sets_.try_emplace(settings.fps,
+            parameter_sets_.try_emplace(std::make_tuple(enc->width(), enc->height(), settings.fps),
                                         ParameterSets{enc->sps(), enc->pps(), enc->width(), enc->height()});
         }
         s.encoder = std::move(enc);

@@ -16,6 +16,7 @@
 
 #include "core/world.h"
 #include "radio/radio_model.h"
+#include "render/camera_mode.h"
 #include "render/dock.h"
 #include "render/frame_store.h"
 #include "render/still_request.h"
@@ -58,6 +59,11 @@ struct CameraMetrics {
     int threads = 0;
     uint64_t frames_drawn = 0;
     uint64_t frames_reused = 0;
+    size_t landing = 0; // vehicles drawing the landing camera now (TASK-2661)
+    // The lit-ground cache (render/ground_cache.h): its size, its budget, tiles computed since start.
+    double ground_cache_mb = 0.0;
+    double ground_cache_budget_mb = 0.0;
+    uint64_t ground_tiles_built = 0;
 };
 
 // The pilot camera's H.264/RTSP streams (TASK-2561; video/video_service.h), so their cost and
@@ -132,6 +138,9 @@ struct MetricsInfo {
 
 struct SpawnCommand {
     vehicle::SpawnRequest request;
+    // The vehicle's own pilot camera (TASK-2661): POST /vehicles "camera", already checked against
+    // the bounds. Applied as the vehicle spawns, so its first frame is drawn in it.
+    std::optional<render::CameraSettingsPatch> camera;
     std::promise<std::optional<vehicle::SpawnResult>> done;
 };
 
@@ -212,8 +221,15 @@ class ControlServer {
         std::function<EncoderState(const VehicleInfo &, const EncoderPatch *patch)> camera_encoder;
         // Makes the stream's next frame an IDR; returns the sessions playing it.
         std::function<size_t(const VehicleInfo &)> camera_keyframe;
-        // The pilot camera's pinhole (TASK-2562), for GET .../camera/intrinsics.
+        // The pilot camera's pinhole (TASK-2562), for GET .../camera/intrinsics: the fleet's lens; the
+        // picture size and rate are the vehicle's own now (camera_settings).
         CameraIntrinsics camera_intrinsics;
+        // A vehicle's pilot camera settings (TASK-2661; render/camera_mode.h): as they are, or with
+        // `patch` applied. Nothing, with `error` set, for a field out of bounds. Null when the
+        // camera is off (--camera-fps), and GET/POST/DELETE .../camera answer 404.
+        std::function<std::optional<render::VehicleCameraState>(
+            const VehicleInfo &, const render::CameraSettingsPatch *patch, std::string *error)>
+            camera_settings;
         // A vehicle's dock marker (TASK-2562): as it is; with `patch`, after applying it (in one
         // step, so concurrent partial changes cannot undo each other); with `reset`, after putting
         // it back home. Nothing for a vehicle that has none (it has just gone). Null when no dock

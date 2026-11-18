@@ -18,7 +18,9 @@
 #include <vector>
 
 #include "core/world.h"
+#include "core/thread_pool.h"
 #include "render/frame_store.h"
+#include "render/ground_cache.h"
 #include "render/jpeg.h"
 #include "render/raster.h"
 #include "render/render_service.h"
@@ -89,6 +91,382 @@ bool looks_like_sky(const Px &p) { return p.b > p.r + 20; }
 // Ground is the only thing in the palette with a green cast; building grey has
 // its three channels within a few counts of each other.
 bool looks_like_ground(const Px &p) { return p.g > p.b + 12; }
+
+// --- TASK-2661: the lit-ground cache and the fast ground path --------------------------------
+
+double mean_abs_diff(const skysim::render::Image &a, const skysim::render::Image &b, int *max_diff) {
+    double sum = 0.0;
+    int worst = 0;
+    for (size_t i = 0; i < a.rgb.size() && i < b.rgb.size(); ++i) {
+        const int d = std::abs(static_cast<int>(a.rgb[i]) - static_cast<int>(b.rgb[i]));
+        sum += d;
+        worst = std::max(worst, d);
+    }
+    if (max_diff != nullptr) {
+        *max_diff = worst;
+    }
+    return a.rgb.empty() ? 0.0 : sum / static_cast<double>(a.rgb.size());
+}
+
+void test_ground_cache(const std::filesystem::path &tiles) {
+    using skysim::render::GroundCache;
+    const auto scene = skysim::render::load_scene(tiles.string(), 1);
+
+    // Levels: a footprint of exactly 2^k m reads level k alone; between two, the blend follows
+    // log2 (to the polynomial's 2e-4); outside the pyramid, the end levels.
+    int level = 0;
+    double blend = 0.0;
+    GroundCache::level_of(0.03125, level, blend);
+    CHECK(level == -5 && blend < 1e-9);
+    GroundCache::level_of(0.03125 * std::sqrt(2.0), level, blend);
+    CHECK(level == -5 && std::fabs(blend - 0.5) < 1e-3);
+    GroundCache::level_of(1e-9, level, blend);
+    CHECK(level == GroundCache::kMinLevel && blend == 0.0);
+    GroundCache::level_of(1e9, level, blend);
+    CHECK(level == GroundCache::kMaxLevel && blend == 0.0);
+    GroundCache::level_of(std::nan(""), level, blend);
+    CHECK(level == GroundCache::kMinLevel && blend == 0.0);
+    GroundCache::level_of(-1.0, level, blend);
+    CHECK(level == GroundCache::kMinLevel && blend == 0.0);
+    double worst = 0.0;
+    for (double fp = 1e-3; fp < 100.0; fp *= 1.37) {
+        GroundCache::level_of(fp, level, blend);
+        worst = std::max(worst, std::fabs(level + blend - std::log2(fp)));
+    }
+    CHECK(worst < 2e-3);
+
+    // A texel centre, at that level's own footprint, is the direct colour to 16-bit precision:
+    // the cache stores what WorldTexture and the light give, nothing else.
+    GroundCache cache(scene, 0);
+    cache.begin_frame();
+    GroundCache::Sampler sampler(cache);
+    double max_err = 0.0;
+    for (int k = 0; k < 200; ++k) {
+        const int lv = -9 + k % 12;
+        const double size = std::ldexp(1.0, lv);
+        const double n = (std::floor(-37.0 + k * 3.7) + 0.5) * size;
+        const double e = (std::floor(51.0 - k * 2.3) + 0.5) * size;
+        double cached[3];
+        double direct[3];
+        sampler.lit(n, e, size, cached);
+        scene->lit_colour(skysim::render::kSurfaceGround, {n, e, 0.0}, size, direct);
+        for (int c = 0; c < 3; ++c) {
+            max_err = std::max(max_err, std::fabs(cached[c] - direct[c]));
+        }
+    }
+    CHECK(max_err < 2e-4);
+
+    // Across a frame's worth of points and footprints the colour is the direct one, softened a
+    // little: the mean error is a fraction of a byte, and a byte is 1/255.
+    double sum = 0.0;
+    int count = 0;
+    for (int k = 0; k < 4000; ++k) {
+        const double n = -40.0 + 0.0197 * k * 7.0;
+        const double e = 25.0 - 0.0131 * k * 5.0;
+        const double fp = 0.004 * std::pow(1.0009, k);
+        double cached[3];
+        double direct[3];
+        cache.begin_frame(1 << 30); // all the optional tiles it wants: the full trilinear blend
+        GroundCache::Sampler s2(cache);
+        s2.lit(n, e, fp, cached);
+        scene->lit_colour(skysim::render::kSurfaceGround, {n, e, 0.0}, fp, direct);
+        for (int c = 0; c < 3; ++c) {
+            sum += std::fabs(cached[c] - direct[c]);
+            ++count;
+        }
+    }
+    std::printf("test_render: ground cache mean |cached - direct| = %.4f (%.2f of a byte)\n", sum / count,
+                sum / count * 255.0);
+    CHECK(sum / count < 0.03);
+
+    // Without a budget for the lighter level, a pixel between two levels reads the heavier alone;
+    // with one, both: the two differ only by that level's weight.
+    {
+        GroundCache lean(scene, 0);
+        lean.begin_frame(0);
+        GroundCache::Sampler a(lean);
+        double heavy_only[3];
+        const double fp = 0.03125 * std::pow(2.0, 0.3); // blend 0.3: level -5 heavier
+        a.lit(3.3, -7.1, fp, heavy_only);
+        GroundCache full(scene, 0);
+        full.begin_frame(1 << 30);
+        GroundCache::Sampler b(full);
+        double both[3];
+        b.lit(3.3, -7.1, fp, both);
+        double level5[3];
+        GroundCache::Sampler c5(full);
+        c5.lit(3.3, -7.1, 0.03125, level5); // level -5 alone (blend 0)
+        for (int c = 0; c < 3; ++c) {
+            CHECK(std::fabs(heavy_only[c] - level5[c]) < 1e-9);
+        }
+        CHECK(lean.stats().tiles < full.stats().tiles);
+        (void)both;
+    }
+
+    // The budget holds: past it the least recently used tiles go, and a tile built again is the
+    // same tile (texels are a function of where they are, not of when).
+    {
+        GroundCache small(scene, 20 * GroundCache::kTileBytes);
+        double first[3];
+        small.begin_frame();
+        {
+            GroundCache::Sampler a(small);
+            a.lit(0.37, 0.41, 0.01, first);
+        }
+        for (int f = 0; f < 40; ++f) {
+            small.begin_frame();
+            GroundCache::Sampler a(small);
+            double c[3];
+            a.lit(100.0 + f * 50.0, -200.0, 0.01, c); // somewhere new each frame
+            small.evict();
+        }
+        CHECK(small.stats().tiles * GroundCache::kTileBytes <= 20 * GroundCache::kTileBytes);
+        CHECK(small.stats().tiles_evicted > 0);
+        small.begin_frame();
+        GroundCache::Sampler a(small);
+        double again[3];
+        a.lit(0.37, 0.41, 0.01, again);
+        for (int c = 0; c < 3; ++c) {
+            CHECK(again[c] == first[c]);
+        }
+    }
+
+    // Four threads filling the same new ground at once agree with one thread doing it alone.
+    {
+        GroundCache shared(scene, 0);
+        shared.begin_frame(1 << 30);
+        std::vector<double> results(4 * 300 * 3);
+        std::vector<std::thread> threads;
+        for (int t = 0; t < 4; ++t) {
+            threads.emplace_back([&, t] {
+                GroundCache::Sampler s(shared);
+                for (int k = 0; k < 300; ++k) {
+                    s.lit(-5.0 + k * 0.037, 7.0 - k * 0.029, 0.006 + k * 1e-4, &results[(t * 300 + k) * 3]);
+                }
+            });
+        }
+        for (auto &th : threads) {
+            th.join();
+        }
+        GroundCache alone(scene, 0);
+        alone.begin_frame(1 << 30);
+        GroundCache::Sampler s(alone);
+        bool same = true;
+        for (int k = 0; k < 300; ++k) {
+            double c[3];
+            s.lit(-5.0 + k * 0.037, 7.0 - k * 0.029, 0.006 + k * 1e-4, c);
+            for (int t = 0; t < 4; ++t) {
+                for (int ch = 0; ch < 3; ++ch) {
+                    same = same && results[(t * 300 + k) * 3 + ch] == c[ch];
+                }
+            }
+        }
+        CHECK(same);
+    }
+
+    // The rasteriser with the cache draws the picture without it, to within a byte or two: looking
+    // straight down at the ground and the building's roof, and obliquely across the city. Once the
+    // cache is warm the picture does not depend on the thread count.
+    skysim::render::CameraConfig cc;
+    cc.width = 320;
+    cc.height = 180;
+    cc.fov_deg = 81.0;
+    cc.pitch_deg = -90.0;
+    skysim::core::ThreadPool pool(3);
+    for (const auto &[pitch, position] : {std::pair{-90.0, skysim::core::Vec3{20.0, 0.0, -40.0}},
+                                          std::pair{-20.0, skysim::core::Vec3{-60.0, 0.0, -25.0}}}) {
+        cc.pitch_deg = pitch;
+        const skysim::render::Camera camera(cc, position, {1.0, 0.0, 0.0, 0.0});
+        const skysim::render::Rasterizer raster(cc);
+        std::vector<int32_t> plain_surface;
+        std::vector<int32_t> cached_surface;
+        const auto plain = raster.render(*scene, camera, nullptr, &plain_surface);
+        GroundCache warm(scene, 0);
+        skysim::render::Image cached;
+        for (int f = 0; f < 30; ++f) { // until the lighter levels are built too
+            cached = raster.render(*scene, camera, &pool, &cached_surface, true, nullptr, &warm);
+        }
+        int max_diff = 0;
+        const double mean = mean_abs_diff(plain, cached, &max_diff);
+        std::printf("test_render: pitch %.0f: cached vs direct mean %.3f, max %d levels\n", pitch, mean,
+                    max_diff);
+        CHECK(mean < 1.5);
+        CHECK(plain_surface == cached_surface);
+        const auto serial = raster.render(*scene, camera, nullptr, nullptr, true, nullptr, &warm);
+        CHECK(serial.rgb == cached.rgb);
+    }
+}
+
+// --- TASK-2661: per-vehicle camera modes and the landing camera ------------------------------
+
+void test_camera_modes() {
+    using namespace std::chrono_literals;
+    using skysim::render::CameraMode;
+    using skysim::render::RenderService;
+    struct Seen {
+        uint32_t id;
+        int width;
+        int height;
+        CameraMode mode;
+        std::chrono::steady_clock::time_point at;
+    };
+    std::mutex mutex;
+    std::vector<Seen> seen;
+    RenderService::Config cfg;
+    cfg.camera.width = 64;
+    cfg.camera.height = 36;
+    cfg.camera.fov_deg = 81.0;
+    cfg.scene = skysim::render::load_scene("", 1);
+    cfg.fps = 20.0;
+    cfg.threads = 2;
+    cfg.background_priority = false;
+    cfg.demand_window_s = 1.0;
+    cfg.landing = {128, 72, 10.0, 3000};
+    cfg.landing_radius_m = 20.0;
+    cfg.landing_height_m = 30.0;
+    cfg.settle_s = 0.4;
+    cfg.ground_cache_bytes = 16u << 20;
+    cfg.video_sink = [&](uint32_t id, std::shared_ptr<const skysim::render::Image> image, double,
+                         std::chrono::steady_clock::time_point at, const CameraMode &mode) {
+        std::lock_guard<std::mutex> lock(mutex);
+        seen.push_back({id, image->width, image->height, mode, at});
+    };
+    RenderService service(cfg);
+
+    // Settings: the fleet's until given, bounds checked (and nothing changed on a refusal).
+    auto cam = service.camera(1);
+    CHECK(cam.normal == (CameraMode{64, 36, 20.0, 0}) && !cam.normal_own);
+    CHECK(cam.landing_available && cam.landing == cfg.landing && !cam.landing_active);
+    std::string error;
+    skysim::render::CameraSettingsPatch bad;
+    bad.normal.width = 8;
+    CHECK(!service.configure(1, bad, &error) && error.find("width") != std::string::npos);
+    bad = {};
+    bad.landing.fps = 0.1;
+    CHECK(!service.configure(1, bad, &error) && error.find("fps") != std::string::npos);
+    bad = {};
+    bad.normal.bitrate_kbps = 10;
+    CHECK(!service.configure(1, bad, &error) && error.find("bitrate") != std::string::npos);
+    CHECK(!service.camera(1).normal_own);
+    skysim::render::CameraSettingsPatch slow;
+    slow.normal.fps = 5.0;
+    cam = *service.configure(2, slow, &error);
+    CHECK(cam.normal == (CameraMode{64, 36, 5.0, 0}) && cam.normal_own);
+
+    // Two vehicles parked on their docks (home), both watched: their own rates, 20 and 5 fps,
+    // each on its own schedule, both in their normal size.
+    RenderService::Pose a;
+    a.vehicle_id = 1;
+    a.position_ned = {0.0, 0.0, -0.1};
+    RenderService::Pose b = a;
+    b.vehicle_id = 2;
+    b.position_ned = {0.0, 5.0, -0.1};
+    b.home_east_m = 5.0;
+    service.publish_poses({a, b});
+    const auto watch = [&](std::chrono::milliseconds span) {
+        const auto until = std::chrono::steady_clock::now() + span;
+        while (std::chrono::steady_clock::now() < until) {
+            service.want_video(1);
+            service.want_video(2);
+            std::this_thread::sleep_for(50ms);
+        }
+    };
+    watch(300ms);
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        seen.clear();
+    }
+    watch(2000ms);
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto n1 = std::count_if(seen.begin(), seen.end(), [](const Seen &s) { return s.id == 1; });
+        const auto n2 = std::count_if(seen.begin(), seen.end(), [](const Seen &s) { return s.id == 2; });
+        std::printf("test_render: 2 s at 20 and 5 fps: %ld and %ld pictures\n", static_cast<long>(n1),
+                    static_cast<long>(n2));
+        CHECK(n1 >= 30 && n1 <= 45);
+        CHECK(n2 >= 8 && n2 <= 12);
+        CHECK(std::all_of(seen.begin(), seen.end(),
+                          [](const Seen &s) { return s.width == 64 && s.height == 36; }));
+    }
+    CHECK(service.camera(1).watched && service.camera(1).fps > 15.0 && service.camera(2).fps < 7.0);
+
+    // Vehicle 1 lifts off its dock and climbs: the landing camera, at its size, rate and bitrate,
+    // while it is in the zone; its own camera again above it (30 m + the 5 m margin).
+    double z = -0.1;
+    const auto climb_to = [&](double target, std::chrono::milliseconds span) {
+        const auto start = std::chrono::steady_clock::now();
+        const double from = z;
+        while (std::chrono::steady_clock::now() - start < span) {
+            const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start) / span;
+            z = from + (target - from) * std::min(t, 1.0);
+            a.position_ned = {0.0, 0.0, z};
+            service.publish_poses({a, b});
+            service.want_video(1);
+            service.want_video(2);
+            std::this_thread::sleep_for(20ms);
+        }
+    };
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        seen.clear();
+    }
+    climb_to(-10.0, 1000ms);
+    cam = service.camera(1);
+    CHECK(cam.landing_active && cam.now == cfg.landing);
+    CHECK(service.mode_now(1) == cfg.landing);
+    CHECK(service.stats().landing == 1);
+    CHECK(!service.camera(2).landing_active); // parked: never
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const bool landing_seen = std::any_of(seen.begin(), seen.end(), [](const Seen &s) {
+            return s.id == 1 && s.width == 128 && s.height == 72 && s.mode.bitrate_kbps == 3000;
+        });
+        CHECK(landing_seen);
+    }
+    climb_to(-33.0, 500ms); // inside the margin: still landing
+    CHECK(service.camera(1).landing_active);
+    climb_to(-40.0, 300ms);
+    watch(200ms);
+    cam = service.camera(1);
+    CHECK(!cam.landing_active && cam.now == cam.normal);
+
+    // Back down onto the dock: landing on the way, and once it has sat still for settle_s on the
+    // ground, its own camera again.
+    climb_to(-5.0, 600ms);
+    CHECK(service.camera(1).landing_active);
+    climb_to(-0.1, 400ms);
+    watch(200ms);
+    CHECK(service.camera(1).landing_active); // just touched down: not at rest yet
+    watch(700ms);
+    CHECK(!service.camera(1).landing_active);
+
+    // A hover over the dock, however still, is not at rest: the landing camera stays.
+    climb_to(-12.0, 400ms);
+    watch(1000ms);
+    CHECK(service.camera(1).landing_active);
+
+    // Turned off for the vehicle: its own camera at once; DELETE (reset) gives the fleet's back.
+    skysim::render::CameraSettingsPatch off;
+    off.landing_enabled = false;
+    cam = *service.configure(1, off, &error);
+    CHECK(!cam.landing_available);
+    watch(200ms);
+    CHECK(!service.camera(1).landing_active && service.mode_now(1) == service.camera(1).normal);
+    skysim::render::CameraSettingsPatch reset;
+    reset.reset = true;
+    cam = *service.configure(1, reset, &error);
+    CHECK(cam.landing_available && !cam.normal_own);
+
+    // Its own landing camera, from the fleet's: a patch that names only a rate.
+    skysim::render::CameraSettingsPatch own;
+    own.landing.fps = 4.0;
+    cam = *service.configure(1, own, &error);
+    CHECK(cam.landing_own && cam.landing == (CameraMode{128, 72, 4.0, 3000}));
+
+    // forget(): a despawned vehicle's settings go with it.
+    service.forget(2);
+    CHECK(!service.camera(2).normal_own);
+}
 
 } // namespace
 
@@ -519,6 +897,9 @@ int main() {
         service.publish_poses({pose});
         CHECK(!service.frame(1, 0, std::chrono::milliseconds(2000)).jpeg.empty());
     }
+
+    test_ground_cache(dir);
+    test_camera_modes();
 
     std::filesystem::remove_all(dir);
     if (g_failures == 0) {

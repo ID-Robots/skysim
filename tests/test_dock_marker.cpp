@@ -603,7 +603,7 @@ void test_render_service_own_dock() {
         cfg.threads = 2;
         cfg.background_priority = false;
         cfg.video_sink = [&](uint32_t id, std::shared_ptr<const render::Image> image, double,
-                             std::chrono::steady_clock::time_point) {
+                             std::chrono::steady_clock::time_point, const render::CameraMode &) {
             if (id == 1) {
                 std::lock_guard<std::mutex> lock(mutex);
                 latest = std::move(image);

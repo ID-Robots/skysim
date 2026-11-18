@@ -51,9 +51,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 RtspClient = importlib.import_module("rtsp_client").RtspClient  # beside this file, not a package
 
 # Outside every port and instance the tests and camera_bench.py use (see their headers).
-API_PORT = 18690
-RTSP_PORT = 18691
-BASE_INSTANCE = 80
+API_PORT = 18700
+RTSP_PORT = 18701
+BASE_INSTANCE = 100
 DT = 0.0025
 
 
