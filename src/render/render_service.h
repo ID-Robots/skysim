@@ -266,6 +266,7 @@ class RenderService {
     // One vehicle's settings and what the render thread last decided for it, under settings_mutex_.
     struct Setting {
         std::optional<std::pair<int, int>> picture; // its own picture size
+        uint64_t picture_revision{0};               // picture size changes so far (configure())
         std::optional<CameraMode> normal;           // its own
         std::optional<CameraMode> landing; // its own
         bool landing_enabled{true};
@@ -281,8 +282,8 @@ class RenderService {
     CameraMode normal_of(const Setting *s) const;
     std::optional<CameraMode> landing_of(const Setting *s) const;
     VehicleCamera describe(const Setting *s) const;
-    // `patch` applied to `next`, checked (bounds, aspect ratio); false with `error` set, and
-    // `next` then half-changed, when it does not hold.
+    // `patch` applied to `next`, checked (bounds, aspect ratio, a size inferred from one side); false
+    // with `error` set, and `next` then half-changed, when it does not hold.
     bool apply(Setting &next, const CameraPatch &patch, std::string *error) const;
     // Records a request in `demand` (under demand_mutex_), waking the render thread for a new one.
     void note_demand(std::unordered_map<uint32_t, Clock::time_point> &demand, uint32_t vehicle_id,
@@ -302,6 +303,9 @@ class RenderService {
 
     mutable std::mutex poses_mutex_;
     std::vector<Pose> poses_;
+    // Whether poses_ holds a vehicle: what the render thread, waiting for somebody to ask, watches
+    // for to start following the fleet's modes (publish_poses wakes it when the first one arrives).
+    std::atomic<bool> fleet_present_{false};
 
     // Who asked for which vehicle's picture, and when. A new entry bumps demand_epoch_ and
     // wakes the render thread if it is waiting for work.
@@ -318,6 +322,7 @@ class RenderService {
     Window log_window_;
     Clock::time_point last_log_{}; // the last "camera:" line, to keep them a log period apart
     Clock::time_point burst_prev_{}; // the latest pass's start, while drawing continues
+    size_t burst_prev_watched_{0};   // the vehicles it watched: who the time since then was spent on
     bool in_burst_{false};
     bool idle_line_pending_{false};
 

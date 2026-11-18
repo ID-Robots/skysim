@@ -307,8 +307,8 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
     }
 
     // With a ground cache, three steps. Every band is filled first; then the ground tiles the frame
-    // reads are gathered from every 8th pixel each way — those no geometry and no dock marker
-    // covers, so a roof filling the picture costs no ground, and nor does the marker a vehicle on
+    // reads are gathered from every 8th pixel each way — those no geometry above the ground and no
+    // dock marker covers, so a roof filling the picture costs no ground, and nor does the marker a vehicle on
     // its dock looks down at (most of that first frame, and half of its cold cost) — and built
     // across the pool at once (GroundCache::prepare: left to the bands, the ones that reach a tile
     // another is building wait for it); then the bands are shaded. A tile only a pixel between the
@@ -328,9 +328,8 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
             }
             const double cy = ((y + 0.5) / cfg_.height * 2.0 - 1.0) * camera.tan_half_y();
             for (int x = kStride / 2; x < cfg_.width; x += kStride) {
-                if (band.ids[static_cast<size_t>(y - band.y0) * cfg_.width + static_cast<size_t>(x)] >= 0) {
-                    continue; // geometry in front: no ground read here
-                }
+                const size_t bi = static_cast<size_t>(y - band.y0) * cfg_.width + static_cast<size_t>(x);
+                const int32_t id = band.ids[bi];
                 const double cx = (x + 0.5) * step_x - tan_x;
                 const double rx = fwd[0] + down[0] * cy + right[0] * cx;
                 const double ry = fwd[1] + down[1] * cy + right[1] * cx;
@@ -341,6 +340,25 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
                 }
                 const double inv = 1.0 / rz;
                 const double along = height_m * inv;
+                if (id >= 0) {
+                    // Geometry in front: no ground read here. Unless the geometry is below the ground
+                    // plane (a basement in a scanned tile): the plane wins there, as shade_band
+                    // decides it — the same test, the ray here being along * |r| to the ground and t
+                    // |r| to the triangle, so the ratio is the same. A roof above the plane skips.
+                    const Vec3 r{rx, ry, rz};
+                    const Vec3 &n = normals[static_cast<size_t>(id)];
+                    const double denom = dot(n, r);
+                    double t = -1.0;
+                    if (std::fabs(denom) > 1e-9) {
+                        t = dot(n, sub(triangles[static_cast<size_t>(id)].a, eye)) / denom;
+                    }
+                    if (!(t > 0.0)) {
+                        t = static_cast<double>(band.depth[bi]); // grazing: the filled depth (r . fwd = 1)
+                    }
+                    if (!(along < t * (1.0 - 1e-9))) {
+                        continue;
+                    }
+                }
                 if (along * rn > kMaxGroundM) {
                     continue;
                 }

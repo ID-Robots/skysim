@@ -369,6 +369,7 @@ void GroundCache::prepare(std::vector<uint64_t> &required, std::vector<uint64_t>
             if (it == shard.tiles.end()) {
                 if (opt && optional_budget_.fetch_sub(1, std::memory_order_relaxed) <= 0) {
                     deferred_.store(true, std::memory_order_relaxed);
+                    deferred_tiles_.fetch_add(1, std::memory_order_relaxed);
                     continue;
                 }
                 it = shard.tiles.emplace(key, std::make_shared<Tile>()).first;
@@ -415,13 +416,28 @@ void GroundCache::evict() {
     if (budget_bytes_ == 0) {
         return;
     }
+    // Down to 90 % of the budget, so a cache at its limit does not sort itself every frame.
+    const size_t keep = budget_bytes_ / kTileBytes * 9 / 10;
+    const uint32_t now = frame_.load(std::memory_order_relaxed);
+    if (deferred_.load(std::memory_order_relaxed)) {
+        // The frame put tiles off. Whether a later one from the same place can build them and keep
+        // them all: the tiles this frame used (they carry its number) and the ones it put off must
+        // fit together, or each frame evicts what the next one needs. Counted only for a frame that
+        // put tiles off, so a settled view costs no walk of the cache.
+        size_t used = 0;
+        for (Shard &shard : shards_) {
+            std::lock_guard<std::mutex> lock(shard.mutex);
+            for (const auto &entry : shard.tiles) {
+                used += entry.second->last_used.load(std::memory_order_relaxed) == now ? 1 : 0;
+            }
+        }
+        refinable_.store(used + deferred_tiles_.load(std::memory_order_relaxed) <= keep,
+                         std::memory_order_relaxed);
+    }
     const size_t count = tile_count_.load(std::memory_order_relaxed);
     if (count * kTileBytes <= budget_bytes_) {
         return;
     }
-    // Down to 90 % of the budget, so a cache at its limit does not sort itself every frame.
-    const size_t keep = budget_bytes_ / kTileBytes * 9 / 10;
-    const uint32_t now = frame_.load(std::memory_order_relaxed);
     std::vector<std::pair<uint32_t, uint64_t>> aged; // (frames since last used, key)
     aged.reserve(count);
     for (Shard &shard : shards_) {

@@ -1155,8 +1155,17 @@ void test_video_camera_modes() {
         std::lock_guard<std::mutex> lock(mode_mutex);
         mode = CameraMode{96, 64, 20.0, 0};
     }
+    // ... and the return to 20 fps at that picture size is one too: both frames arrive, the first an
+    // IDR whose SPS times 20 fps (not the old rate's P-frame, or no frame at all).
     feed(CameraMode{96, 64, 20.0, 0}, 2, 500);
-    received(2);
+    frames = received(2);
+    CHECK(frames.size() == 2 && frames[0].has(kNalIdr));
+    if (!frames.empty()) {
+        const SpsInfo sps = sps_of(frames[0]);
+        CHECK(sps.ok && sps.width == 96 && sps.height == 64);
+        CHECK(sps.timing_info && sps.num_units_in_tick > 0 &&
+              std::fabs(static_cast<double>(sps.time_scale) / (2.0 * sps.num_units_in_tick) - 20.0) < 1e-6);
+    }
 
     // A POSTed fps is a cap below the camera's rate: 5 of 20 fps is every fourth picture.
     EncoderPatch patch;

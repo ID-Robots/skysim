@@ -53,18 +53,21 @@ constexpr auto kFirstFrameWait = std::chrono::milliseconds(2000);
 // as lag. FrameStore drops rather than queues for exactly this reason; this route was undoing it.
 //
 // Each part says when its picture was taken: X-Skysim-Time-Usec is the sim time of the pose (as
-// on a survey still), X-Skysim-Capture-Unix-Usec the wall clock when it was drawn or re-sent.
+// on a survey still), X-Skysim-Capture-Unix-Usec the wall clock when it was drawn or re-sent, and
+// X-Skysim-Picture-Revision the vehicle's picture revision it was drawn for: the intrinsics name
+// the same number while they describe it (a picture size change makes a new one).
 // Multipart readers (GStreamer's multipartdemux, ffmpeg's mpjpeg) skip headers they do not know.
 void write_mjpeg_part(httplib::DataSink &sink, const skysim::render::FrameStore::Frame &frame) {
-    char head[256];
+    char head[384];
     const int n =
         std::snprintf(head, sizeof(head),
                       "--skysimframe\r\nContent-Type: image/jpeg\r\n"
                       "Content-Length: %zu\r\nX-Skysim-Time-Usec: %lld\r\n"
-                      "X-Skysim-Capture-Unix-Usec: %lld\r\n\r\n",
+                      "X-Skysim-Capture-Unix-Usec: %lld\r\nX-Skysim-Picture-Revision: %llu\r\n\r\n",
                       frame.jpeg.size(), static_cast<long long>(std::llround(frame.sim_time_s * 1e6)),
-                      static_cast<long long>(frame.captured_unix_us));
-    sink.write(head, static_cast<size_t>(n));
+                      static_cast<long long>(frame.captured_unix_us),
+                      static_cast<unsigned long long>(frame.picture_revision));
+    sink.write(head, std::min(static_cast<size_t>(n), sizeof(head) - 1));
     sink.write(reinterpret_cast<const char *>(frame.jpeg.data()), frame.jpeg.size());
     sink.write("\r\n", 2);
 }
@@ -133,21 +136,26 @@ double parse_double_field(const std::string &body, const char *field, double fal
     return value > 0.0 ? value : fallback;
 }
 
-// The pack block of a spawn request. Every field is independently optional, so a caller
-// that only knows its capacity gets a sane voltage curve for free.
-skysim::vehicle::BatteryPack parse_battery(const std::string &body) {
+// The pack block of a spawn request, each field read by `read(name, fallback)`. Every field is
+// independently optional, so a caller that only knows its capacity gets a sane voltage curve for free.
+template <typename Read> skysim::vehicle::BatteryPack battery_pack(Read read) {
     skysim::vehicle::BatteryPack pack{};
-    pack.capacity_mah = parse_double_field(body, "battery_capacity_mah", pack.capacity_mah);
-    pack.full_v = parse_double_field(body, "battery_full_v", pack.full_v);
-    pack.empty_v = parse_double_field(body, "battery_empty_v", pack.empty_v);
-    pack.idle_a = parse_double_field(body, "battery_idle_a", pack.idle_a);
-    pack.hover_a = parse_double_field(body, "battery_hover_a", pack.hover_a);
+    pack.capacity_mah = read("battery_capacity_mah", pack.capacity_mah);
+    pack.full_v = read("battery_full_v", pack.full_v);
+    pack.empty_v = read("battery_empty_v", pack.empty_v);
+    pack.idle_a = read("battery_idle_a", pack.idle_a);
+    pack.hover_a = read("battery_hover_a", pack.hover_a);
     // An empty voltage at or above full would invert the sag and make a draining pack
     // report a rising charge. Cheaper to reject here than to debug in flight.
     if (pack.empty_v >= pack.full_v) {
         pack.empty_v = pack.full_v * 0.8;
     }
     return pack;
+}
+
+skysim::vehicle::BatteryPack parse_battery(const std::string &body) {
+    return battery_pack(
+        [&body](const char *name, double fallback) { return parse_double_field(body, name, fallback); });
 }
 
 // {"clearance_m":1.5} — absent means a conservative default airframe half-width.
@@ -535,6 +543,35 @@ const radio::json::Value *field(const radio::json::Value &obj, const char *name)
     return v != nullptr && !v->is_null() ? v : nullptr;
 }
 
+// The same three spawn fields out of a decoded JSON object, from its top level alone. The flat
+// scans above find the first "instance" (or "launch_process", or battery member) anywhere in the
+// body, so one inside "camera" — a mode's own members — would be read for the vehicle's, and the
+// spawn would ask for that instance's slot. They stay for a body that is not a JSON object, which
+// is how spawn has always taken what it is sent.
+bool launch_process_of(const radio::json::Value &obj) {
+    const radio::json::Value *v = field(obj, "launch_process");
+    if (v == nullptr) {
+        return false;
+    }
+    return v->type == radio::json::Value::Type::kBool ? v->boolean : (v->is_number() && v->number == 1.0);
+}
+
+int instance_of(const radio::json::Value &obj) {
+    const radio::json::Value *v = field(obj, "instance");
+    if (v == nullptr || !v->is_number() || !std::isfinite(v->number) || std::fabs(v->number) > 1e9) {
+        return -1;
+    }
+    return static_cast<int>(v->number); // a whole number, or cut to one as atoi does
+}
+
+skysim::vehicle::BatteryPack battery_of(const radio::json::Value &obj) {
+    return battery_pack([&obj](const char *name, double fallback) {
+        const radio::json::Value *v = field(obj, name);
+        return v != nullptr && v->is_number() && std::isfinite(v->number) && v->number > 0.0 ? v->number
+                                                                                             : fallback;
+    });
+}
+
 // A size out of a JSON object: `w_name` and `h_name` as whole numbers, or `size_name` as "WxH".
 // Each optional; `width`/`height` are left alone for what is absent.
 bool parse_size_fields(const radio::json::Value &obj, const char *w_name, const char *h_name,
@@ -676,7 +713,8 @@ std::string camera_json(const VehicleInfo &v, const render::VehicleCameraState &
                       ",\"hfov_deg\":";
     radio::json::append_number(out, hfov_deg);
     out += ",\"picture\":{\"width\":" + std::to_string(c.picture_width) +
-           ",\"height\":" + std::to_string(c.picture_height) + ",\"own\":" + flag(c.picture_own) + "}";
+           ",\"height\":" + std::to_string(c.picture_height) + ",\"own\":" + flag(c.picture_own) +
+           ",\"revision\":" + std::to_string(c.picture_revision) + "}";
     out += ",\"now\":{\"mode\":";
     out += c.landing_active ? "\"landing\"" : "\"normal\"";
     out += ",\"resting\":";
@@ -986,17 +1024,26 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
 
     s.Post("/vehicles", [&queue, snapshots](const httplib::Request &req, httplib::Response &res) {
         SpawnCommand cmd;
-        cmd.request.launch_process = parse_launch_process(req.body);
-        cmd.request.instance = parse_instance(req.body);
-        cmd.request.battery = parse_battery(req.body);
-        // The vehicle's own camera (TASK-2661), checked here so a bad one spawns nothing. Looked
-        // up in the decoded body (a key may be written with escapes); a body that is not JSON
-        // keeps spawning as it always has, unless it says "camera", which then cannot be read.
-        // With the camera off (no camera_check) it is ignored, as the spawn would ignore it.
-        if (snapshots.camera_check && req.body.find_first_not_of(" \t\r\n") != std::string::npos) {
+        // The body, decoded: a key may be written with escapes, and a member of the same name inside
+        // another ("camera") is not the vehicle's. A body that is not a JSON object keeps spawning as
+        // it always has, by the flat scans.
+        const bool has_body = req.body.find_first_not_of(" \t\r\n") != std::string::npos;
+        std::string parse_error;
+        const auto doc = has_body ? radio::json::parse(req.body, parse_error) : std::nullopt;
+        if (doc && doc->is_object()) {
+            cmd.request.launch_process = launch_process_of(*doc);
+            cmd.request.instance = instance_of(*doc);
+            cmd.request.battery = battery_of(*doc);
+        } else {
+            cmd.request.launch_process = parse_launch_process(req.body);
+            cmd.request.instance = parse_instance(req.body);
+            cmd.request.battery = parse_battery(req.body);
+        }
+        // The vehicle's own camera (TASK-2661), checked here so a bad one spawns nothing. A body
+        // that is not JSON spawns, unless it says "camera", which then cannot be read. With the
+        // camera off (no camera_check) it is ignored, as the spawn would ignore it.
+        if (snapshots.camera_check && has_body) {
             std::string error;
-            std::string parse_error;
-            const auto doc = radio::json::parse(req.body, parse_error);
             if (!doc && req.body.find("camera") != std::string::npos) {
                 reply_error(res, 400, "invalid JSON: " + parse_error);
                 return;
@@ -1254,13 +1301,14 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
             res.set_content("{\"error\":\"no such instance\"}", "application/json");
             return;
         }
-        std::vector<uint8_t> jpeg = snapshots.camera_frame(id, 0, kFirstFrameWait).jpeg;
-        if (jpeg.empty()) {
+        const auto frame = snapshots.camera_frame(id, 0, kFirstFrameWait);
+        if (frame.jpeg.empty()) {
             res.status = 404;
             res.set_content("{\"error\":\"no frame\"}", "application/json");
             return;
         }
-        res.set_content(reinterpret_cast<const char *>(jpeg.data()), jpeg.size(), "image/jpeg");
+        res.set_header("X-Skysim-Picture-Revision", std::to_string(frame.picture_revision));
+        res.set_content(reinterpret_cast<const char *>(frame.jpeg.data()), frame.jpeg.size(), "image/jpeg");
     });
 
     s.Get(R"(/instances/(\d+)/camera.mjpg)", [snapshots, resolve_instance](const httplib::Request &req,
@@ -1299,13 +1347,14 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
         // stoul throws on a value too big for the type. Saturating is the same
         // answer as "no such vehicle" without the exception.
         const auto id = static_cast<uint32_t>(std::strtoul(req.matches[1].str().c_str(), nullptr, 10));
-        std::vector<uint8_t> jpeg = snapshots.camera_frame(id, 0, kFirstFrameWait).jpeg;
-        if (jpeg.empty()) {
+        const auto frame = snapshots.camera_frame(id, 0, kFirstFrameWait);
+        if (frame.jpeg.empty()) {
             res.status = 404;
             res.set_content("{\"error\":\"no frame\"}", "application/json");
             return;
         }
-        res.set_content(reinterpret_cast<const char *>(jpeg.data()), jpeg.size(), "image/jpeg");
+        res.set_header("X-Skysim-Picture-Revision", std::to_string(frame.picture_revision));
+        res.set_content(reinterpret_cast<const char *>(frame.jpeg.data()), frame.jpeg.size(), "image/jpeg");
     });
 
     // MJPEG, which is what the video pipeline consumes.
@@ -1478,14 +1527,21 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
               int width = c.width;
               int height = c.height;
               double fps = c.fps;
+              uint64_t revision = 0;
               const std::optional<render::VehicleCameraState> cam =
                   snapshots.camera_settings ? snapshots.camera_settings(*v, nullptr, nullptr) : std::nullopt;
               if (cam) {
                   width = cam->picture_width;
                   height = cam->picture_height;
                   fps = cam->now.fps;
+                  revision = cam->picture_revision;
               }
               std::string out = intrinsics_json("pilot", width, height, c.hfov_deg);
+              // Which picture these numbers are for: camera.jpg and camera.mjpg name the revision of
+              // each frame in X-Skysim-Picture-Revision, so a frame and a calibration read apart
+              // belong together when the two are equal (a size change makes a new revision; frames
+              // of the old size are never served for the new one, but one read just before may be).
+              out += ",\"picture_revision\":" + std::to_string(revision);
               out += ",\"fps\":";
               append_value(out, fps);
               if (c.stream_width > 0) {

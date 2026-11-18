@@ -11,6 +11,7 @@
 // a consumer sees the same endpoints, formats and picture size throughout: OpenCV's FFmpeg capture, for one,
 // does not follow a picture that changes size mid-stream (it keeps returning the last frame of the old size).
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -90,6 +91,22 @@ inline bool check_mode_patch(const CameraModePatch &patch, std::string *error) {
     return true;
 }
 
+// Whether a draw size has the picture's aspect ratio, the one rule the command line, a spawn's
+// "camera" and POST .../camera all hold a draw size to: its height is within half a pixel of the
+// picture's share of its width (what a size given by one side alone is rounded to, so one always
+// passes), or its width over its height is within 1 % of the picture's. A size of 0 is not a size.
+inline bool same_aspect_ratio(int width, int height, int picture_width, int picture_height) {
+    if (width <= 0 || height <= 0 || picture_width <= 0 || picture_height <= 0) {
+        return false;
+    }
+    const double share = static_cast<double>(width) * picture_height / picture_width;
+    if (std::fabs(static_cast<double>(height) - share) <= 0.5 + 1e-9) {
+        return true;
+    }
+    const double picture = static_cast<double>(picture_width) / picture_height;
+    return std::fabs(static_cast<double>(width) / height - picture) <= 0.01 * picture;
+}
+
 // A change to one vehicle's camera: POST /vehicles "camera", POST and DELETE
 // /instances/<n>/camera (RenderService::configure).
 struct CameraSettingsPatch {
@@ -121,6 +138,10 @@ struct VehicleCameraState {
     int picture_width{0}; // what every frame of it is
     int picture_height{0};
     bool picture_own{false};
+    // How many times the vehicle's picture size has changed since it spawned (0: never). Each JPEG
+    // camera.jpg and camera.mjpg serve carries the revision it was drawn for, and the intrinsics and
+    // GET .../camera name the current one, so a reader can tell the frame its calibration is for.
+    uint64_t picture_revision{0};
     CameraMode normal;
     bool normal_own{false}; // its own, not the fleet's
     // The landing camera: available when the fleet has one or the vehicle was given one, and not

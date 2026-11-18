@@ -477,17 +477,315 @@ void test_still_camera_settles() {
     pose.position_ned = position;
     pose.quat_ned_frd = level;
     service.publish_poses({pose});
-    // Generous waits: a cold 640x360 frame is a few seconds in the -O0 coverage build.
+    // Generous waits: a cold 640x360 frame is a few seconds in the -O0 coverage build. One deadline
+    // for the whole convergence, each wait cut to what is left of it, and a wait that brings nothing
+    // newer — a service that stopped publishing — ends the test with where it stopped, rather than
+    // failing the same check hundreds of times over.
+    const auto give_up = std::chrono::steady_clock::now() + 120s;
+    const auto stopped = [&](const char *why, uint64_t seq) {
+        const auto s = service.stats();
+        std::printf("test_render: still camera: %s (last frame seq %llu, %llu drawn, %llu re-sent)\n", why,
+                    static_cast<unsigned long long>(seq), static_cast<unsigned long long>(s.frames_drawn),
+                    static_cast<unsigned long long>(s.frames_reused));
+        CHECK(false);
+    };
     auto frame = service.frame(4, 0, 30000ms);
-    CHECK(!frame.jpeg.empty());
-    for (int i = 0; i < 400 && service.stats().frames_reused == 0; ++i) {
-        frame = service.frame(4, frame.seq, 10000ms);
+    if (frame.jpeg.empty()) {
+        stopped("no first frame", frame.seq);
+        return;
+    }
+    while (service.stats().frames_reused == 0) {
+        const auto left =
+            std::chrono::duration_cast<std::chrono::milliseconds>(give_up - std::chrono::steady_clock::now());
+        if (left.count() <= 0) {
+            stopped("nothing re-sent within 120 s", frame.seq);
+            return;
+        }
+        const auto next = service.frame(4, frame.seq, std::min(left, std::chrono::milliseconds(10000)));
+        if (next.seq == frame.seq) {
+            stopped("no newer frame within the wait", frame.seq);
+            return;
+        }
+        frame = next;
     }
     const auto stats = service.stats();
     CHECK(stats.frames_reused > 0);
     CHECK(stats.frames_drawn == frames); // drawn while a frame put tiles off, not once more
     frame = service.frame(4, frame.seq, 10000ms);
     CHECK(frame.jpeg == settled); // the warm picture is the one re-sent
+}
+
+// A view whose tiles do not fit the ground cache is not drawn again and again from a vehicle that
+// holds still. With 1 MiB (128 tiles) a 640x360 oblique view needs far more than it keeps: every
+// frame builds some of it, evicts others and puts the lighter level off again, so deferred() stays
+// true for good and the camera redrew the same picture at its frame rate without ever having a
+// whole one. refinable() says such a frame could not be finished; the service keeps its picture.
+void test_unfit_view_is_resent() {
+    using namespace std::chrono_literals;
+    using skysim::render::GroundCache;
+    skysim::render::CameraConfig cc;
+    cc.width = 640;
+    cc.height = 360;
+    cc.fov_deg = 78.0;
+    cc.pitch_deg = -20.0;
+    const auto scene = skysim::render::load_scene("", 1);
+    const skysim::core::Vec3 position{-60.0, 0.0, -25.0};
+    const skysim::core::Quat level{1.0, 0.0, 0.0, 0.0};
+    const skysim::render::Camera camera(cc, position, level);
+    const skysim::render::Rasterizer raster(cc);
+    skysim::core::ThreadPool pool(2);
+    {
+        GroundCache small(scene, 1u << 20);
+        raster.render(*scene, camera, &pool, nullptr, true, nullptr, &small);
+        small.evict();
+        CHECK(small.deferred() && !small.refinable());
+        // A later frame from the same place is no better off: it still puts tiles off.
+        raster.render(*scene, camera, &pool, nullptr, true, nullptr, &small);
+        small.evict();
+        CHECK(small.deferred() && !small.refinable());
+    }
+    {
+        GroundCache roomy(scene, 64u << 20);
+        raster.render(*scene, camera, &pool, nullptr, true, nullptr, &roomy);
+        roomy.evict();
+        CHECK(roomy.deferred() && roomy.refinable()); // it fits: the next frames refine it
+        GroundCache unbounded(scene, 0);
+        raster.render(*scene, camera, &pool, nullptr, true, nullptr, &unbounded);
+        unbounded.evict();
+        CHECK(unbounded.refinable());
+    }
+
+    skysim::render::RenderService::Config cfg;
+    cfg.camera = cc;
+    cfg.scene = scene;
+    cfg.fps = 50.0;
+    cfg.threads = 2;
+    cfg.background_priority = false;
+    cfg.ground_cache_bytes = 1u << 20;
+    skysim::render::RenderService service(cfg);
+    skysim::render::RenderService::Pose pose;
+    pose.vehicle_id = 4;
+    pose.position_ned = position;
+    pose.quat_ned_frd = level;
+    service.publish_poses({pose});
+    auto frame = service.frame(4, 0, 30000ms);
+    CHECK(!frame.jpeg.empty());
+    const auto give_up = std::chrono::steady_clock::now() + 60s;
+    while (!frame.jpeg.empty() && service.stats().frames_reused == 0 &&
+           std::chrono::steady_clock::now() < give_up) {
+        const auto next = service.frame(4, frame.seq, 5000ms);
+        if (next.seq == frame.seq) {
+            break;
+        }
+        frame = next;
+    }
+    const auto stats = service.stats();
+    std::printf("test_render: a view that does not fit a 1 MiB ground cache: %llu drawn, %llu re-sent\n",
+                static_cast<unsigned long long>(stats.frames_drawn),
+                static_cast<unsigned long long>(stats.frames_reused));
+    CHECK(stats.frames_reused > 0 && stats.frames_drawn <= 2);
+}
+
+// The ground the camera sees through a mesh that lies below it is prefetched like any other: the
+// prepass reads the ground there, as shade_band does (the plane wins over a triangle behind it). A
+// basement in a scanned tile used to hide its pixels from the prepass, so a cold frame built that
+// ground inside the bands instead of across the pool. What the prepass gathered shows in
+// deferred(): it puts off the lighter-level tiles the frame has no budget for, and only what it
+// gathered. A roof above the ground still hides it: the view is not gathered at all.
+void test_buried_mesh_prefetch() {
+    using skysim::core::World;
+    using skysim::render::GroundCache;
+    skysim::render::CameraConfig cc;
+    cc.width = 640;
+    cc.height = 360;
+    cc.fov_deg = 78.0;
+    cc.pitch_deg = -20.0;
+    const skysim::core::Vec3 position{-60.0, 0.0, -25.0};
+    const skysim::core::Quat level{1.0, 0.0, 0.0, 0.0};
+    const skysim::render::Camera camera(cc, position, level);
+    const skysim::render::Rasterizer raster(cc);
+    skysim::core::ThreadPool pool(2);
+    const auto sheet = [](double z) { // a square sheet 6 km across at NED depth z, in view
+        std::vector<World::Triangle> tris(2);
+        tris[0].a = {-3000.0, -3000.0, z};
+        tris[0].b = {3000.0, -3000.0, z};
+        tris[0].c = {3000.0, 3000.0, z};
+        tris[1].a = {-3000.0, -3000.0, z};
+        tris[1].b = {3000.0, 3000.0, z};
+        tris[1].c = {-3000.0, 3000.0, z};
+        auto scene = std::make_shared<skysim::render::RasterScene>();
+        scene->build(std::move(tris));
+        return scene;
+    };
+    struct Result {
+        bool deferred;
+        uint64_t built;
+    };
+    const auto draw = [&](const std::shared_ptr<const skysim::render::RasterScene> &scene) {
+        GroundCache cache(scene, 64u << 20);
+        raster.render(*scene, camera, &pool, nullptr, true, nullptr, &cache);
+        return Result{cache.deferred(), cache.stats().tiles_built};
+    };
+    const auto bare = draw(skysim::render::load_scene("", 1));
+    const auto basement_scene = sheet(3.0); // 3 m below the ground plane
+    CHECK(basement_scene->triangle_count() == 2);
+    const auto basement = draw(basement_scene);
+    const auto roof_scene = sheet(-8.0); // 8 m above it, under the camera
+    CHECK(roof_scene->triangle_count() == 2);
+    const auto roof = draw(roof_scene);
+    std::printf(
+        "test_render: prefetch: bare ground %llu tiles (deferred %d), basement %llu (%d), roof %llu (%d)\n",
+        static_cast<unsigned long long>(bare.built), bare.deferred,
+        static_cast<unsigned long long>(basement.built), basement.deferred,
+        static_cast<unsigned long long>(roof.built), roof.deferred);
+    CHECK(bare.deferred && bare.built > 0); // the case in point
+    CHECK(basement.deferred);               // gathered as the bare ground's is
+    CHECK(!roof.deferred);                  // a roof in front of the ground: nothing gathered for it
+}
+
+// What a patch can ask for is checked at the API's bounds, the sizes it implies included, and a draw
+// size is held to one aspect-ratio rule at startup and over the API.
+void test_camera_settings_checks() {
+    using skysim::render::CameraSettingsPatch;
+    using skysim::render::same_aspect_ratio;
+    CHECK(same_aspect_ratio(1920, 1080, 1920, 1080) && same_aspect_ratio(640, 360, 1920, 1080));
+    CHECK(same_aspect_ratio(640, 363, 1920, 1080)); // 0.8 % off: --camera-draw-size takes it
+    CHECK(same_aspect_ratio(17, 10, 1920, 1080));   // one side given, the other rounded to the pixel
+    CHECK(!same_aspect_ratio(640, 300, 1920, 1080) && !same_aspect_ratio(640, 0, 1920, 1080));
+    CHECK(!same_aspect_ratio(0, 0, 1920, 1080) && !same_aspect_ratio(640, 360, 0, 0));
+
+    skysim::render::RenderService::Config cfg;
+    cfg.camera.width = 1920;
+    cfg.camera.height = 1080;
+    cfg.scene = skysim::render::load_scene("", 1);
+    cfg.fps = 10.0;
+    cfg.threads = 1;
+    cfg.background_priority = false;
+    std::string error;
+
+    // A side inferred from the other is bounded too: 16x2160 with a draw width of 3840 would draw
+    // 3840 x 518400 (5.9 GB of RGB), and the same the other way round. Nothing is changed.
+    {
+        skysim::render::RenderService service(cfg);
+        CameraSettingsPatch tall;
+        tall.picture_width = 16;
+        tall.picture_height = 2160;
+        tall.normal.width = 3840;
+        CHECK(!service.configure(1, tall, &error) && error.find("draw height") != std::string::npos &&
+              error.find("518400") != std::string::npos);
+        CHECK(!service.check(tall, &error) && error.find("draw height") != std::string::npos);
+        CHECK(!service.camera(1).picture_own && service.camera(1).picture_width == 1920);
+        CameraSettingsPatch wide;
+        wide.picture_width = 3840;
+        wide.picture_height = 16;
+        wide.normal.height = 2160;
+        CHECK(!service.configure(1, wide, &error) && error.find("draw width") != std::string::npos);
+        CameraSettingsPatch landing;
+        landing.picture_width = 16;
+        landing.picture_height = 2160;
+        landing.landing.width = 3840;
+        CHECK(!service.configure(1, landing, &error) && error.find("draw height") != std::string::npos);
+        // A side that lands in bounds is fine, whatever the picture: 640 for 1920x1080 is 640x360.
+        CameraSettingsPatch half;
+        half.normal.width = 640;
+        const auto cam = service.configure(1, half, &error);
+        CHECK(cam && cam->normal.width == 640 && cam->normal.height == 360 && cam->normal_own);
+    }
+    {
+        skysim::render::RenderService service(cfg); // the width inferred from a height alone
+        CameraSettingsPatch by_height;
+        by_height.normal.height = 540;
+        const auto cam = service.configure(1, by_height, &error);
+        CHECK(cam && cam->normal.width == 960 && cam->normal.height == 540);
+    }
+
+    // A fleet the command line accepted — 640x363 at 1920x1080, 0.8 % off — is one the API leaves
+    // alone: a POST of the rate and a DELETE both succeed instead of refusing it.
+    {
+        auto fleet = cfg;
+        fleet.draw_width = 640;
+        fleet.draw_height = 363;
+        skysim::render::RenderService service(fleet);
+        CameraSettingsPatch rate;
+        rate.normal.fps = 5.0;
+        CHECK(service.configure(1, rate, &error).has_value());
+        CameraSettingsPatch reset;
+        reset.reset = true;
+        const auto cam = service.configure(1, reset, &error);
+        CHECK(cam && cam->normal == (skysim::render::CameraMode{640, 363, 10.0, 0}) && !cam->normal_own);
+        CameraSettingsPatch off;
+        off.normal.width = 640;
+        off.normal.height = 300; // really another shape
+        CHECK(!service.configure(1, off, &error) && error.find("aspect") != std::string::npos);
+    }
+
+    // What GET reports for a mode that draws at the picture's size is a number, not a setting of the
+    // vehicle's: sent back, it must not pin the size. The vehicle goes on drawing at its picture's.
+    {
+        skysim::render::RenderService service(cfg);
+        const auto before = service.camera(1);
+        CHECK(before.normal.width == 1920 && before.normal.height == 1080 && !before.normal_own);
+        CameraSettingsPatch replay; // GET's "normal" as it came, and the picture resized with it
+        replay.normal.width = before.normal.width;
+        replay.normal.height = before.normal.height;
+        replay.normal.fps = before.normal.fps;
+        replay.normal.bitrate_kbps = before.normal.bitrate_kbps;
+        replay.picture_width = 1280;
+        replay.picture_height = 960;
+        auto cam = service.configure(1, replay, &error);
+        CHECK(cam && cam->picture_width == 1280 && cam->normal.width == 1280 && cam->normal.height == 960);
+        CameraSettingsPatch plain; // ... and in two steps: the replay first, then the picture alone
+        plain.normal = replay.normal;
+        skysim::render::RenderService second(cfg);
+        CHECK(second.configure(1, plain, &error).has_value());
+        CameraSettingsPatch resize;
+        resize.picture_width = 1280;
+        resize.picture_height = 960;
+        cam = second.configure(1, resize, &error);
+        CHECK(cam && cam->normal.width == 1280 && cam->normal.height == 960);
+        // A draw size that differs is a request, and is the vehicle's own from then on.
+        CameraSettingsPatch own;
+        own.normal.width = 640;
+        own.normal.height = 480;
+        cam = second.configure(1, own, &error);
+        CHECK(cam && cam->normal.width == 640 && cam->normal.height == 480);
+        CHECK(second.configure(1, own, &error).has_value()); // the same again: nothing new
+        CameraSettingsPatch back;
+        back.picture_width = 1920;
+        back.picture_height = 1080;
+        CHECK(!second.configure(1, back, &error) && error.find("aspect") != std::string::npos);
+    }
+}
+
+// With no vehicle and nobody asking, the render thread waits with no deadline. The first vehicle
+// ends that wait, so its mode is followed — a vehicle that climbs near its dock before anyone
+// asks for a frame is on the landing camera, as GET .../camera and an RTSP DESCRIBE say — and
+// not only from the first request.
+void test_first_vehicle_follows_modes() {
+    using namespace std::chrono_literals;
+    skysim::render::RenderService::Config cfg;
+    cfg.camera.width = 128;
+    cfg.camera.height = 72;
+    cfg.scene = skysim::render::load_scene("", 1);
+    cfg.fps = 20.0;
+    cfg.threads = 1;
+    cfg.background_priority = false;
+    cfg.landing = {0, 0, 10.0, 0};
+    cfg.landing_radius_m = 20.0;
+    cfg.landing_height_m = 30.0;
+    skysim::render::RenderService service(cfg);
+    std::this_thread::sleep_for(300ms); // the thread has found nothing to do and parked
+    skysim::render::RenderService::Pose pose;
+    pose.vehicle_id = 1;
+    pose.position_ned = {0.0, 0.0, -10.0}; // 10 m up over its dock (home 0, 0): in the landing zone
+    service.publish_poses({pose});
+    bool landing = false;
+    for (int i = 0; i < 150 && !landing; ++i) {
+        landing = service.camera(1).landing_active;
+        std::this_thread::sleep_for(20ms);
+    }
+    CHECK(landing); // nobody asked for a frame
+    CHECK(service.stats().frames_drawn == 0);
 }
 
 // --- TASK-2661: per-vehicle camera modes and the landing camera ------------------------------
@@ -549,6 +847,14 @@ void test_picture_size_change() {
         size.picture_height = height;
         std::string error;
         CHECK(service.configure(3, size, &error).has_value());
+        // Every change but the first (to the fleet's own size) is a new picture revision, and every
+        // frame after it is stamped with the revision it was drawn for: the one the intrinsics name.
+        const uint64_t revision = service.camera(3).picture_revision;
+        if (revision != static_cast<uint64_t>(k)) {
+            ++wrong;
+            std::printf("test_render: round %d: picture revision %llu, want %d\n", k,
+                        static_cast<unsigned long long>(revision), k);
+        }
         // The next frame after the change, and two more.
         uint64_t seq = 0;
         for (int f = 0; f < 3; ++f) {
@@ -567,6 +873,14 @@ void test_picture_size_change() {
             }
             seq = frame.seq;
             const auto got = jpeg_size(frame.jpeg);
+            if (frame.picture_revision != revision) {
+                ++wrong;
+                if (wrong <= 3) {
+                    std::printf("test_render: round %d frame %d: revision %llu, want %llu\n", k, f,
+                                static_cast<unsigned long long>(frame.picture_revision),
+                                static_cast<unsigned long long>(revision));
+                }
+            }
             if (got != std::pair<int, int>{width, height}) {
                 ++wrong;
                 if (wrong <= 3) {
@@ -581,6 +895,7 @@ void test_picture_size_change() {
     mover.join();
     std::printf("test_render: %d picture-size changes, %d frame(s) of the wrong size\n", rounds, wrong);
     CHECK(wrong == 0);
+    CHECK(service.camera(3).picture_revision == 39); // 40 settings, the first the fleet's own size
 }
 
 void test_resize() {
@@ -1299,6 +1614,10 @@ int main() {
     test_resize();
     test_camera_modes();
     test_picture_size_change();
+    test_unfit_view_is_resent();
+    test_buried_mesh_prefetch();
+    test_camera_settings_checks();
+    test_first_vehicle_follows_modes();
 
     std::filesystem::remove_all(dir);
     if (g_failures == 0) {

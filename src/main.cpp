@@ -1523,12 +1523,10 @@ int main(int argc, char **argv) {
         // to the picture; the landing mode, full size by default, near the dock only, where a
         // landing reads the marker; the rest rate for a vehicle sitting still on the ground.
         // Every mode keeps the picture's aspect ratio, or its pictures would be stretched.
+        // The rule the control plane holds a vehicle's draw size to as well (camera_mode.h), so every
+        // fleet this accepts is one a POST or DELETE .../camera can leave as it is.
         const auto aspect_ok = [&opt](int w, int h) {
-            if (w == 0) {
-                return true;
-            }
-            const double picture = static_cast<double>(opt.camera_width) / opt.camera_height;
-            return std::fabs(static_cast<double>(w) / h - picture) <= 0.01 * picture;
+            return w == 0 || skysim::render::same_aspect_ratio(w, h, opt.camera_width, opt.camera_height);
         };
         if (!aspect_ok(opt.camera_draw_width, opt.camera_draw_height) ||
             !aspect_ok(opt.camera_landing_width, opt.camera_landing_height)) {

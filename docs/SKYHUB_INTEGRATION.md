@@ -165,13 +165,18 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
     `"size":"WxH"`) the picture; `draw_width`/`draw_height` (or `"draw":"WxH"`), `fps`,
     `bitrate_kbps` the normal mode; `"landing":{...}` its own landing mode; `"landing":false`
     turns it off for the vehicle. Bounds 16..3840 x 16..2160, 1..60 fps, 0 or 64..8000 kbit/s,
-    and a draw size keeps the picture's aspect ratio (1 %); out of bounds is `400` and changes
-    nothing (and spawns nothing). The settings belong to the vehicle and go when it despawns.
+    and a draw size keeps the picture's aspect ratio (1 %, or to the nearest pixel; the same rule
+    as `--camera-draw-size`), also the side inferred from a draw width or height given alone; out
+    of bounds is `400` and changes nothing (and spawns nothing, with the pilot camera on). A draw
+    size that is only the inherited one is not a setting, so a GET's answer can be POSTed back.
+    The settings belong to the vehicle and go when it despawns.
   - **What a consumer sees**: the same endpoints, formats and picture size. Switching between the
     normal and landing modes changes the frame rate (15 vs 30 fps): the stream's next frame is an
     IDR with SPS/PPS for the new rate, same picture size, same session. `GET .../camera/intrinsics`
     is the picture's pinhole always (`fx = width/2 / tan(hfov/2)`), plus `drawn` (`mode`, the draw
-    `width` and `height`) and `fps` now. In the normal mode the picture is a 640x360 drawing scaled
+    `width` and `height`) and `fps` now, and `picture_revision`: every `camera.jpg` and MJPEG part
+    carries `X-Skysim-Picture-Revision`, and a frame and a calibration with the same number are for
+    the same picture size (a size change makes a new one). In the normal mode the picture is a 640x360 drawing scaled
     up, so it is soft; in the landing mode it is sharp.
   - **Cost**: [README, "What the camera costs"](../README.md#what-the-camera-costs-task-2661) and
     `tools/bench/camera_cost.py`. `GET /metrics` `camera.landing` counts vehicles in the landing

@@ -165,6 +165,28 @@ int main() {
         CHECK(spawn5 && spawn5->status == 200);
         CHECK(last_empty_v.load() < last_full_v.load());
 
+        // The spawn's own members are read from the top level of the body. An "instance", a
+        // "launch_process" or a pack member inside "camera" (a mode's own members, which the camera
+        // parser ignores) is not the vehicle's, however early in the body it comes: the spawn would
+        // ask for that instance's slot, and fail if it was taken.
+        auto spawn6 = client.Post(
+            "/vehicles",
+            R"({"camera":{"normal":{"instance":7,"launch_process":true,"battery_capacity_mah":999}},"instance":2})",
+            "application/json");
+        CHECK(spawn6 && spawn6->status == 200);
+        CHECK(last_instance.load() == 2);
+        CHECK(!saw_launch_process.load());
+        CHECK(std::fabs(last_capacity_mah.load() - 3300.0) < 1e-6);
+        // A key written with an escape is the same key; a top-level member of the wrong type is absent.
+        auto spawn7 =
+            client.Post("/vehicles", R"({"inst\u0061nce":11,"launch_process":"yes"})", "application/json");
+        CHECK(spawn7 && spawn7->status == 200 && last_instance.load() == 11 && !saw_launch_process.load());
+        // A body that is not JSON keeps spawning by the flat scans it always has.
+        auto spawn8 =
+            client.Post("/vehicles", R"({"instance": 9, "launch_process": true,})", "application/json");
+        CHECK(spawn8 && spawn8->status == 200);
+        CHECK(last_instance.load() == 9 && saw_launch_process.load());
+
         // Mission checks validate input before reaching the tick thread.
         auto mission_bad =
             client.Post("/mission/check", R"({"waypoints_ned":[[0,0,-10]]})", "application/json");

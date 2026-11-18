@@ -99,12 +99,22 @@ class GroundCache {
         optional_budget_.store(optional_tiles, std::memory_order_relaxed);
         sealed_seq_.store(kUnsealed, std::memory_order_relaxed);
         deferred_.store(false, std::memory_order_relaxed);
+        deferred_tiles_.store(0, std::memory_order_relaxed);
+        refinable_.store(true, std::memory_order_relaxed);
         return frame_.fetch_add(1, std::memory_order_relaxed) + 1;
     }
     // Whether the frame begun last left a lighter-level tile it asked for unbuilt because its
     // budget was spent: drawn again from the same place, it would blend more of that level in.
     // Read after the frame is drawn.
     bool deferred() const { return deferred_.load(std::memory_order_relaxed); }
+    // Whether drawing the frame begun last again from the same place can finish what it put off:
+    // false when the tiles it used and the lighter-level ones it left unbuilt (those prepare()
+    // counted) do not fit the budget together, which evict() keeps to 90 % of. Such a view would
+    // build some of them, evict others, and put the rest off again every frame, so a camera that
+    // holds still on it is better off keeping the picture it has (the heavier level's, a little
+    // softer) than drawing it over and over. Always true without a budget, and for a frame that put
+    // nothing off. Set by evict(), so read after it.
+    bool refinable() const { return refinable_.load(std::memory_order_relaxed); }
     // From here to the next begin_frame, a pixel blends in a lighter level only from a tile that is
     // built now; nothing builds one for that, and a tile built later (as some pixel's heavier level)
     // does not count. So the picture does not depend on the order the bands run in. A frame calls
@@ -113,8 +123,9 @@ class GroundCache {
         optional_budget_.store(0, std::memory_order_relaxed);
         sealed_seq_.store(build_seq_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     }
-    // Drops least recently used tiles until the cache is within its budget again. Call between
-    // frames, never while a Sampler of this cache is in use.
+    // Drops least recently used tiles until the cache is within its budget again, and says whether
+    // the frame just drawn could be refined (refinable()). Call between frames, never while a
+    // Sampler of this cache is in use.
     void evict();
 
     // The tiles a pixel at (north, east) with footprint `footprint_m` reads: the heavier level's
@@ -170,6 +181,8 @@ class GroundCache {
     std::atomic<uint32_t> frame_{0};
     std::atomic<int> optional_budget_{0};
     std::atomic<bool> deferred_{false}; // this frame skipped a lighter-level tile for want of budget
+    std::atomic<size_t> deferred_tiles_{0}; // the distinct ones prepare() skipped
+    std::atomic<bool> refinable_{true};
     std::atomic<uint64_t> build_seq_{0};          // tiles built since start: each tile's stamp
     std::atomic<uint64_t> sealed_seq_{kUnsealed}; // build_seq_ at seal(); kUnsealed: not sealed
     std::atomic<size_t> tile_count_{0};
