@@ -528,10 +528,11 @@ std::string encoder_json(const EncoderState &e) {
 
 // --- per-vehicle pilot camera (TASK-2661) ------------------------------------------------------
 
-// One camera mode's fields out of a JSON object: width, height ("size":"WxH" for both), fps,
-// bitrate_kbps; each optional. Sizes and the bitrate must be whole numbers. Other members are
-// ignored, so what GET gave can be sent back with one field changed.
-bool parse_mode_fields(const radio::json::Value &obj, render::CameraModePatch &out, std::string &error) {
+// A size out of a JSON object: `w_name` and `h_name` as whole numbers, or `size_name` as "WxH".
+// Each optional; `width`/`height` are left alone for what is absent.
+bool parse_size_fields(const radio::json::Value &obj, const char *w_name, const char *h_name,
+                       const char *size_name, std::optional<int> &width, std::optional<int> &height,
+                       std::string &error) {
     const auto whole = [&error](const radio::json::Value &v, const char *name, std::optional<int> &field) {
         if (!v.is_number() || !std::isfinite(v.number) || v.number != std::floor(v.number) ||
             std::fabs(v.number) > 1e6) {
@@ -541,26 +542,40 @@ bool parse_mode_fields(const radio::json::Value &obj, render::CameraModePatch &o
         field = static_cast<int>(v.number);
         return true;
     };
-    if (const radio::json::Value *size = obj.find("size")) {
+    if (const radio::json::Value *size = obj.find(size_name)) {
         int w = 0;
         int h = 0;
         char tail = 0;
         if (!size->is_string() || std::sscanf(size->text.c_str(), "%dx%d%c", &w, &h, &tail) != 2) {
-            error = "size must be a string WxH, e.g. \"1920x1080\"";
+            error = std::string(size_name) + " must be a string WxH, e.g. \"1920x1080\"";
             return false;
         }
-        out.width = w;
-        out.height = h;
+        width = w;
+        height = h;
     }
-    if (const radio::json::Value *v = obj.find("width"); v != nullptr && !whole(*v, "width", out.width)) {
+    if (const radio::json::Value *v = obj.find(w_name); v != nullptr && !whole(*v, w_name, width)) {
         return false;
     }
-    if (const radio::json::Value *v = obj.find("height"); v != nullptr && !whole(*v, "height", out.height)) {
+    if (const radio::json::Value *v = obj.find(h_name); v != nullptr && !whole(*v, h_name, height)) {
         return false;
     }
-    if (const radio::json::Value *v = obj.find("bitrate_kbps");
-        v != nullptr && !whole(*v, "bitrate_kbps", out.bitrate_kbps)) {
+    return true;
+}
+
+// One camera mode's fields out of a JSON object: its draw size (draw_width and draw_height, or
+// "draw":"WxH"), fps and bitrate_kbps; each optional. Other members are ignored, so what GET gave
+// can be sent back with one field changed.
+bool parse_mode_fields(const radio::json::Value &obj, render::CameraModePatch &out, std::string &error) {
+    if (!parse_size_fields(obj, "draw_width", "draw_height", "draw", out.width, out.height, error)) {
         return false;
+    }
+    if (const radio::json::Value *v = obj.find("bitrate_kbps")) {
+        if (!v->is_number() || !std::isfinite(v->number) || v->number != std::floor(v->number) ||
+            std::fabs(v->number) > 1e6) {
+            error = "bitrate_kbps must be a whole number";
+            return false;
+        }
+        out.bitrate_kbps = static_cast<int>(v->number);
     }
     if (const radio::json::Value *v = obj.find("fps")) {
         if (!v->is_number() || !std::isfinite(v->number)) {
@@ -569,16 +584,28 @@ bool parse_mode_fields(const radio::json::Value &obj, render::CameraModePatch &o
         }
         out.fps = v->number;
     }
-    return render::check_mode_patch(out, &error);
+    if (!render::check_mode_patch(out, &error)) {
+        if (error.rfind("width", 0) == 0 || error.rfind("height", 0) == 0) {
+            error = "draw_" + error; // a mode's sizes are the size it is drawn at
+        }
+        return false;
+    }
+    return true;
 }
 
-// A camera settings body (POST .../camera, POST /vehicles "camera"): the vehicle's normal mode's
-// fields at the top level or in "normal", and "landing" as such an object (the vehicle's own
-// landing camera) or a boolean (turn the landing camera on or off for it).
+// A camera settings body (POST .../camera, POST /vehicles "camera"): the picture size at the top
+// level (width and height, or "size":"WxH"); the normal mode's fields (draw size, fps,
+// bitrate_kbps) at the top level or in "normal"; and "landing" as such an object (the vehicle's
+// own landing mode, "enabled" optional) or a boolean (the landing mode on or off for it).
 bool parse_camera_settings(const radio::json::Value &obj, render::CameraSettingsPatch &patch,
                            std::string &error) {
     if (!obj.is_object()) {
         error = "camera settings must be a JSON object";
+        return false;
+    }
+    if (!parse_size_fields(obj, "width", "height", "size", patch.picture_width, patch.picture_height,
+                           error) ||
+        !render::check_picture_patch(patch, &error)) {
         return false;
     }
     if (!parse_mode_fields(obj, patch.normal, error)) {
@@ -631,38 +658,47 @@ bool parse_camera_body(const std::string &body, render::CameraSettingsPatch &pat
 }
 
 void append_mode(std::string &out, const render::CameraMode &m) {
-    out += "\"width\":" + std::to_string(m.width) + ",\"height\":" + std::to_string(m.height) + ",\"fps\":";
+    out += "\"draw_width\":" + std::to_string(m.width) + ",\"draw_height\":" + std::to_string(m.height) +
+           ",\"fps\":";
     radio::json::append_number(out, m.fps);
     out += ",\"bitrate_kbps\":" + std::to_string(m.bitrate_kbps);
 }
 
 std::string camera_json(const VehicleInfo &v, const render::VehicleCameraState &c, double hfov_deg) {
+    const auto flag = [](bool b) { return b ? "true" : "false"; };
     std::string out = "{\"instance\":" + std::to_string(v.instance) + ",\"vehicle\":" + std::to_string(v.id) +
                       ",\"hfov_deg\":";
     radio::json::append_number(out, hfov_deg);
+    out += ",\"picture\":{\"width\":" + std::to_string(c.picture_width) +
+           ",\"height\":" + std::to_string(c.picture_height) + ",\"own\":" + flag(c.picture_own) + "}";
     out += ",\"now\":{\"mode\":";
-    out += c.landing_active ? "\"landing\"," : "\"normal\",";
+    out += c.landing_active ? "\"landing\"" : "\"normal\"";
+    out += ",\"resting\":";
+    out += flag(c.resting);
+    out += ',';
     append_mode(out, c.now);
     out += "},\"normal\":{";
     append_mode(out, c.normal);
     out += ",\"own\":";
-    out += c.normal_own ? "true" : "false";
+    out += flag(c.normal_own);
     out += "},\"landing\":{\"available\":";
-    out += c.landing_available ? "true" : "false";
+    out += flag(c.landing_available);
     out += ",\"enabled\":";
-    out += c.landing_enabled ? "true" : "false";
+    out += flag(c.landing_enabled);
     out += ",\"own\":";
-    out += c.landing_own ? "true" : "false";
+    out += flag(c.landing_own);
     out += ",\"active\":";
-    out += c.landing_active ? "true" : "false";
+    out += flag(c.landing_active);
     out += ',';
     append_mode(out, c.landing);
     out += ",\"radius_m\":";
     radio::json::append_number(out, c.landing_radius_m);
     out += ",\"height_m\":";
     radio::json::append_number(out, c.landing_height_m);
-    out += "},\"watched\":";
-    out += c.watched ? "true" : "false";
+    out += "},\"rest_fps\":";
+    radio::json::append_number(out, c.rest_fps);
+    out += ",\"watched\":";
+    out += flag(c.watched);
     out += ",\"fps\":";
     radio::json::append_number(out, c.fps);
     out += ",\"render_ms\":";
@@ -1423,16 +1459,17 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
                   reply_error(res, 404, "camera disabled (--camera-fps)");
                   return;
               }
-              // The picture the vehicle's camera draws now (TASK-2661): its own size and rate, or the
-              // landing camera's while it lands. The lens is the fleet's.
+              // The vehicle's picture (TASK-2661): its own size, or the fleet's. It keeps that size
+              // whatever mode draws it, so these numbers hold for every frame; `drawn` says the size
+              // and rate it is drawn at now (scaled up to the picture when smaller).
               int width = c.width;
               int height = c.height;
               double fps = c.fps;
               const std::optional<render::VehicleCameraState> cam =
                   snapshots.camera_settings ? snapshots.camera_settings(*v, nullptr, nullptr) : std::nullopt;
               if (cam) {
-                  width = cam->now.width;
-                  height = cam->now.height;
+                  width = cam->picture_width;
+                  height = cam->picture_height;
                   fps = cam->now.fps;
               }
               std::string out = intrinsics_json("pilot", width, height, c.hfov_deg);
@@ -1445,17 +1482,11 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
               } else {
                   out += ",\"stream\":null";
               }
-              // The landing camera's pinhole as well, when the vehicle has one, so a consumer that
-              // loads its calibration once has the one a landing is drawn through too.
-              if (cam && cam->landing_available) {
-                  out += ",\"landing\":" + intrinsics_json("pilot-landing", cam->landing.width,
-                                                           cam->landing.height, c.hfov_deg);
-                  out += ",\"fps\":";
-                  append_value(out, cam->landing.fps);
-                  out += ",\"active\":";
-                  out += cam->landing_active ? "true}" : "false}";
-              } else {
-                  out += ",\"landing\":null";
+              if (cam) {
+                  out += ",\"drawn\":{\"mode\":";
+                  out += cam->landing_active ? "\"landing\"" : "\"normal\"";
+                  out += ",\"width\":" + std::to_string(cam->now.width) +
+                         ",\"height\":" + std::to_string(cam->now.height) + "}";
               }
               // Where the camera looks now: the vehicle's gimbal as its last servo frame drove it, or the
               // fixed mount on a vehicle that drives none.

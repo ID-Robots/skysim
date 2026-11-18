@@ -25,6 +25,7 @@
 #include "render/raster.h"
 #include "render/render_service.h"
 #include "render/renderer.h"
+#include "render/resize.h"
 #include "terrain/cook.h"
 
 namespace {
@@ -340,6 +341,37 @@ void test_ground_cache(const std::filesystem::path &tiles) {
 
 // --- TASK-2661: per-vehicle camera modes and the landing camera ------------------------------
 
+void test_resize() {
+    using skysim::render::Image;
+    // A 2x2 picture scaled to 4x4: the corners keep their colours, the middle is their blend, and
+    // the result does not depend on the pool.
+    Image src;
+    src.width = 2;
+    src.height = 2;
+    src.rgb = {0, 0, 0, 200, 0, 0, 0, 200, 0, 200, 200, 0};
+    const Image up = skysim::render::resize_bilinear(src, 4, 4);
+    CHECK(up.width == 4 && up.height == 4 && up.rgb.size() == 48);
+    CHECK(up.rgb[0] == 0 && up.rgb[1] == 0 && up.rgb[2] == 0);                 // top-left: src (0,0)
+    CHECK(up.rgb[(0 * 4 + 3) * 3] == 200 && up.rgb[(0 * 4 + 3) * 3 + 1] == 0); // top-right: src (1,0)
+    CHECK(up.rgb[(3 * 4 + 3) * 3] == 200 && up.rgb[(3 * 4 + 3) * 3 + 1] == 200);
+    // Pixel (1,1) samples src at (0.25, 0.25): 9/16 of (0,0), 3/16 each of (1,0) and (0,1), 1/16 of (1,1).
+    CHECK(std::abs(up.rgb[(1 * 4 + 1) * 3] - (3 * 200 + 200) / 16) <= 1);
+    skysim::core::ThreadPool pool(3);
+    Image big;
+    big.width = 64;
+    big.height = 36;
+    big.rgb.resize(64 * 36 * 3);
+    for (size_t i = 0; i < big.rgb.size(); ++i) {
+        big.rgb[i] = static_cast<uint8_t>((i * 37) % 251);
+    }
+    const Image a = skysim::render::resize_bilinear(big, 192, 108);
+    const Image b = skysim::render::resize_bilinear(big, 192, 108, &pool);
+    CHECK(a.rgb == b.rgb && a.width == 192 && a.height == 108);
+    const Image same = skysim::render::resize_bilinear(big, 64, 36);
+    CHECK(same.rgb == big.rgb); // its own size: unchanged
+    CHECK(skysim::render::resize_bilinear(Image{}, 10, 10).empty());
+}
+
 void test_camera_modes() {
     using namespace std::chrono_literals;
     using skysim::render::CameraMode;
@@ -349,35 +381,43 @@ void test_camera_modes() {
         int width;
         int height;
         CameraMode mode;
-        std::chrono::steady_clock::time_point at;
     };
     std::mutex mutex;
     std::vector<Seen> seen;
-    RenderService::Config cfg;
-    cfg.camera.width = 64;
-    cfg.camera.height = 36;
-    cfg.camera.fov_deg = 81.0;
-    cfg.scene = skysim::render::load_scene("", 1);
-    cfg.fps = 20.0;
-    cfg.threads = 2;
-    cfg.background_priority = false;
-    cfg.demand_window_s = 1.0;
-    cfg.landing = {128, 72, 10.0, 3000};
-    cfg.landing_radius_m = 20.0;
-    cfg.landing_height_m = 30.0;
-    cfg.settle_s = 0.4;
-    cfg.ground_cache_bytes = 16u << 20;
-    cfg.video_sink = [&](uint32_t id, std::shared_ptr<const skysim::render::Image> image, double,
-                         std::chrono::steady_clock::time_point at, const CameraMode &mode) {
-        std::lock_guard<std::mutex> lock(mutex);
-        seen.push_back({id, image->width, image->height, mode, at});
+    const auto make = [&](double rest_fps) {
+        RenderService::Config cfg;
+        cfg.camera.width = 128; // the picture: every frame of every vehicle
+        cfg.camera.height = 72;
+        cfg.camera.fov_deg = 81.0;
+        cfg.draw_width = 64; // the normal mode draws half that and scales it up
+        cfg.draw_height = 36;
+        cfg.scene = skysim::render::load_scene("", 1);
+        cfg.fps = 20.0;
+        cfg.rest_fps = rest_fps;
+        cfg.threads = 2;
+        cfg.background_priority = false;
+        cfg.demand_window_s = 1.0;
+        cfg.landing = {0, 0, 10.0, 3000}; // the picture's own size
+        cfg.landing_radius_m = 20.0;
+        cfg.landing_height_m = 30.0;
+        cfg.settle_s = 0.4;
+        cfg.ground_cache_bytes = 16u << 20;
+        cfg.video_sink = [&](uint32_t id, std::shared_ptr<const skysim::render::Image> image, double,
+                             std::chrono::steady_clock::time_point, const CameraMode &mode) {
+            std::lock_guard<std::mutex> lock(mutex);
+            seen.push_back({id, image->width, image->height, mode});
+        };
+        return cfg;
     };
-    RenderService service(cfg);
+    RenderService service(make(0.0));
+    const auto cfg = service.config();
 
-    // Settings: the fleet's until given, bounds checked (and nothing changed on a refusal).
+    // Settings: the fleet's until given, bounds and aspect ratio checked (and nothing changed on a
+    // refusal).
     auto cam = service.camera(1);
+    CHECK(cam.picture_width == 128 && cam.picture_height == 72 && !cam.picture_own);
     CHECK(cam.normal == (CameraMode{64, 36, 20.0, 0}) && !cam.normal_own);
-    CHECK(cam.landing_available && cam.landing == cfg.landing && !cam.landing_active);
+    CHECK(cam.landing_available && cam.landing == (CameraMode{128, 72, 10.0, 3000}) && !cam.landing_active);
     std::string error;
     skysim::render::CameraSettingsPatch bad;
     bad.normal.width = 8;
@@ -388,14 +428,17 @@ void test_camera_modes() {
     bad = {};
     bad.normal.bitrate_kbps = 10;
     CHECK(!service.configure(1, bad, &error) && error.find("bitrate") != std::string::npos);
-    CHECK(!service.camera(1).normal_own);
+    bad = {};
+    bad.picture_width = 100; // 100x72 against a 64x36 draw size: stretched, so refused
+    CHECK(!service.configure(1, bad, &error) && error.find("aspect") != std::string::npos);
+    CHECK(!service.camera(1).normal_own && !service.camera(1).picture_own);
     skysim::render::CameraSettingsPatch slow;
     slow.normal.fps = 5.0;
     cam = *service.configure(2, slow, &error);
     CHECK(cam.normal == (CameraMode{64, 36, 5.0, 0}) && cam.normal_own);
 
     // Two vehicles parked on their docks (home), both watched: their own rates, 20 and 5 fps,
-    // each on its own schedule, both in their normal size.
+    // each on its own schedule; every picture 128x72, the stream told the mode's rate.
     RenderService::Pose a;
     a.vehicle_id = 1;
     a.position_ned = {0.0, 0.0, -0.1};
@@ -404,20 +447,20 @@ void test_camera_modes() {
     b.position_ned = {0.0, 5.0, -0.1};
     b.home_east_m = 5.0;
     service.publish_poses({a, b});
-    const auto watch = [&](std::chrono::milliseconds span) {
+    const auto watch = [&](RenderService &svc, std::chrono::milliseconds span) {
         const auto until = std::chrono::steady_clock::now() + span;
         while (std::chrono::steady_clock::now() < until) {
-            service.want_video(1);
-            service.want_video(2);
+            svc.want_video(1);
+            svc.want_video(2);
             std::this_thread::sleep_for(50ms);
         }
     };
-    watch(300ms);
+    watch(service, 300ms);
     {
         std::lock_guard<std::mutex> lock(mutex);
         seen.clear();
     }
-    watch(2000ms);
+    watch(service, 2000ms);
     {
         std::lock_guard<std::mutex> lock(mutex);
         const auto n1 = std::count_if(seen.begin(), seen.end(), [](const Seen &s) { return s.id == 1; });
@@ -426,13 +469,17 @@ void test_camera_modes() {
                     static_cast<long>(n2));
         CHECK(n1 >= 30 && n1 <= 45);
         CHECK(n2 >= 8 && n2 <= 12);
+        CHECK(std::all_of(seen.begin(), seen.end(), [](const Seen &s) {
+            return s.width == 128 && s.height == 72 && s.mode.width == 128 && s.mode.height == 72;
+        }));
         CHECK(std::all_of(seen.begin(), seen.end(),
-                          [](const Seen &s) { return s.width == 64 && s.height == 36; }));
+                          [](const Seen &s) { return s.mode.fps == (s.id == 1 ? 20.0 : 5.0); }));
     }
     CHECK(service.camera(1).watched && service.camera(1).fps > 15.0 && service.camera(2).fps < 7.0);
 
-    // Vehicle 1 lifts off its dock and climbs: the landing camera, at its size, rate and bitrate,
-    // while it is in the zone; its own camera again above it (30 m + the 5 m margin).
+    // Vehicle 1 lifts off its dock and climbs: the landing mode — drawn full size, at its rate and
+    // bitrate — while it is in the zone; its normal mode again above it (30 m + the 5 m margin).
+    // The picture stays 128x72 throughout.
     double z = -0.1;
     const auto climb_to = [&](double target, std::chrono::milliseconds span) {
         const auto start = std::chrono::steady_clock::now();
@@ -453,60 +500,94 @@ void test_camera_modes() {
     }
     climb_to(-10.0, 1000ms);
     cam = service.camera(1);
-    CHECK(cam.landing_active && cam.now == cfg.landing);
-    CHECK(service.mode_now(1) == cfg.landing);
+    CHECK(cam.landing_active && cam.now == (CameraMode{128, 72, 10.0, 3000}));
+    CHECK(service.mode_now(1) == cam.now);
     CHECK(service.stats().landing == 1);
     CHECK(!service.camera(2).landing_active); // parked: never
     {
         std::lock_guard<std::mutex> lock(mutex);
         const bool landing_seen = std::any_of(seen.begin(), seen.end(), [](const Seen &s) {
-            return s.id == 1 && s.width == 128 && s.height == 72 && s.mode.bitrate_kbps == 3000;
+            return s.id == 1 && s.mode.fps == 10.0 && s.mode.bitrate_kbps == 3000;
         });
         CHECK(landing_seen);
+        CHECK(std::all_of(seen.begin(), seen.end(),
+                          [](const Seen &s) { return s.width == 128 && s.height == 72; }));
     }
     climb_to(-33.0, 500ms); // inside the margin: still landing
     CHECK(service.camera(1).landing_active);
     climb_to(-40.0, 300ms);
-    watch(200ms);
+    watch(service, 200ms);
     cam = service.camera(1);
     CHECK(!cam.landing_active && cam.now == cam.normal);
 
     // Back down onto the dock: landing on the way, and once it has sat still for settle_s on the
-    // ground, its own camera again.
+    // ground, its normal mode again.
     climb_to(-5.0, 600ms);
     CHECK(service.camera(1).landing_active);
     climb_to(-0.1, 400ms);
-    watch(200ms);
+    watch(service, 200ms);
     CHECK(service.camera(1).landing_active); // just touched down: not at rest yet
-    watch(700ms);
+    watch(service, 700ms);
     CHECK(!service.camera(1).landing_active);
 
-    // A hover over the dock, however still, is not at rest: the landing camera stays.
+    // A hover over the dock, however still, is not at rest: the landing mode stays.
     climb_to(-12.0, 400ms);
-    watch(1000ms);
+    watch(service, 1000ms);
     CHECK(service.camera(1).landing_active);
 
-    // Turned off for the vehicle: its own camera at once; DELETE (reset) gives the fleet's back.
+    // Turned off for the vehicle: its normal mode at once; reset gives the fleet's back.
     skysim::render::CameraSettingsPatch off;
     off.landing_enabled = false;
     cam = *service.configure(1, off, &error);
     CHECK(!cam.landing_available);
-    watch(200ms);
+    watch(service, 200ms);
     CHECK(!service.camera(1).landing_active && service.mode_now(1) == service.camera(1).normal);
     skysim::render::CameraSettingsPatch reset;
     reset.reset = true;
     cam = *service.configure(1, reset, &error);
     CHECK(cam.landing_available && !cam.normal_own);
 
-    // Its own landing camera, from the fleet's: a patch that names only a rate.
+    // Its own landing mode, from the fleet's: a patch that names only a rate; and its own picture
+    // size (the fleet's draw size does not fit it, so its normal mode is drawn at the picture size).
     skysim::render::CameraSettingsPatch own;
     own.landing.fps = 4.0;
     cam = *service.configure(1, own, &error);
     CHECK(cam.landing_own && cam.landing == (CameraMode{128, 72, 4.0, 3000}));
+    skysim::render::CameraSettingsPatch picture;
+    picture.picture_width = 256;
+    picture.picture_height = 144;
+    cam = *service.configure(1, picture, &error);
+    // (its landing mode, drawn at the picture's own size, follows the picture)
+    CHECK(cam.picture_own && cam.picture_width == 256 && cam.normal.width == 64 && cam.landing.width == 256);
 
     // forget(): a despawned vehicle's settings go with it.
     service.forget(2);
     CHECK(!service.camera(2).normal_own);
+    (void)cfg;
+    service.forget(1);
+    service.publish_poses({}); // nothing left to draw for the sink the next service shares
+    std::this_thread::sleep_for(200ms);
+
+    // The rest rate: a vehicle parked on its dock is drawn at it (its picture unchanged, so these
+    // are re-sends), and the stream is still told its mode's rate.
+    {
+        RenderService rest(make(2.0));
+        RenderService::Pose p = a;
+        p.position_ned = {0.0, 0.0, -0.1};
+        rest.publish_poses({p});
+        watch(rest, 300ms);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            seen.clear();
+        }
+        watch(rest, 2000ms);
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto n = std::count_if(seen.begin(), seen.end(), [](const Seen &s) { return s.id == 1; });
+        std::printf("test_render: 2 s parked at a 2 fps rest rate: %ld pictures\n", static_cast<long>(n));
+        CHECK(n >= 3 && n <= 6);
+        CHECK(std::all_of(seen.begin(), seen.end(), [](const Seen &s) { return s.mode.fps == 20.0; }));
+        CHECK(rest.camera(1).resting && rest.camera(1).now.fps == 2.0);
+    }
 }
 
 } // namespace
@@ -940,6 +1021,7 @@ int main() {
     }
 
     test_ground_cache(dir);
+    test_resize();
     test_camera_modes();
 
     std::filesystem::remove_all(dir);

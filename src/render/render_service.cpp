@@ -1,6 +1,7 @@
 #include "render/render_service.h"
 
 #include "render/jpeg.h"
+#include "render/resize.h"
 #include "render/still.h"
 
 #include <algorithm>
@@ -87,7 +88,16 @@ bool apply_mode_patch(CameraMode &m, const CameraModePatch &patch, std::string *
     return true;
 }
 
-bool usable(const CameraMode &m) { return m.width > 0 && m.height > 0 && m.fps > 0.0; }
+bool usable(const CameraMode &m) { return m.fps > 0.0; }
+
+// A mode's size resolved against the picture: 0 means the picture's own.
+CameraMode sized(CameraMode m, std::pair<int, int> picture) {
+    if (m.width <= 0 || m.height <= 0) {
+        m.width = picture.first;
+        m.height = picture.second;
+    }
+    return m;
+}
 
 } // namespace
 
@@ -206,6 +216,11 @@ double RenderService::Window::fps() const {
 
 // --- per-vehicle camera modes (TASK-2661) --------------------------------------------------
 
+std::pair<int, int> RenderService::picture_of(const Setting *s) const {
+    return s != nullptr && s->picture ? *s->picture
+                                      : std::pair<int, int>{cfg_.camera.width, cfg_.camera.height};
+}
+
 CameraMode RenderService::normal_of(const Setting *s) const {
     return s != nullptr && s->normal ? *s->normal : fleet_mode();
 }
@@ -225,17 +240,26 @@ std::optional<CameraMode> RenderService::landing_of(const Setting *s) const {
 
 RenderService::VehicleCamera RenderService::describe(const Setting *s) const {
     VehicleCamera c;
-    c.normal = normal_of(s);
+    const std::pair<int, int> picture = picture_of(s);
+    c.picture_width = picture.first;
+    c.picture_height = picture.second;
+    c.picture_own = s != nullptr && s->picture.has_value();
+    c.normal = sized(normal_of(s), picture);
     c.normal_own = s != nullptr && s->normal.has_value();
     const std::optional<CameraMode> landing = landing_of(s);
     c.landing_available = landing.has_value();
     c.landing_enabled = s == nullptr || s->landing_enabled;
-    c.landing = landing.value_or(s != nullptr && s->landing ? *s->landing : cfg_.landing);
+    c.landing = sized(landing.value_or(s != nullptr && s->landing ? *s->landing : cfg_.landing), picture);
     c.landing_own = s != nullptr && s->landing.has_value();
     c.landing_radius_m = cfg_.landing_radius_m;
     c.landing_height_m = cfg_.landing_height_m;
     c.landing_active = s != nullptr && s->landing_active && landing.has_value();
-    c.now = c.landing_active ? *landing : c.normal;
+    c.rest_fps = cfg_.rest_fps;
+    c.resting = s != nullptr && s->resting && !c.landing_active && cfg_.rest_fps > 0.0;
+    c.now = c.landing_active ? c.landing : c.normal;
+    if (c.resting) {
+        c.now.fps = cfg_.rest_fps;
+    }
     if (s != nullptr) {
         c.watched = s->watched;
         c.fps = s->fps;
@@ -252,9 +276,18 @@ RenderService::configure(uint32_t vehicle_id, const CameraPatch &patch, std::str
     const auto it = settings_.find(vehicle_id);
     Setting next = it != settings_.end() ? it->second : Setting{};
     if (patch.reset) {
+        next.picture.reset();
         next.normal.reset();
         next.landing.reset();
         next.landing_enabled = true;
+    }
+    if (patch.picture_width || patch.picture_height) {
+        if (!check_picture_patch(patch, error)) {
+            return std::nullopt;
+        }
+        const std::pair<int, int> now = picture_of(&next);
+        next.picture = std::pair<int, int>{patch.picture_width.value_or(now.first),
+                                           patch.picture_height.value_or(now.second)};
     }
     if (!patch.normal.empty()) {
         CameraMode m = normal_of(&next);
@@ -277,7 +310,24 @@ RenderService::configure(uint32_t vehicle_id, const CameraPatch &patch, std::str
     if (patch.landing_enabled) {
         next.landing_enabled = *patch.landing_enabled;
     }
+    // A mode drawn at another aspect ratio than the picture's would be stretched to it.
+    const std::pair<int, int> picture = picture_of(&next);
+    const double aspect = static_cast<double>(picture.first) / static_cast<double>(picture.second);
+    const auto same_aspect = [aspect, picture](const CameraMode &m) {
+        const CameraMode r = sized(m, picture);
+        return std::fabs(static_cast<double>(r.width) / static_cast<double>(r.height) - aspect) <=
+               0.01 * aspect;
+    };
+    const std::optional<CameraMode> landing = landing_of(&next);
+    if (!same_aspect(normal_of(&next)) || (landing && !same_aspect(*landing))) {
+        if (error != nullptr) {
+            *error = "a mode's draw size must have the picture's aspect ratio (" +
+                     std::to_string(picture.first) + "x" + std::to_string(picture.second) + ")";
+        }
+        return std::nullopt;
+    }
     Setting &stored = settings_[vehicle_id];
+    stored.picture = next.picture;
     stored.normal = next.normal;
     stored.landing = next.landing;
     stored.landing_enabled = next.landing_enabled;
@@ -291,6 +341,12 @@ RenderService::VehicleCamera RenderService::camera(uint32_t vehicle_id) const {
 }
 
 CameraMode RenderService::mode_now(uint32_t vehicle_id) const { return camera(vehicle_id).now; }
+
+CameraMode RenderService::stream_mode(uint32_t vehicle_id) const {
+    const VehicleCamera c = camera(vehicle_id);
+    const CameraMode &mode = c.landing_active ? c.landing : c.normal;
+    return {c.picture_width, c.picture_height, mode.fps, mode.bitrate_kbps};
+}
 
 void RenderService::forget(uint32_t vehicle_id) {
     std::lock_guard<std::mutex> lock(settings_mutex_);
@@ -431,8 +487,17 @@ void RenderService::run() {
     struct Drawn {
         Pose pose;
         std::shared_ptr<const GroundMarkers> markers; // the dock markers it was drawn with
-        std::shared_ptr<const Image> image;
+        std::shared_ptr<const Image> image;           // at the picture size
+        int drawn_width{0};                           // the size it was drawn at
+        int drawn_height{0};
         std::vector<uint8_t> jpeg;
+    };
+    // How a vehicle is drawn now: its mode (size resolved), its picture size, and the rate its
+    // frames are due at (the mode's, or the rest rate).
+    struct Draw {
+        CameraMode mode;
+        std::pair<int, int> picture;
+        double fps;
     };
     // Per vehicle in the fleet: whether it is moving (for the landing camera), whether it is on
     // the landing camera, when its next frame is due, and its own rate over the last seconds.
@@ -451,16 +516,16 @@ void RenderService::run() {
         uint64_t drawn{0};
         uint64_t reused{0};
     };
-    // A vehicle on the draw list, who wants it, and the mode it draws in now.
+    // A vehicle on the draw list, who wants it, and how it is drawn now.
     struct Wanted {
         const Pose *pose;
         bool jpeg;
         bool video;
-        CameraMode mode;
+        Draw draw;
     };
     std::unordered_map<uint32_t, Drawn> last;
     std::unordered_map<uint32_t, Track> tracks;
-    std::unordered_map<uint32_t, CameraMode> modes;
+    std::unordered_map<uint32_t, Draw> modes;
     std::vector<uint32_t> live;
     std::vector<uint32_t> lapsed;
     std::vector<uint32_t> lapsed_video;
@@ -542,7 +607,7 @@ void RenderService::run() {
             std::lock_guard<std::mutex> lock(settings_mutex_);
             for (auto it = settings_.begin(); it != settings_.end();) {
                 const Setting &st = it->second;
-                const bool own = st.normal || st.landing || !st.landing_enabled;
+                const bool own = st.picture || st.normal || st.landing || !st.landing_enabled;
                 it = !own && gone(it->first) ? settings_.erase(it) : std::next(it);
             }
             for (const Pose &pose : poses) {
@@ -559,7 +624,11 @@ void RenderService::run() {
                 }
                 st.landing_active = t.landing;
                 landing_now += t.landing ? 1 : 0;
-                modes[pose.vehicle_id] = t.landing ? *landing : normal_of(&st);
+                // At rest on the ground: its normal mode, at the rest rate.
+                st.resting = !t.landing && place.at_rest && cfg_.rest_fps > 0.0;
+                const std::pair<int, int> picture = picture_of(&st);
+                const CameraMode mode = sized(t.landing ? *landing : normal_of(&st), picture);
+                modes[pose.vehicle_id] = {mode, picture, st.resting ? cfg_.rest_fps : mode.fps};
             }
         }
 
@@ -702,22 +771,33 @@ void RenderService::run() {
             const std::shared_ptr<const GroundMarkers> markers =
                 cfg_.docks ? cfg_.docks->seen_by(pose->vehicle_id) : nullptr;
             Drawn &d = last[pose->vehicle_id];
-            if (d.image && same_pose(d.pose, *pose) && d.markers == markers &&
-                d.image->width == w.mode.width && d.image->height == w.mode.height) {
+            const CameraMode &mode = w.draw.mode;
+            const std::pair<int, int> &picture = w.draw.picture;
+            if (d.image && same_pose(d.pose, *pose) && d.markers == markers && d.drawn_width == mode.width &&
+                d.drawn_height == mode.height && d.image->width == picture.first &&
+                d.image->height == picture.second) {
                 ++pass.reused;
                 ++t.reused;
             } else {
                 const auto t0 = Clock::now();
                 CameraConfig cam = cfg_.camera;
-                cam.width = w.mode.width;
-                cam.height = w.mode.height;
+                cam.width = mode.width;
+                cam.height = mode.height;
                 const Camera camera = pose->gimbal
                                           ? Camera::on_gimbal(cam, pose->position_ned, pose->quat_ned_frd,
                                                               pose->gimbal_yaw_rad, pose->gimbal_pitch_rad)
                                           : Camera(cam, pose->position_ned, pose->quat_ned_frd);
                 const Rasterizer raster(cam);
-                d.image = std::make_shared<const Image>(
-                    raster.render(*scene_, camera, pool_.get(), nullptr, true, markers.get(), ground_.get()));
+                Image image =
+                    raster.render(*scene_, camera, pool_.get(), nullptr, true, markers.get(), ground_.get());
+                if (mode.width != picture.first || mode.height != picture.second) {
+                    // Drawn smaller (or larger) than the picture: every frame of a vehicle is its
+                    // picture's size, whatever mode drew it.
+                    image = resize_bilinear(image, picture.first, picture.second, pool_.get());
+                }
+                d.image = std::make_shared<const Image>(std::move(image));
+                d.drawn_width = mode.width;
+                d.drawn_height = mode.height;
                 d.pose = *pose;
                 d.markers = markers;
                 d.jpeg.clear();
@@ -750,14 +830,17 @@ void RenderService::run() {
                 }
             }
             if (w.video && cfg_.video_sink && !d.image->empty()) {
-                cfg_.video_sink(pose->vehicle_id, d.image, pose->sim_time_s, drawn_at, w.mode);
+                // The stream's picture, frame rate and bitrate: the mode's rate even at rest, so resting
+                // changes how often a frame comes, not the stream's encoder.
+                cfg_.video_sink(pose->vehicle_id, d.image, pose->sim_time_s, drawn_at,
+                                CameraMode{picture.first, picture.second, mode.fps, mode.bitrate_kbps});
             }
 
             // Its next frame: one period on from when this one was due, so a late frame does not
             // push the cadence back; a vehicle more than a period behind is due again at once,
             // which is the rate simply dropping (frames get older, nothing else is affected).
             const auto period = std::chrono::duration_cast<Clock::duration>(
-                std::chrono::duration<double>(1.0 / std::max(w.mode.fps, kMinCameraFps)));
+                std::chrono::duration<double>(1.0 / std::max(w.draw.fps, 0.1)));
             t.next_due = t.due_set ? std::max(t.next_due + period, started) : started + period;
             t.due_set = true;
             if (!t.counting) {

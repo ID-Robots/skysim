@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Per-vehicle camera modes and the landing camera, end to end (TASK-2661).
+"""Per-vehicle camera modes and the landing mode, end to end (TASK-2661).
 
-Starts skysim with a cheap fleet camera and a larger landing camera, then checks:
+Starts skysim with pictures drawn at half size in the normal mode, the landing mode at full size,
+and a rest rate, then checks:
 
-  - POST /vehicles "camera" gives a vehicle its own mode; one out of bounds is a 400 and spawns
-    nothing;
+  - POST /vehicles "camera" gives a vehicle its own picture size and mode; one out of bounds is a
+    400 and spawns nothing;
   - GET / POST / DELETE /instances/<n>/camera (and /vehicles/<id>/camera) read and change a
     vehicle's modes, refuse what is out of bounds without changing anything, and put it back;
-  - a vehicle flown up from its dock draws the landing camera while it is in the zone around the
-    dock and its own mode above it: its RTSP stream changes picture size on the same session (an
-    IDR with the new SPS each time), the intrinsics route follows, and /metrics counts it;
-  - a vehicle parked on its dock, and one whose landing camera is turned off, never switch.
+  - a vehicle flown up from its dock draws the landing mode while it is in the zone around the
+    dock and its normal mode above it, and its RTSP stream keeps one picture size throughout (an
+    IDR at each switch, for the new frame rate), the intrinsics route says what it is drawn at,
+    and /metrics counts it;
+  - a vehicle parked on its dock rests at the rest rate and never switches; nor does one whose
+    landing mode is turned off.
 
 Usage: python3 tests/camera_modes_smoke.py <path-to-skysim>
 """
@@ -35,9 +38,11 @@ SIM = sys.argv[1] if len(sys.argv) > 1 else "./build/skysim"
 API_PORT = 18702
 RTSP_PORT = 18703
 BASE = 54  # instances 54, 55, 56: udp 9542, 9552, 9562
-FLEET = (320, 180, 10.0)
-OWN = (256, 144, 8.0)
-LANDING = (640, 360, 5.0, 2000)
+FLEET = (320, 180, 10.0)  # the fleet's picture size and frame rate
+DRAW = (160, 90)  # the normal mode draws half that and scales it up
+OWN = (256, 144, 8.0)  # vehicle 54's own picture size and rate
+LANDING = (5.0, 2000)  # the landing mode's rate and bitrate; drawn at the picture size
+REST_FPS = 2.0
 LANDING_HEIGHT = 12.0
 MARGIN = 5.0
 FAILURES: list[str] = []
@@ -72,7 +77,11 @@ def listed(instance: int) -> dict | None:
 
 def mode_of(cam: dict, key: str) -> tuple:
     m = cam[key]
-    return (m["width"], m["height"], m["fps"])
+    return (m["draw_width"], m["draw_height"], m["fps"])
+
+
+def picture_of(cam: dict) -> tuple:
+    return (cam["picture"]["width"], cam["picture"]["height"])
 
 
 def rbsp(nal: bytes) -> bytes:
@@ -187,10 +196,10 @@ def main() -> int:
     cmd = [SIM, "--vehicles", "0", "--base-instance", str(BASE), "--time-mode", "interactive", "--dt", "0.0025",
            "--api-port", str(API_PORT), "--rtsp-port", str(RTSP_PORT), "--rtsp-bind", "127.0.0.1",
            "--camera-fps", f"{FLEET[2]:g}", "--camera-size", f"{FLEET[0]}x{FLEET[1]}", "--camera-fov", "81",
-           "--camera-threads", "2", "--camera-cache-mb", "64",
-           "--camera-landing-size", f"{LANDING[0]}x{LANDING[1]}", "--camera-landing-fps", f"{LANDING[2]:g}",
-           "--camera-landing-bitrate", str(LANDING[3]), "--camera-landing-radius", "25",
-           "--camera-landing-height", f"{LANDING_HEIGHT:g}"]
+           "--camera-threads", "2", "--camera-cache-mb", "64", "--camera-draw-size", f"{DRAW[0]}x{DRAW[1]}",
+           "--camera-landing-fps", f"{LANDING[0]:g}", "--camera-landing-bitrate", str(LANDING[1]),
+           "--camera-landing-radius", "25", "--camera-landing-height", f"{LANDING_HEIGHT:g}",
+           "--camera-rest-fps", f"{REST_FPS:g}"]
     proc = subprocess.Popen(cmd)
     sitl = None
     receiver = None
@@ -219,12 +228,14 @@ def main() -> int:
         check(None not in (climbing, parked, off), "all three listed")
 
         status, cam = call("GET", f"/instances/{BASE}/camera")
-        check(status == 200 and mode_of(cam, "normal") == OWN and cam["normal"]["own"],
-              f"its own normal mode {mode_of(cam, 'normal')}")
-        check(cam["landing"]["available"] and mode_of(cam, "landing") == LANDING[:3]
-              and cam["landing"]["bitrate_kbps"] == LANDING[3] and not cam["landing"]["own"],
-              "the fleet's landing camera")
-        check(cam["now"]["mode"] == "normal" and mode_of(cam, "now") == OWN, "draws its own mode on its dock")
+        check(status == 200 and picture_of(cam) == OWN[:2] and cam["picture"]["own"],
+              f"its own picture size {picture_of(cam)}")
+        check(mode_of(cam, "normal") == (*DRAW, OWN[2]) and cam["normal"]["own"],
+              f"its own rate, drawn at the fleet's draw size {mode_of(cam, 'normal')}")
+        check(cam["landing"]["available"] and mode_of(cam, "landing") == (*OWN[:2], LANDING[0])
+              and cam["landing"]["bitrate_kbps"] == LANDING[1] and not cam["landing"]["own"],
+              "the fleet's landing mode, drawn at its picture size")
+        check(cam["now"]["mode"] == "normal", "on its dock: its normal mode")
         check(call("GET", f"/vehicles/{climbing['id']}/camera")[1]["normal"] == cam["normal"],
               "the same by vehicle id")
         cam_off = call("GET", f"/instances/{BASE + 2}/camera")[1]
@@ -234,20 +245,24 @@ def main() -> int:
         # --- change and put back -------------------------------------------------------------
         path = f"/instances/{BASE + 1}/camera"
         status, cam = call("POST", path, {"fps": 4})
-        check(status == 200 and mode_of(cam, "normal") == (FLEET[0], FLEET[1], 4.0) and cam["normal"]["own"],
-              f"POST fps changes the rate alone {mode_of(cam, 'normal')}")
-        status, body = call("POST", path, {"width": 99999})
-        check(status == 400 and "width" in body.get("error", ""), "a width out of bounds is a 400")
-        check(mode_of(call("GET", path)[1], "normal") == (FLEET[0], FLEET[1], 4.0), "... and changes nothing")
+        check(status == 200 and mode_of(cam, "normal") == (*DRAW, 4.0) and cam["normal"]["own"]
+              and picture_of(cam) == FLEET[:2], f"POST fps changes the rate alone {mode_of(cam, 'normal')}")
+        cam = call("POST", path, {"draw": f"{FLEET[0]}x{FLEET[1]}"})[1]
+        check(mode_of(cam, "normal") == (*FLEET[:2], 4.0), "POST draw: drawn at full size")
+        status, body = call("POST", path, {"draw_width": 99999})
+        check(status == 400 and "draw_width" in body.get("error", ""), "a draw width out of bounds is a 400")
+        status, body = call("POST", path, {"draw": "100x100"})
+        check(status == 400 and "aspect" in body.get("error", ""), "a draw size of another aspect ratio is a 400")
+        check(mode_of(call("GET", path)[1], "normal") == (*FLEET[:2], 4.0), "... and changes nothing")
         check(call("POST", path, "{not json")[0] == 400, "a body that is not JSON is a 400")
         check(call("POST", path, {"size": "big"})[0] == 400, "a size that is not WxH is a 400")
         cam = call("POST", path, {"landing": {"fps": 3}})[1]
-        check(cam["landing"]["own"] and mode_of(cam, "landing") == (LANDING[0], LANDING[1], 3.0),
-              "its own landing camera, from the fleet's size")
+        check(cam["landing"]["own"] and mode_of(cam, "landing") == (*FLEET[:2], 3.0),
+              "its own landing mode, from the fleet's")
         cam = call("POST", path, {"landing": False})[1]
         check(not cam["landing"]["available"], "landing:false turns it off")
         status, cam = call("DELETE", path)
-        check(status == 200 and not cam["normal"]["own"] and mode_of(cam, "normal") == FLEET
+        check(status == 200 and not cam["normal"]["own"] and mode_of(cam, "normal") == (*DRAW, FLEET[2])
               and cam["landing"]["available"] and not cam["landing"]["own"], "DELETE: the fleet's settings again")
         check(call("GET", "/instances/999/camera")[0] == 404, "an unknown instance is a 404")
 
@@ -255,10 +270,16 @@ def main() -> int:
         receiver = Receiver(BASE)
         check(receiver.client.describe().status == 200 and receiver.client.play().status == 200,
               "RTSP DESCRIBE/SETUP/PLAY")
-        check(f"a=x-dimensions:{OWN[0]},{OWN[1]}" in receiver.client.sdp,
-              "the SDP names the picture it draws now")
+        check(f"a=x-dimensions:{OWN[0]},{OWN[1]}" in receiver.client.sdp, "the SDP names its picture size")
         receiver.start()
         time.sleep(1.5)
+        cam = call("GET", f"/instances/{BASE}/camera")[1]
+        check(cam["now"]["resting"] and cam["now"]["fps"] == REST_FPS and cam["watched"],
+              "watched on its dock, it rests: drawn at the rest rate")
+        rest_frames = len(receiver.client.frames)
+        time.sleep(2.0)
+        rest_rate = (len(receiver.client.frames) - rest_frames) / 2.0
+        check(1.0 <= rest_rate <= 3.5, f"... {rest_rate:.1f} frames/s over RTSP")
         sitl = FakeSitl({BASE: 1600, BASE + 1: 1000, BASE + 2: 1600})
         sitl.start()
         timeline = []
@@ -274,16 +295,17 @@ def main() -> int:
                 saw_landing = True
                 landing_metrics = max(landing_metrics, call("GET", "/metrics")[1]["camera"]["landing"])
                 intr = call("GET", f"/instances/{BASE}/camera/intrinsics")[1]
-                intrinsics_ok = intrinsics_ok or (intr["width"] == LANDING[0] and intr["landing"]["active"])
+                intrinsics_ok = intrinsics_ok or (intr["width"] == OWN[0] and intr["drawn"]["mode"] == "landing"
+                                                  and intr["drawn"]["width"] == OWN[0] and intr["fps"] == LANDING[0])
             elif saw_landing and height > LANDING_HEIGHT + MARGIN:
                 saw_after = True
                 break
             time.sleep(0.25)
         print(f"camera_modes_smoke: (height m, mode) every 0.25 s: {timeline}")
-        check(saw_landing, "climbing from its dock it draws the landing camera")
+        check(saw_landing, "climbing from its dock it draws the landing mode")
         check(saw_after, f"above {LANDING_HEIGHT + MARGIN:g} m it draws its own mode again")
         check(landing_metrics >= 1, "/metrics camera.landing counts it")
-        check(intrinsics_ok, "the intrinsics route follows (landing size, landing.active)")
+        check(intrinsics_ok, "the intrinsics route: the same picture, drawn full size at the landing rate")
         time.sleep(2.0)  # frames of its own mode after the switch back
         receiver.stop = True
         receiver.join(timeout=5)
@@ -295,22 +317,27 @@ def main() -> int:
                     if not sizes or sizes[-1] != size:
                         sizes.append(size)
         print(f"camera_modes_smoke: picture sizes over the RTSP session, in order: {sizes}")
-        check(sizes[:1] == [OWN[:2]] and (LANDING[0], LANDING[1]) in sizes and sizes[-1] == OWN[:2],
-              "one RTSP session: its own size, the landing size, its own size again (new SPS on each IDR)")
+        check(sizes == [OWN[:2]], "one RTSP session, one picture size throughout (landing or not)")
         idr_at_switch = all(f.idr for k, f in enumerate(receiver.client.frames)
                             if any(n and n[0] & 0x1F == 7 for n in f.nals))
         check(idr_at_switch, "every SPS rides on an IDR")
+        # Frame spacing over RTP: the landing rate (5 fps, 200 ms) in the zone, the vehicle's own
+        # (8 fps, 125 ms) elsewhere.
+        steps = [(b.rtp_ts - a.rtp_ts) / 90.0 for a, b in zip(receiver.client.frames, receiver.client.frames[1:])]
+        check(any(180 < s < 220 for s in steps) and any(110 < s < 140 for s in steps),
+              "frames 200 ms apart while landing and 125 ms apart in its normal mode")
 
         cam = call("GET", f"/instances/{BASE + 1}/camera")[1]
-        check(not cam["landing"]["active"] and cam["now"]["mode"] == "normal", "the parked vehicle never switched")
+        check(not cam["landing"]["active"] and cam["now"]["mode"] == "normal" and cam["now"]["resting"],
+              "the parked vehicle never switched, and rests")
         cam = call("GET", f"/instances/{BASE + 2}/camera")[1]
         check(not cam["landing"]["active"], "the vehicle with its landing camera off never switched")
         check(call("DELETE", f"/vehicles/{climbing['id']}")[0] == 200, "despawn")
         status, _ = call("POST", "/vehicles", {"instance": BASE})
         time.sleep(0.3)
         cam = call("GET", f"/instances/{BASE}/camera")[1]
-        check(status == 200 and not cam["normal"]["own"] and mode_of(cam, "normal") == FLEET,
-              "the next vehicle at the instance starts from the fleet's camera")
+        check(status == 200 and not cam["normal"]["own"] and not cam["picture"]["own"]
+              and picture_of(cam) == FLEET[:2], "the next vehicle at the instance starts from the fleet's camera")
     finally:
         if sitl is not None:
             sitl.stop = True

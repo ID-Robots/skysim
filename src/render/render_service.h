@@ -54,12 +54,15 @@ namespace skysim::render {
 // video/video_service.h). A vehicle is drawn when its next frame is due if either wants it; the
 // JPEG is made only for the first kind, so a vehicle watched only over RTSP costs no JPEG encode.
 //
-// Each vehicle has its own camera mode, picture size and frame rate (TASK-2661, camera_mode.h):
-// the fleet's (Config::camera, Config::fps) unless configure() gave it its own, and the landing
-// camera (Config::landing) while it is in the air near its dock. Each is drawn on its own
-// schedule, so a 1920x1080 landing at 15 fps and a fleet of 640x360 cruisers at 30 share the
-// threads without one setting the pace of the others. The lit ground comes from a cache shared
-// by every vehicle (Config::ground_cache_bytes, render/ground_cache.h).
+// Each vehicle has its own picture size (the fleet's, Config::camera, unless configure() gave it
+// its own) and draws it in a mode (TASK-2661, camera_mode.h): its normal mode (Config::draw_* and
+// Config::fps unless it has its own), the landing mode (Config::landing) while it is in the air
+// near its dock, and its normal mode at Config::rest_fps while it sits still on the ground. A mode
+// drawn smaller than the picture is scaled up to it (render/resize.h), so every frame of a vehicle
+// is the same size. Each vehicle is drawn on its own schedule, so a full-size landing at 15 fps
+// and a fleet drawn at a third of the size at 30 share the threads without one setting the pace
+// of the others. The lit ground comes from a cache shared by every vehicle
+// (Config::ground_cache_bytes, render/ground_cache.h).
 class RenderService {
   public:
     struct Config {
@@ -73,15 +76,22 @@ class RenderService {
         std::shared_ptr<const DockBoard> docks;
         std::string tiles_dir;
         uint32_t texture_seed{1};
-        // The fleet's frame rate: with camera.width and camera.height, the mode every vehicle draws
-        // unless it has its own.
+        // The fleet's normal mode: drawn at draw_width x draw_height (0: camera.width x
+        // camera.height, the picture size) at `fps`, unless a vehicle has its own.
         double fps{10.0};
+        int draw_width{0};
+        int draw_height{0};
+        // A vehicle at rest on the ground (settle_s, below) is drawn at this rate instead of its
+        // mode's (0: no rest rate). Its picture does not change, so this only saves re-sending —
+        // and re-encoding — the same picture: a parked vehicle somebody reads at 30 fps costs a
+        // full-size H.264 encode 30 times a second for nothing. Its stream keeps its frame rate.
+        double rest_fps{0.0};
         int quality{70};
-        // The landing camera (TASK-2661): a vehicle within landing_radius_m of its dock (its
+        // The landing mode (TASK-2661): a vehicle within landing_radius_m of its dock (its
         // DockBoard dock; where it spawned, Pose::home, without one) and at most landing_height_m
-        // above the ground, and not at rest, draws `landing` instead of its normal mode. Leaving
-        // takes landing_margin_m more of either, so a vehicle on the boundary does not flap. Off
-        // while landing.width is 0 (a vehicle can still be given one of its own).
+        // above the ground, and not at rest, draws `landing` instead of its normal mode (its size 0:
+        // the picture size). Leaving takes landing_margin_m more of either, so a vehicle on the
+        // boundary does not flap. Off while landing.fps is 0 (a vehicle can still be given one).
         CameraMode landing{};
         double landing_radius_m{25.0};
         double landing_height_m{40.0};
@@ -194,12 +204,15 @@ class RenderService {
     std::optional<VehicleCamera> configure(uint32_t vehicle_id, const CameraPatch &patch, std::string *error);
     // The vehicle's camera: its modes and what it draws now.
     VehicleCamera camera(uint32_t vehicle_id) const;
-    // What it draws now (its picture size, frame rate and stream bitrate).
+    // The mode it draws in now (sizes resolved; at rest, the rest rate).
     CameraMode mode_now(uint32_t vehicle_id) const;
+    // What its stream carries now: its picture size, its mode's frame rate (at rest too: resting
+    // changes how often a frame comes, not the stream) and bitrate. For the H.264 encoder.
+    CameraMode stream_mode(uint32_t vehicle_id) const;
     // The vehicle despawned: its settings go with it.
     void forget(uint32_t vehicle_id);
-    // The fleet's own modes.
-    CameraMode fleet_mode() const { return {cfg_.camera.width, cfg_.camera.height, cfg_.fps, 0}; }
+    // The fleet's normal mode (its size 0: the picture size).
+    CameraMode fleet_mode() const { return {cfg_.draw_width, cfg_.draw_height, cfg_.fps, 0}; }
     const Config &config() const { return cfg_; }
 
     size_t tiles_loaded() const { return tiles_loaded_; }
@@ -246,16 +259,19 @@ class RenderService {
 
     // One vehicle's settings and what the render thread last decided for it, under settings_mutex_.
     struct Setting {
-        std::optional<CameraMode> normal;  // its own
+        std::optional<std::pair<int, int>> picture; // its own picture size
+        std::optional<CameraMode> normal;           // its own
         std::optional<CameraMode> landing; // its own
         bool landing_enabled{true};
         bool landing_active{false};
+        bool resting{false};
         bool watched{false};
         double fps{0.0};
         double render_ms{0.0};
         uint64_t drawn{0};
         uint64_t reused{0};
     };
+    std::pair<int, int> picture_of(const Setting *s) const;
     CameraMode normal_of(const Setting *s) const;
     std::optional<CameraMode> landing_of(const Setting *s) const;
     VehicleCamera describe(const Setting *s) const;

@@ -63,10 +63,14 @@ if [[ -n "${SKYSIM_CAMERA_FPS:-}" ]]; then
     add_if_set SKYSIM_CAMERA_FOV --camera-fov
     add_if_set SKYSIM_CAMERA_PITCH --camera-pitch
     add_if_set SKYSIM_CAMERA_RANGE --camera-range
-    # The landing camera (TASK-2661): what a vehicle draws while it is in the air near its dock,
-    # e.g. SKYSIM_CAMERA_LANDING_SIZE=1920x1080 SKYSIM_CAMERA_LANDING_FPS=15
-    # SKYSIM_CAMERA_LANDING_BITRATE=4000; the radius and height of that zone around the dock;
-    # SKYSIM_CAMERA_CACHE_MB the lit-ground cache (default 512, 0 = off).
+    # How the pictures are drawn (TASK-2661). Every picture is SKYSIM_CAMERA_SIZE; the normal mode
+    # draws it at SKYSIM_CAMERA_DRAW_SIZE and scales it up; the landing mode, while a vehicle is in
+    # the air near its dock, e.g. SKYSIM_CAMERA_LANDING_SIZE=1920x1080 SKYSIM_CAMERA_LANDING_FPS=15
+    # SKYSIM_CAMERA_LANDING_BITRATE=4000, in a zone of SKYSIM_CAMERA_LANDING_RADIUS /
+    # SKYSIM_CAMERA_LANDING_HEIGHT around the dock; SKYSIM_CAMERA_REST_FPS the rate of a vehicle
+    # sitting still on the ground; SKYSIM_CAMERA_CACHE_MB the lit-ground cache (512, 0 = off).
+    add_if_set SKYSIM_CAMERA_DRAW_SIZE --camera-draw-size
+    add_if_set SKYSIM_CAMERA_REST_FPS --camera-rest-fps
     add_if_set SKYSIM_CAMERA_LANDING_SIZE --camera-landing-size
     add_if_set SKYSIM_CAMERA_LANDING_FPS --camera-landing-fps
     add_if_set SKYSIM_CAMERA_LANDING_BITRATE --camera-landing-bitrate

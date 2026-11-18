@@ -8,15 +8,17 @@ arguments, flies one vehicle straight up over its dock with an altitude hold (gi
 and at each height reads the stream for a few seconds and runs cv2.aruco (DICT_7X7_250, default
 DetectorParameters) on every frame.
 
-One VideoCapture stays open for the whole flight, from the ground up, as a consumer's would: so
-with a landing camera (--camera-landing-size) the run also shows what OpenCV does when the
-picture size changes mid-stream.
+One VideoCapture stays open for the whole flight, from the ground up, as a consumer's would, and
+the run lists every picture size it decoded: with a landing mode the stream must keep one size
+(OpenCV's FFmpeg capture keeps returning the last frame of the old size when it changes).
+--offset moves the dock that far east of the vehicle's climb, as when the landing takes over
+within 15 m of home.
 
   python3 tools/render_probe/stream_check.py --sim build/skysim --label dev \\
       --args "--camera-fps 30 --camera-size 640x360 --camera-fov 78"
   python3 tools/render_probe/stream_check.py --sim build/skysim --label landing \\
-      --args "--camera-fps 30 --camera-size 640x360 --camera-fov 81 --camera-landing-size 1920x1080 \\
-              --camera-landing-fps 15 --camera-landing-bitrate 4000"
+      --args "--camera-fps 30 --camera-size 1920x1080 --camera-draw-size 640x360 --camera-fov 81 \\
+              --camera-landing-fps 15 --camera-landing-bitrate 4000 --camera-rest-fps 2"
 """
 from __future__ import annotations
 
@@ -168,6 +170,7 @@ def main() -> int:
     ap.add_argument("--label", default="")
     ap.add_argument("--json", default="")
     ap.add_argument("--save", default="", help="keep one decoded frame per height here")
+    ap.add_argument("--offset", type=float, default=0.0, help="the dock this many metres east of the vehicle")
     args = ap.parse_args()
     if cv2 is None:
         print("stream_check: needs python3 OpenCV (cv2)", file=sys.stderr)
@@ -200,6 +203,8 @@ def main() -> int:
         api("/vehicles", {"instance": INSTANCE}, "POST")
         while not any(v["instance"] == INSTANCE for v in api("/vehicles")):
             time.sleep(0.05)
+        if args.offset:
+            api(f"/instances/{INSTANCE}/camera/dock", {"north_m": 0.0, "east_m": args.offset}, "POST")
         sitl = FakeSitl(9002 + 10 * INSTANCE)
         sitl.start()
         reader = Reader(f"rtsp://127.0.0.1:{RTSP_PORT}/instances/{INSTANCE}/main.264")
@@ -217,9 +222,11 @@ def main() -> int:
             size = f"{frames[-1][1].shape[1]}x{frames[-1][1].shape[0]}" if frames else "-"
             if args.save and frames:
                 os.makedirs(args.save, exist_ok=True)
-                cv2.imwrite(os.path.join(args.save, f"{args.label or 'stream'}_{h:g}m.png"), frames[-1][1])
-            row = {"label": args.label, "height_m": h, "held": held, "mode": cam["now"]["mode"],
-                   "camera": f"{cam['now']['width']}x{cam['now']['height']}@{cam['now']['fps']:g}",
+                name = f"{args.label or 'stream'}_{h:g}m" + (f"_east{args.offset:g}m" if args.offset else "")
+                cv2.imwrite(os.path.join(args.save, name + ".png"), frames[-1][1])
+            row = {"label": args.label, "height_m": h, "offset_m": args.offset, "held": held,
+                   "mode": cam["now"]["mode"],
+                   "camera": f"{cam['now']['draw_width']}x{cam['now']['draw_height']}@{cam['now']['fps']:g}",
                    "decoded_size": size, "frames": len(frames),
                    "fps": round(len(frames) / args.seconds, 1), "detected_228": found}
             rows.append(row)
@@ -237,7 +244,7 @@ def main() -> int:
             proc.kill()
     sizes = reader.sizes if reader else []
     print(f"stream_check: picture sizes OpenCV decoded, in order: {sizes}; read errors {reader.errors if reader else 0}")
-    print(f"| {args.label} | height | camera now | decoded | frames | 228 detected |")
+    print(f"| {args.label} | height | camera now (mode, drawn at) | decoded | frames | 228 detected |")
     for r in rows:
         print(f"| | {r['height_m']:g} m | {r['mode']} {r['camera']} | {r['decoded_size']} | {r['frames']} | "
               f"{r['detected_228']} of {r['frames']} |")

@@ -1,11 +1,15 @@
 #pragma once
-// What a vehicle's pilot camera draws: its picture size and frame rate (TASK-2661).
+// What a vehicle's pilot camera draws, and how often (TASK-2661).
 //
-// Every vehicle draws the fleet's camera (--camera-size, --camera-fps) unless it was given its own
-// (POST /vehicles "camera", POST /instances/<n>/camera), and switches to the landing camera
-// (--camera-landing-*) while it is in the air close to its dock, so the full-size pictures the dock
-// marker needs are only drawn where a landing can use them. The consumer sees one stream whose
-// picture size changes there; nothing else about it does.
+// A vehicle's picture has one size, the fleet's (--camera-size) unless it was given its own: what
+// camera.jpg, camera.mjpg, the RTSP stream and the intrinsics have, from the first frame to the
+// last. What changes is how it is drawn. A mode is the size the picture is drawn at — scaled up to
+// the picture size when smaller — its frame rate and its stream's bitrate. A vehicle draws its
+// normal mode (--camera-draw-size, --camera-fps), the landing mode (--camera-landing-*) while it is
+// in the air near its dock, where the dock marker needs every pixel, and its normal mode at the
+// rest rate (--camera-rest-fps) while it sits still on the ground. So a consumer sees the same
+// endpoints, formats and picture size throughout: OpenCV's FFmpeg capture, for one, does not follow
+// a picture that changes size mid-stream (it keeps returning the last frame of the old size).
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -13,6 +17,7 @@
 namespace skysim::render {
 
 struct CameraMode {
+    // The size it is drawn at. Scaled to the vehicle's picture size when different (0: that size).
     int width{0};
     int height{0};
     double fps{0.0};
@@ -73,16 +78,34 @@ inline bool check_mode_patch(const CameraModePatch &patch, std::string *error) {
 // A change to one vehicle's camera: POST /vehicles "camera", POST and DELETE
 // /instances/<n>/camera (RenderService::configure).
 struct CameraSettingsPatch {
-    bool reset{false}; // back to the fleet's settings first (both modes)
+    bool reset{false}; // back to the fleet's settings first (both modes and the picture size)
+    // The picture size. Best given at spawn: changing it on a vehicle somebody is reading changes
+    // the size of the stream they are reading.
+    std::optional<int> picture_width;
+    std::optional<int> picture_height;
     CameraModePatch normal;
     CameraModePatch landing;
     std::optional<bool> landing_enabled;
 
-    bool empty() const { return !reset && normal.empty() && landing.empty() && !landing_enabled; }
+    bool empty() const {
+        return !reset && !picture_width && !picture_height && normal.empty() && landing.empty() &&
+               !landing_enabled;
+    }
 };
+
+// The picture size of a patch against the bounds, as check_mode_patch does a mode's.
+inline bool check_picture_patch(const CameraSettingsPatch &patch, std::string *error) {
+    CameraModePatch size;
+    size.width = patch.picture_width;
+    size.height = patch.picture_height;
+    return check_mode_patch(size, error);
+}
 
 // One vehicle's camera, as GET /instances/<n>/camera reports it.
 struct VehicleCameraState {
+    int picture_width{0}; // what every frame of it is
+    int picture_height{0};
+    bool picture_own{false};
     CameraMode normal;
     bool normal_own{false}; // its own, not the fleet's
     // The landing camera: available when the fleet has one or the vehicle was given one, and not
@@ -93,8 +116,11 @@ struct VehicleCameraState {
     bool landing_own{false};
     double landing_radius_m{0.0};
     double landing_height_m{0.0};
-    CameraMode now; // what it draws now
+    CameraMode now; // what it draws now (sizes resolved: never 0)
     bool landing_active{false};
+    // At rest on the ground and drawn at the rest rate (rest_fps, 0 = no rest rate).
+    bool resting{false};
+    double rest_fps{0.0};
     bool watched{false};      // somebody asked for its pictures within the demand window
     double fps{0.0};          // frames it got per second, over the last couple of seconds
     double render_ms{0.0};    // its last drawn frame
