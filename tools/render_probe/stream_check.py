@@ -85,6 +85,7 @@ class FakeSitl(threading.Thread):
         self.integral = 0.0
         self.received = 0.0  # when the last state reply arrived (monotonic)
         self.window: dict | None = None  # what the replies since hold() returned looked like
+        self.settling: dict | None = None  # while hold() waits: its target, and in the band since when
 
     def pwm(self) -> int:
         if self.state is None or self.target <= 0.0:
@@ -123,8 +124,16 @@ class FakeSitl(threading.Thread):
         if not has_telemetry(state):
             return
         with self.lock:
-            self.state = state
             now = time.monotonic()
+            p = self.settling
+            if p is not None:
+                # Every reply counts toward the second hold() waits for, not only the ones its polls
+                # happen to see: one out of the band, or one after a stale gap, starts it again.
+                if now - self.received >= FRESH_S or not self._in_band(state, p["target"]):
+                    p["since"] = None
+                if self._in_band(state, p["target"]) and p["since"] is None:
+                    p["since"] = time.time()
+            self.state = state
             w = self.window
             if w is not None:
                 w["gap"] = max(w["gap"], now - w["last"])
@@ -138,32 +147,45 @@ class FakeSitl(threading.Thread):
         with self.lock:
             return -self.state["position"][2] if self.state else 0.0
 
+    @staticmethod
+    def _in_band(state, target: float) -> bool:
+        return abs(-state["position"][2] - target) < HOLD_BAND_M and abs(state["velocity"][2]) < HOLD_SPEED_MS
+
     def hold(self, target: float, timeout: float = 90.0) -> bool:
         self.target = target
         deadline = time.time() + timeout
-        steady = None
-        while time.time() < deadline:
-            # The telemetry is read, judged and — when the hold has lasted — the window opened, all
-            # under the lock a reply is stored under (accept): no reply can come between "it is in the
-            # band" and the window that is to see every reply after, so one that is not in the band
-            # either is the one judged here, or is in the window.
-            with self.lock:
-                s = self.state
-                fresh = time.monotonic() - self.received < FRESH_S  # replies still coming
-                if (s is not None and fresh and abs(-s["position"][2] - target) < HOLD_BAND_M
-                        and abs(s["velocity"][2]) < HOLD_SPEED_MS):
-                    steady = steady or time.time()
-                    if time.time() - steady > 1.0:
+        with self.lock:
+            # From here every reply is judged as it arrives (accept): the second in the band is
+            # counted from the first reply of an unbroken in-band run, so an excursion that comes and
+            # goes between two polls below still starts it again. The reply already here starts it
+            # if it is fresh and in the band.
+            s = self.state
+            fresh = time.monotonic() - self.received < FRESH_S
+            self.settling = {"target": target,
+                             "since": time.time() if s is not None and fresh and self._in_band(s, target) else None}
+        try:
+            while time.time() < deadline:
+                # The telemetry is judged and — when the hold has lasted — the window opened, all
+                # under the lock a reply is stored under (accept): no reply can come between "it has
+                # been in the band for a second" and the window that is to see every reply after, so
+                # one that is not in the band either restarted the second here, or is in the window.
+                with self.lock:
+                    p = self.settling
+                    if time.monotonic() - self.received >= FRESH_S:  # replies stopped: a stale gap
+                        p["since"] = None
+                    elif p["since"] is not None and time.time() - p["since"] > 1.0:
                         # Held — and the replies from here on are watched (end_window) until whoever
                         # measures has finished: a hold that was true when this returned says nothing
                         # about the seconds the stream is read for.
                         self.window = {"target": target, "last": self.received, "gap": 0.0, "deviation": 0.0,
                                        "speed": 0.0, "replies": 0}
+                        self.settling = None
                         return True
-                else:
-                    steady = None
-            time.sleep(0.05)
-        return False
+                time.sleep(0.05)
+            return False
+        finally:
+            with self.lock:
+                self.settling = None
 
     def end_window(self) -> list[str]:
         """Stops watching what hold() started to, and says why the hold did not last: nothing when
@@ -253,7 +275,7 @@ class _VirtualClock:
     milliseconds, well inside FRESH_S."""
 
     def __init__(self) -> None:
-        self.now = 1000.0  # not 0: hold() keeps its steady-since time in an `x or time.time()`
+        self.now = 1000.0
 
     def time(self) -> float:
         return self.now
@@ -269,43 +291,77 @@ class _VirtualClock:
 _real_time = time
 
 
-def selftest() -> int:
-    """hold() against a reply that is out of the band and arrives at the first moment hold() lets go
-    of the lock in the iteration in which it decides the hold has lasted a second: between its check
-    and (in a hold() that took the lock twice) the opening of its window. hold() must return True —
-    the telemetry was in the band — and its window must have seen the reply: end_window() names the
-    deviation. Run on a virtual clock, in one thread, so the injection is at that point every time
-    and not at a time that may fall before or after it. No simulator, no OpenCV."""
+def _selftest_run(at: float, inject) -> tuple[bool, float, list[float], list[str]]:
+    """hold(10.0) on a virtual clock, in one thread, from one in-band reply: `inject(sitl)` runs once,
+    at the first moment hold() lets go of the lock after `at` seconds on the clock hold() reads.
+    Returns whether hold() held, after how long, when the injection ran, and what its window says."""
     clock = _VirtualClock()
     started = clock.now
     sitl = FakeSitl(0)
     fired: list[float] = []
 
     def after_release() -> None:
-        # More than a second of steady telemetry on the clock hold() reads: this is the iteration that
-        # decides (the first with `time - steady > 1.0`; the one before it is at exactly 1.0 and does
-        # not). Once.
-        if not fired and clock.now - started > 1.0:
-            fired.append(clock.now)
-            sitl.accept({"position": [0.0, 0.0, -10.4], "velocity": [0.0, 0.0, 0.0]})  # 0.4 m off
+        if not fired and clock.now - started > at:
+            fired.append(clock.now - started)
+            inject(sitl)
 
     sitl.lock = _ReleaseHook(after_release)  # type: ignore[assignment]
-    sitl.accept({"position": [0.0, 0.0, -10.0], "velocity": [0.0, 0.0, 0.0]})
     globals()["time"] = clock
     try:
+        sitl.accept({"position": [0.0, 0.0, -10.0], "velocity": [0.0, 0.0, 0.0]})
         held = sitl.hold(10.0, timeout=30.0)
     finally:
         globals()["time"] = _real_time
     why = sitl.end_window() if held else []
-    print(f"stream_check selftest: hold() returned {held} after {clock.now - started:.2f} s on the virtual "
-          f"clock, the reply was injected at {[round(t - started, 2) for t in fired]}, the window says: {why}")
+    return held, clock.now - started, fired, why
+
+
+def selftest() -> int:
+    """hold() against replies injected at the moments that matter, on a virtual clock (sleeping
+    advances it), in one thread, so each lands at that point every time. No simulator, no OpenCV.
+
+    1. A reply out of the band, at the first moment hold() lets go of the lock in the iteration in
+       which it decides the hold has lasted a second: between its check and (in a hold() that took
+       the lock twice) the opening of its window. hold() must return True — the telemetry was in the
+       band — and its window must have seen the reply: end_window() names the deviation.
+    2. A reply out of the band and an in-band one replacing it, both between two of hold()'s polls,
+       half a second in: the second must start again there, so hold() returns no earlier than a
+       second after the excursion (it would return at 1.05 s if only its polls judged the replies).
+    3. A stale gap that ends between two polls, half a second in: the same."""
+    in_band = {"position": [0.0, 0.0, -10.0], "velocity": [0.0, 0.0, 0.0]}
+    off = {"position": [0.0, 0.0, -10.4], "velocity": [0.0, 0.0, 0.0]}  # 0.4 m off
+
+    def excursion(sitl) -> None:
+        sitl.accept(off)
+        sitl.accept(in_band)
+
+    def stale_gap(sitl) -> None:
+        with sitl.lock:
+            sitl.received -= FRESH_S + 0.05  # the last reply came longer than FRESH_S ago
+        sitl.accept(in_band)
+
     failures = []
+    # 1: the injection is in the iteration that decides (the first with `time - since > 1.0`; the
+    # one before it is at exactly 1.0 and does not).
+    held, took, fired, why = _selftest_run(1.0, lambda sitl: sitl.accept(off))
+    print(f"stream_check selftest 1: hold() returned {held} after {took:.2f} s on the virtual clock, the "
+          f"reply was injected at {[round(t, 2) for t in fired]}, the window says: {why}")
     if not fired:
-        failures.append("the reply was never injected")
+        failures.append("1: the reply was never injected")
     if not held:
-        failures.append("hold() did not return True on steady telemetry")
+        failures.append("1: hold() did not return True on steady telemetry")
     elif not any("off the height" in w for w in why):
-        failures.append("hold() returned, and its window missed the out-of-band reply")
+        failures.append("1: hold() returned, and its window missed the out-of-band reply")
+    for n, name, inject in ((2, "an excursion", excursion), (3, "a stale gap", stale_gap)):
+        held, took, fired, _ = _selftest_run(0.5, inject)
+        print(f"stream_check selftest {n}: {name} between two polls at {[round(t, 2) for t in fired]} s, "
+              f"hold() returned {held} after {took:.2f} s")
+        if not fired:
+            failures.append(f"{n}: {name} was never injected")
+        elif not held:
+            failures.append(f"{n}: hold() did not return True on steady telemetry after {name}")
+        elif took - fired[0] <= 1.0:
+            failures.append(f"{n}: hold() returned {took - fired[0]:.2f} s after {name}, not a second")
     for f in failures:
         print(f"stream_check selftest: FAIL: {f}")
     if not failures:
