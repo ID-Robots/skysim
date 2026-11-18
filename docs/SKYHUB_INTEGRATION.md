@@ -149,7 +149,7 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
     `SKYSIM_CAMERA_LANDING_FPS` (default the fleet's), `SKYSIM_CAMERA_LANDING_BITRATE` (kbit/s,
     default the stream's own), `SKYSIM_CAMERA_LANDING_RADIUS` (25 m), `SKYSIM_CAMERA_LANDING_HEIGHT`
     (40 m): drawn while a vehicle is within the radius of its dock (`GET .../camera/dock`), at most
-    the height above the ground, from when it leaves the ground (0.3 m up) until it leaves the zone or
+    the height above the ground, from when it leaves the ground (0.12 m up: a quad on the ground has its centre 0.07 m up) until it leaves the zone or
     comes to rest on the ground again. Leaving the zone takes 5 m more of either. A hover never
     counts as rest, so a SITL searching for the marker at 28.5 m keeps it.
   - **At rest**: `SKYSIM_CAMERA_REST_FPS` (default 0 = off): a vehicle still (2 cm, 0.5 deg) for 5 s

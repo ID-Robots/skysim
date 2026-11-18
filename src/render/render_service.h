@@ -90,7 +90,7 @@ class RenderService {
         int quality{70};
         // The landing mode (TASK-2661): a vehicle within landing_radius_m of its dock (its
         // DockBoard dock; where it spawned, Pose::home, without one) and at most landing_height_m
-        // above the ground, once it is off the ground (0.3 m up), draws `landing` instead of its
+        // above the ground, once it is off the ground (0.12 m up), draws `landing` instead of its
         // normal mode until it leaves the zone or comes to rest on the ground (its size 0:
         // the picture size). Leaving takes landing_margin_m more of either, so a vehicle on the
         // boundary does not flap. Off while landing.fps is 0 (a vehicle can still be given one).

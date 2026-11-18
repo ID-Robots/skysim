@@ -6,6 +6,7 @@
 // that silently draws a blank frame, or draws the world upside down, still
 // produces a valid JPEG.
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -349,6 +350,97 @@ void test_ground_cache(const std::filesystem::path &tiles) {
 
 // --- TASK-2661: per-vehicle camera modes and the landing camera ------------------------------
 
+// A JPEG's picture size, from its SOF0 or SOF2 marker; 0x0 when there is none.
+std::pair<int, int> jpeg_size(const std::vector<uint8_t> &jpeg) {
+    for (size_t i = 2; i + 9 < jpeg.size();) {
+        if (jpeg[i] != 0xFF) {
+            return {0, 0};
+        }
+        const uint8_t marker = jpeg[i + 1];
+        const size_t length = (static_cast<size_t>(jpeg[i + 2]) << 8) | jpeg[i + 3];
+        if (marker == 0xC0 || marker == 0xC2) {
+            return {(jpeg[i + 7] << 8) | jpeg[i + 8], (jpeg[i + 5] << 8) | jpeg[i + 6]};
+        }
+        i += 2 + length;
+    }
+    return {0, 0};
+}
+
+// After POST .../camera changes a vehicle's picture size, camera.jpg never hands out a frame of the
+// old size — not even one that was being drawn while the size changed (it is dropped, not
+// published). A frame is in flight much of the time here (60 fps, two threads), so a race that let
+// one through would show within these rounds.
+void test_picture_size_change() {
+    using namespace std::chrono_literals;
+    skysim::render::RenderService::Config cfg;
+    cfg.camera.width = 320;
+    cfg.camera.height = 180;
+    cfg.scene = skysim::render::load_scene("", 1);
+    cfg.fps = 60.0;
+    cfg.threads = 2;
+    cfg.background_priority = false;
+    cfg.ground_cache_bytes = 16u << 20;
+    skysim::render::RenderService service(cfg);
+    skysim::render::RenderService::Pose pose;
+    pose.vehicle_id = 3;
+    pose.position_ned = {0.0, 0.0, -20.0};
+    service.publish_poses({pose}); // in the fleet before anything asks
+    std::atomic<bool> stop{false};
+    std::thread mover([&] { // moving, so every frame is drawn rather than re-sent
+        for (int k = 0; !stop.load(); ++k) {
+            pose.position_ned = {0.001 * k, 0.0, -20.0};
+            service.publish_poses({pose});
+            std::this_thread::sleep_for(2ms);
+        }
+    });
+    // In the fleet, and drawn once, before the rounds start.
+    for (int i = 0; i < 200 && service.frame(3, 0, 50ms).jpeg.empty(); ++i) {
+        std::this_thread::sleep_for(5ms);
+    }
+    int wrong = 0;
+    int rounds = 0;
+    for (int k = 0; k < 40; ++k) {
+        const int width = k % 2 == 0 ? 320 : 256;
+        const int height = k % 2 == 0 ? 180 : 144;
+        skysim::render::CameraSettingsPatch size;
+        size.picture_width = width;
+        size.picture_height = height;
+        std::string error;
+        CHECK(service.configure(3, size, &error).has_value());
+        // The next frame after the change, and two more.
+        uint64_t seq = 0;
+        for (int f = 0; f < 3; ++f) {
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto frame = service.frame(3, seq, 2000ms);
+            if (frame.jpeg.empty()) {
+                ++wrong;
+                if (wrong <= 2) {
+                    std::printf(
+                        "test_render: round %d frame %d: none after %.0f ms (drawn %llu)\n", k, f,
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                            .count(),
+                        static_cast<unsigned long long>(service.stats().frames_drawn));
+                }
+                break;
+            }
+            seq = frame.seq;
+            const auto got = jpeg_size(frame.jpeg);
+            if (got != std::pair<int, int>{width, height}) {
+                ++wrong;
+                if (wrong <= 3) {
+                    std::printf("test_render: round %d frame %d: %dx%d, want %dx%d\n", k, f, got.first,
+                                got.second, width, height);
+                }
+            }
+        }
+        ++rounds;
+    }
+    stop = true;
+    mover.join();
+    std::printf("test_render: %d picture-size changes, %d frame(s) of the wrong size\n", rounds, wrong);
+    CHECK(wrong == 0);
+}
+
 void test_resize() {
     using skysim::render::Image;
     // A 2x2 picture scaled to 4x4: the corners keep their colours, the middle is their blend, and
@@ -559,9 +651,20 @@ void test_camera_modes() {
     watch(service, 700ms);
     CHECK(!service.camera(1).landing_active);
 
-    // A hover over the dock, however still, is not at rest: the landing mode stays.
+    // A hover over the dock, however still, is not at rest: the landing mode stays — at 12 m, and
+    // just off the ground at 0.2 m, held well past settle_s. Back on the ground (centre 0.075 m up)
+    // it comes to rest.
     climb_to(-12.0, 400ms);
     watch(service, 1000ms);
+    CHECK(service.camera(1).landing_active);
+    climb_to(-0.2, 400ms);
+    watch(service, 1000ms);
+    CHECK(service.camera(1).landing_active);
+    climb_to(-0.075, 100ms);
+    watch(service, 800ms);
+    CHECK(!service.camera(1).landing_active);
+    climb_to(-12.0, 400ms); // and up again for what follows
+    watch(service, 200ms);
     CHECK(service.camera(1).landing_active);
 
     // Turned off for the vehicle: its normal mode at once; reset gives the fleet's back.
@@ -1052,6 +1155,7 @@ int main() {
     test_ground_cache(dir);
     test_resize();
     test_camera_modes();
+    test_picture_size_change();
 
     std::filesystem::remove_all(dir);
     if (g_failures == 0) {

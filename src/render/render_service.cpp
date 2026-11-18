@@ -71,10 +71,12 @@ bool moved(const RenderService::Pose &a, const RenderService::Pose &b) {
            std::fabs(a.gimbal_yaw_rad - b.gimbal_yaw_rad) > kTurnRad;
 }
 
-// Only a vehicle this close to the ground can be at rest — on it, in practice: a quad rests with
-// its centre 0.075 m up. One holding a hover over its dock, even a low one as an autopilot
-// aligning for the last metre does, keeps the landing mode however still it holds.
-constexpr double kRestHeightM = 0.3;
+// On the ground: the dock and the landing zone are measured from the ground plane (NED z = 0, where
+// the markers lie), and a quad resting on it has its centre 0.07 m up (its collision box's half
+// height; World), give or take a tilt. Only a vehicle this low can be at rest, and one above it is
+// off the ground: a hover over the dock, even at 0.2 m, keeps the landing mode however still it
+// holds.
+constexpr double kRestHeightM = 0.12;
 
 // The longest the render thread sleeps with vehicles in the fleet: poses keep arriving without
 // waking it, and a vehicle that takes off from rest (2 fps, or 0.1) or enters the landing zone
@@ -901,7 +903,15 @@ void RenderService::run() {
                         std::chrono::duration_cast<std::chrono::microseconds>(
                             std::chrono::system_clock::now().time_since_epoch() - (Clock::now() - drawn_at))
                             .count();
-                    frames_.publish(pose->vehicle_id, d.jpeg, pose->sim_time_s, unix_us);
+                    // Only while the picture is still this vehicle's size: a POST that changed it
+                    // while this frame was drawn has erased the stored JPEG (configure()), and an
+                    // old-size frame published now would be served with the new intrinsics. Checked
+                    // and published under the settings lock, which configure() changes it under.
+                    std::lock_guard<std::mutex> lock(settings_mutex_);
+                    const auto it = settings_.find(pose->vehicle_id);
+                    if (picture_of(it != settings_.end() ? &it->second : nullptr) == picture) {
+                        frames_.publish(pose->vehicle_id, d.jpeg, pose->sim_time_s, unix_us);
+                    }
                 }
             }
             if (w.video && cfg_.video_sink && !d.image->empty()) {
