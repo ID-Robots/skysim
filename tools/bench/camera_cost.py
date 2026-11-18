@@ -15,6 +15,7 @@ the target rate would need (CPU-ms per frame x target fps x vehicles), which is 
 size a task with when the box ran out of CPU before the target.
 
 --state flying (default) climbs every vehicle (constant PWM), so every frame is a new picture;
+a run fails unless every vehicle asked to fly has left the ground before anything is measured;
 --state parked leaves the motors off, so every vehicle rests where it spawned and its picture
 does not change. --gimbal-pitch -90 (default) points every camera straight down, as during a
 dock approach; the ground is the most expensive thing to draw, so this is the worst case.
@@ -55,6 +56,11 @@ API_PORT = 18700
 RTSP_PORT = 18701
 BASE_INSTANCE = 120  # udp 10202+: 10000-10099 is often some other service's (WebRTC)
 DT = 0.0025
+# A vehicle asked to fly must have risen this far above where it spawned, in a GET /vehicles read
+# after --settle and before anything is measured, within TAKEOFF_S: PWM alone does not say it flies
+# (the default quad at --pwm 1100 makes ~0.44 N of thrust against 14.7 N of weight).
+AIRBORNE_M = 0.5
+TAKEOFF_S = 15.0
 
 
 def api(path: str, body: dict | None = None, method: str = "GET") -> Any:
@@ -221,7 +227,8 @@ def run_one(args: argparse.Namespace, size: str, fps: float, vehicles: int) -> d
                 if time.monotonic() > deadline:
                     raise RuntimeError("the fleet did not appear in GET /vehicles")
                 time.sleep(0.1)
-            instances = sorted(v["instance"] for v in api("/vehicles"))
+            spawned = {v["instance"]: v["pos_ned"][2] for v in api("/vehicles")}
+            instances = sorted(spawned)
             # --state parked: every vehicle rests on its dock; --parked N: the last N do, the rest fly.
             parked = len(instances) if args.state == "parked" else min(args.parked, len(instances))
             motors = [args.pwm] * (len(instances) - parked) + [1000] * parked
@@ -232,6 +239,25 @@ def run_one(args: argparse.Namespace, size: str, fps: float, vehicles: int) -> d
                     api(f"/instances/{i}/camera", {"landing": False}, "POST")
             sitl.start()
             time.sleep(args.settle)
+            # Every vehicle asked to fly is airborne, from a fresh read of the simulator, before any
+            # phase is measured: a run whose aircraft sit on the ground is not a flying run.
+            flying = instances[:len(instances) - parked]
+            deadline = time.monotonic() + TAKEOFF_S
+            while True:
+                now = {v["instance"]: v["pos_ned"][2] for v in api("/vehicles")}
+                height = {i: spawned[i] - now[i] for i in flying if i in now}
+                grounded = [i for i in flying if height.get(i, 0.0) < AIRBORNE_M]
+                if sitl.error:
+                    raise RuntimeError(f"stand-in SITL: {sitl.error}")
+                if not grounded:
+                    break
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        f"{len(grounded)} of {len(flying)} vehicle(s) asked to fly at --pwm {args.pwm} did not take "
+                        f"off (risen less than {AIRBORNE_M} m within {args.settle + TAKEOFF_S:g} s): "
+                        + ", ".join(f"instance {i} at {height.get(i, float('nan')):+.2f} m"
+                                    if i in height else f"instance {i} gone" for i in grounded))
+                time.sleep(0.1)
 
             c0, t0 = cpu_s(sim.pid), time.monotonic()
             time.sleep(args.idle_seconds)
