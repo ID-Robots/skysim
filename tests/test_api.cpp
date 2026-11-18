@@ -240,6 +240,10 @@ int main() {
             {R"({"clearance_m":null,"waypoints_ned":[[9,0,-10],[20,0,-10]]})", 1.0},
             {R"({"clearance_m":"nan","waypoints_ned":[[9,0,-10],[20,0,-10]]})", 1.0},
             {R"({"clearance_m":nan,"waypoints_ned":[[9,0,-10],[20,0,-10]]})", 1.0},
+            {R"({"clearance_m":0oops,"waypoints_ned":[[9,0,-10],[20,0,-10]]})", 1.0},
+            {R"({"clearance_m":0.5.3,"waypoints_ned":[[9,0,-10],[20,0,-10]]})", 1.0},
+            {R"({"waypoints_ned":[[9,0,-10],[20,0,-10]],"clearance_m":0 })", 0.0},
+            {R"({"waypoints_ned":[[9,0,-10],[20,0,-10]],"clearance_m":0)", 0.0},
         };
         size_t checks = 3;
         for (const auto &[body, clearance] : clearances) {

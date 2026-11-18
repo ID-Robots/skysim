@@ -181,7 +181,13 @@ double parse_clearance(const std::string &body) {
     }
     char *end = nullptr;
     const double value = std::strtod(p, &end);
-    return end != p && std::isfinite(value) && value >= 0.0 ? value : kDefault;
+    const char *rest = end;
+    while (std::isspace(static_cast<unsigned char>(*rest)) != 0) {
+        ++rest;
+    }
+    // The whole token, not a number's start: "0oops" is not a zero.
+    const bool whole = end != p && (*rest == ',' || *rest == '}' || *rest == '\0');
+    return whole && std::isfinite(value) && value >= 0.0 ? value : kDefault;
 }
 
 // {"waypoints_ned":[[n,e,d],[n,e,d],...]} — flat scan for numbers in triples, matching the

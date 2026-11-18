@@ -304,7 +304,17 @@ def unit_checks(cooker: types.ModuleType, payload: dict) -> None:
           "two ways, one reversed, stitch into one ring")
     check(cooker.stitch_rings([[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]]) == [], "an unclosable ring is dropped")
     clipped = cooker.clip_ring([(-10.0, -10.0), (20.0, -10.0), (20.0, 20.0), (-10.0, 20.0)], 0.0, 10.0)
-    check(abs(abs(cooker.signed_area(clipped)) - 100.0) < 1e-9, "clipped to the tile")
+    check(len(clipped) == 1 and abs(abs(cooker.signed_area(clipped[0])) - 100.0) < 1e-9, "clipped to the tile")
+    # A footprint with a notch across the tile edge: two pieces below it, no wall across the gap
+    # between them; one piece above it. 96000 m2 less the 44000 m2 notch, split 38400 / 13600.
+    notched = [(100.0, 4000.0), (300.0, 4000.0), (300.0, 4110.0), (700.0, 4110.0), (700.0, 4000.0),
+               (900.0, 4000.0), (900.0, 4120.0), (100.0, 4120.0)]
+    below = cooker.clip_ring(notched, 0.0, 4096.0)
+    above = cooker.clip_ring([(x, y - 4096.0) for x, y in notched], 0.0, 4096.0)
+    check(sorted(round(abs(cooker.signed_area(p))) for p in below) == [19200, 19200]
+          and all(len(p) == 4 and max(x for x, _ in p) - min(x for x, _ in p) == 200.0 for p in below),
+          f"a notch across the tile edge: two 200 m wide pieces below, nothing across the gap ({below})")
+    check(len(above) == 1 and round(abs(cooker.signed_area(above[0]))) == 13600, f"and one piece above ({above})")
     l_shape = [(0.0, 0.0), (10.0, 0.0), (10.0, 2.0), (2.0, 2.0), (2.0, 10.0), (0.0, 10.0)]
     check(cooker.point_in_ring(*cooker.interior_point(l_shape), l_shape), "interior point of an L")
     check(cooker.point_in_ring(*cooker.interior_point(square), square), "interior point of a square")
@@ -351,8 +361,8 @@ def unit_checks(cooker: types.ModuleType, payload: dict) -> None:
     # A vertex exactly on the tile edge: clipped without a doubled point, so the roof is there.
     seam = cooker.clip_ring([(4000.0, 0.0), (4096.0, 0.0), (4200.0, 0.0), (4200.0, 100.0), (4096.0, 100.0),
                              (4000.0, 100.0)], 0.0, 4096.0)
-    walls, caps = faces(cooker, seam)
-    check(len(seam) == 4 and caps == 2 * (len(seam) - 2), f"seam vertex: {len(seam)} corners, {caps} cap triangles")
+    walls, caps = faces(cooker, seam[0]) if len(seam) == 1 else (0, 0)
+    check(len(seam) == 1 and len(seam[0]) == 4 and caps == 4, f"seam vertex: {seam}, {caps} cap triangles")
     walls, caps = faces(cooker, [(0.0, 0.0), (0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0), (0.0, 0.0)])
     check(walls == 8 and caps == 4, f"repeated points dropped before extruding ({walls} walls, {caps} caps)")
 
@@ -391,6 +401,23 @@ def unit_checks(cooker: types.ModuleType, payload: dict) -> None:
     prisms, counts = cooker.extract_buildings(courtyard, ANCHOR_LAT, ANCHOR_LON)
     check(sorted(p.top_m for p in prisms) == [3.0, 12.0] and not counts["outline_with_parts"],
           f"a courtyard part leaves its building standing ({dict(counts)})")
+
+    # Two outer rings, a part in one: only that ring gives way. A part that would not be drawn
+    # (bottom at its top) replaces nothing.
+    east = [(lat, lon + 0.002) for lat, lon in outer]
+    tower = {"type": "way", "id": 5, "tags": {"building:part": "yes", "building:levels": "10"}, "geometry": way(kiosk)}
+    two = {"elements": [
+        {"type": "relation", "id": 6, "tags": {"type": "multipolygon", "building": "yes", "building:levels": "2"},
+         "members": [{"type": "way", "ref": 7, "role": "outer", "geometry": way(outer)},
+                     {"type": "way", "ref": 8, "role": "outer", "geometry": way(east)}]},
+        tower,
+    ]}
+    prisms, counts = cooker.extract_buildings(two, ANCHOR_LAT, ANCHOR_LON)
+    check(sorted(p.top_m for p in prisms) == [6.0, 30.0], f"a part replaces only its own outer ring ({prisms})")
+    flat = dict(tower, tags={"building:part": "yes", "height": "10", "min_height": "10"})
+    prisms, counts = cooker.extract_buildings({"elements": [two["elements"][0], flat]}, ANCHOR_LAT, ANCHOR_LON)
+    check(sorted(p.top_m for p in prisms) == [6.0, 6.0] and counts["degenerate"] == 1,
+          f"a part with no height replaces nothing ({dict(counts)})")
 
 
 # ---------------------------------------------------------------------------- skysim

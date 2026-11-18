@@ -387,36 +387,75 @@ def dedupe_ring(ring: list[tuple[float, float]]) -> list[tuple[float, float]]:
     return out
 
 
-def clip_ring(ring: list[tuple[float, float]], lo: float, hi: float) -> list[tuple[float, float]]:
-    """Sutherland-Hodgman: the ring cut to the square [lo, hi] x [lo, hi]."""
-    points = ring
-    for axis, bound, keep_above in ((0, lo, True), (0, hi, False), (1, lo, True), (1, hi, False)):
-        if not points:
-            break
+def _clip_half_plane(
+    ring: list[tuple[float, float]], axis: int, bound: float, keep_above: bool
+) -> list[list[tuple[float, float]]]:
+    """A counter-clockwise ring cut to one side of the line ``p[axis] == bound``: one ring per
+    piece left. Sutherland-Hodgman would join the pieces of a concave footprint along the line,
+    and that joint, extruded, is a wall across the gap between them."""
+    sign = 1.0 if keep_above else -1.0
 
-        def inside(p: tuple[float, float], axis: int = axis, bound: float = bound, keep_above: bool = keep_above) -> bool:
-            return p[axis] >= bound if keep_above else p[axis] <= bound
+    def depth(p: tuple[float, float]) -> float:  # >= 0 on the kept side
+        return (p[axis] - bound) * sign
 
-        def cut(
-            a: tuple[float, float], b: tuple[float, float], axis: int = axis, bound: float = bound
-        ) -> tuple[float, float]:
-            t = (bound - a[axis]) / (b[axis] - a[axis])
+    def along(p: tuple[float, float]) -> float:  # along the line, the kept side on the left
+        return p[0] * sign if axis == 1 else -p[1] * sign
+
+    inside = [depth(p) >= 0.0 for p in ring]
+    if all(inside):
+        return [ring]
+    if not any(inside):
+        return []
+    first = inside.index(False)  # start outside: every piece then runs entry -> exit
+    ring = ring[first:] + ring[:first]
+    inside = inside[first:] + inside[:first]
+
+    chains: list[list[tuple[float, float]]] = []
+    current: list[tuple[float, float]] = []
+    for i, a in enumerate(ring):
+        b = ring[(i + 1) % len(ring)]
+        if inside[i] != inside[(i + 1) % len(ring)]:
+            t = depth(a) / (depth(a) - depth(b))
             point = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
             point[axis] = bound
-            return (point[0], point[1])
+            if inside[(i + 1) % len(ring)]:
+                current = [(point[0], point[1])]
+            else:
+                chains.append([*current, (point[0], point[1])])
+                current = []
+        if inside[(i + 1) % len(ring)]:
+            current.append(b)
 
-        out = []
-        for k, current in enumerate(points):
-            previous = points[k - 1]
-            if inside(current):
-                if not inside(previous):
-                    out.append(cut(previous, current))
-                out.append(current)
-            elif inside(previous):
-                out.append(cut(previous, current))
-        # A vertex on the line is both kept and cut: drop the copy.
-        points = dedupe_ring(out)
-    return points
+    # Along the line, the polygon's inside runs from each exit to the nearest entry after it:
+    # that is the edge which closes a piece.
+    pieces = []
+    used = [False] * len(chains)
+    for start in range(len(chains)):
+        if used[start]:
+            continue
+        piece: list[tuple[float, float]] = []
+        c = start
+        while not used[c]:
+            used[c] = True
+            piece.extend(chains[c])
+            leave = along(chains[c][-1])
+            later = [k for k in range(len(chains)) if (not used[k] or k == start) and along(chains[k][0]) >= leave - 1e-9]
+            c = min(later, key=lambda k: along(chains[k][0])) if later else start
+        pieces.append(piece)
+    return pieces
+
+
+def clip_ring(ring: list[tuple[float, float]], lo: float, hi: float) -> list[list[tuple[float, float]]]:
+    """The ring cut to the square [lo, hi] x [lo, hi]: the pieces left, each a ring of its own."""
+    ring = dedupe_ring(ring)
+    if signed_area(ring) < 0:
+        ring = list(reversed(ring))
+    pieces = [ring]
+    for axis, bound, keep_above in ((0, lo, True), (0, hi, False), (1, lo, True), (1, hi, False)):
+        pieces = [cut for piece in pieces for cut in _clip_half_plane(piece, axis, bound, keep_above)]
+    # A vertex on the line is both kept and cut: drop the copy, and what has no area left.
+    pieces = [dedupe_ring(piece) for piece in pieces]
+    return [piece for piece in pieces if len(piece) >= 3 and abs(signed_area(piece)) > 1e-9]
 
 
 def _point_in_triangle(
@@ -580,22 +619,37 @@ def extract_buildings(
         for gx in range(math.floor(min(xs) / cell), math.floor(max(xs) / cell) + 1):
             for gy in range(math.floor(min(ys) / cell), math.floor(max(ys) / cell) + 1):
                 grid.setdefault((gx, gy), []).append(i)
-    with_parts: set[int] = set()
-    for rings, _, _ in parts:
+    # Only a part that will be drawn replaces anything, and only the outer ring it stands in:
+    # another ring of the same multipolygon, with no part of its own, stays.
+    part_extents = [building_extent(tags, default_height_m) for _, _, tags in parts]
+    replaced: set[tuple[int, int]] = set()  # (outline, outer ring)
+    for (rings, _, _), (bottom, top, _) in zip(parts, part_extents):
+        if top <= bottom:
+            continue
         for ring in rings:
             px, py = interior_point(ring)
             for i in grid.get((math.floor(px / cell), math.floor(py / cell)), []):
                 outers, inners, _ = outlines[i]
-                # A part standing in the courtyard is not this building's.
-                if any(point_in_ring(px, py, r) for r in outers) and not any(point_in_ring(px, py, r) for r in inners):
-                    with_parts.add(i)
+                if any(point_in_ring(px, py, r) for r in inners):
+                    continue  # a part standing in the courtyard is not this building's
+                for k, outer in enumerate(outers):
+                    if point_in_ring(px, py, outer):
+                        replaced.add((i, k))
 
     prisms: list[Prism] = []
-    for i, (rings, _, tags) in enumerate(outlines + parts):
-        if i in with_parts:
+    for i, (outers, _, tags) in enumerate(outlines):
+        kept = [ring for k, ring in enumerate(outers) if (i, k) not in replaced]
+        if len(kept) < len(outers):
             counts["outline_with_parts"] += 1
+        if not kept:
             continue
         bottom, top, rule = building_extent(tags, default_height_m)
+        if top <= bottom:
+            counts["degenerate"] += 1
+            continue
+        counts[rule] += 1
+        prisms.extend(Prism(ring, bottom, top) for ring in kept)
+    for (rings, _, _), (bottom, top, rule) in zip(parts, part_extents):
         if top <= bottom:
             counts["degenerate"] += 1
             continue
@@ -663,19 +717,19 @@ def extract_mapbox_buildings(
             for ring in rings:
                 if mvt.ring_area(ring) <= 0:
                     continue  # a hole: courtyards are filled in
-                clipped = clip_ring([(float(x), float(y)) for x, y in ring], 0.0, extent)
-                if len(clipped) < 3 or abs(signed_area(clipped)) < 1e-6:
-                    continue
-                enu = [
-                    to_enu(*tile_to_lat_lon(zoom, tx + px / extent, ty + py / extent), anchor_lat, anchor_lon)
-                    for px, py in clipped
-                ]
-                cx = sum(p[0] for p in enu) / len(enu)
-                cy = sum(p[1] for p in enu) / len(enu)
-                if math.hypot(cx, cy) > radius_m:
-                    continue
-                prisms.append(Prism(enu, bottom, top))
-                pieces += 1
+                for clipped in clip_ring([(float(x), float(y)) for x, y in ring], 0.0, extent):
+                    if abs(signed_area(clipped)) < 1e-6:
+                        continue
+                    enu = [
+                        to_enu(*tile_to_lat_lon(zoom, tx + px / extent, ty + py / extent), anchor_lat, anchor_lon)
+                        for px, py in clipped
+                    ]
+                    cx = sum(p[0] for p in enu) / len(enu)
+                    cy = sum(p[1] for p in enu) / len(enu)
+                    if math.hypot(cx, cy) > radius_m:
+                        continue
+                    prisms.append(Prism(enu, bottom, top))
+                    pieces += 1
             if pieces:
                 counts[rule] += 1
     return prisms, counts
