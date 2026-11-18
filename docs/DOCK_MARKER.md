@@ -225,10 +225,26 @@ decodes a centred, lossless picture at 1.5 px a cell and nothing else; what a co
 H.264 stream (below). The 3 m side of 404 px against 375 is finding 2 above (the quad framing the
 white border on darker ground); ID 11 is finding 1 (OpenCV 4.5/4.6's `minMarkerDistanceRate`).
 
-**What changed.** The landing camera (`SKYSIM_CAMERA_LANDING_SIZE=1920x1080`, README) draws the
-full-size picture only while a vehicle is in the air near its dock; the fleet stays on its cheap
-mode elsewhere. A warm 1920x1080 frame went from about 800 ms of CPU to 140-160 ms (the ground cache,
-README "What the camera costs").
+**Through the stream.** What aruco_landing gets is H.264 over RTSP, and
+`tools/render_probe/stream_check.py` reads it the way a consumer would: one OpenCV `VideoCapture`
+(FFmpeg backend, TCP) open from the ground up while a stand-in SITL climbs over the dock with the
+gimbal at -90 deg and holds at each height for 3 s. OpenCV 4.6.0, bench city, frames with ID 228:
+
+| skysim camera | dock | 30 m | 20 m | 10 m | 3 m | picture sizes decoded |
+|---|---|---|---|---|---|---|
+| dev until now: `640x360` @ 30, HFOV 78, 1200 kbit/s | under | 89 of 89 | 90 of 90 | 90 of 90 | 90 of 90 | 640x360 |
+| the same | 10 m east | **0 of 90** | 90 of 90 | out of shot | out of shot | 640x360 |
+| landing mode: `1920x1080` picture, drawn at 640x360 @ 30 normally and full size @ 15, 4000 kbit/s, near the dock | under | 45 of 45 | 45 of 45 | 45 of 45 | 30 of 45 | 1920x1080 only |
+| the same | 10 m east | 45 of 45 | 45 of 45 | out of shot | out of shot | 1920x1080 only |
+
+So 640x360 is marginal, not blind: straight over the marker the stream decodes, and with the dock
+10 m to the side from 30 m — a landing that takes over within 15 m of home — it does not. At
+1920x1080 it does. At 3 m the full-size picture is perfect (the marker is 375 px) and OpenCV
+4.6's legacy detector misses a third of the frames, as it does in the stills (findings 1 and 2
+below). The first version of the landing camera switched the stream's picture size; OpenCV's
+FFmpeg capture then kept returning the last 640x360 frame (`Slice parameters 0, 1088 are invalid`)
+and found nothing. That is why a vehicle's picture keeps one size and a mode only changes how it
+is drawn (README; `docs/SKYHUB_INTEGRATION.md` [S8], [C5]).
 
 ## The proof
 
