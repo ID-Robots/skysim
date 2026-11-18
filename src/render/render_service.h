@@ -202,6 +202,9 @@ class RenderService {
     // Settings may be made before the vehicle's first pose arrives (at spawn) and last until
     // forget().
     std::optional<VehicleCamera> configure(uint32_t vehicle_id, const CameraPatch &patch, std::string *error);
+    // Whether configure() would take `patch` for a vehicle that has no settings of its own yet
+    // (a spawn's): the same checks, nothing changed.
+    bool check(const CameraPatch &patch, std::string *error) const;
     // The vehicle's camera: its modes and what it draws now.
     VehicleCamera camera(uint32_t vehicle_id) const;
     // The mode it draws in now (sizes resolved; at rest, the rest rate).
@@ -275,6 +278,9 @@ class RenderService {
     CameraMode normal_of(const Setting *s) const;
     std::optional<CameraMode> landing_of(const Setting *s) const;
     VehicleCamera describe(const Setting *s) const;
+    // `patch` applied to `next`, checked (bounds, aspect ratio); false with `error` set, and
+    // `next` then half-changed, when it does not hold.
+    bool apply(Setting &next, const CameraPatch &patch, std::string *error) const;
     // Records a request in `demand` (under demand_mutex_), waking the render thread for a new one.
     void note_demand(std::unordered_map<uint32_t, Clock::time_point> &demand, uint32_t vehicle_id,
                      Clock::time_point now);

@@ -216,6 +216,14 @@ def main() -> int:
         status, body = call("POST", "/vehicles", {"instance": BASE + 1, "camera": {"width": 12}})
         check(status == 400 and "width" in body.get("error", ""), f"a camera out of bounds is a 400 ({body})")
         check(call("GET", f"/instances/{BASE + 1}/camera")[0] == 404, "... and spawns nothing")
+        status, body = call("POST", "/vehicles", {"instance": BASE + 1, "camera": {"size": "320x320"}})
+        check(status == 400 and "aspect" in body.get("error", ""),
+              f"a picture the fleet's draw size would be stretched to is a 400 ({body})")
+        status, body = call("POST", "/vehicles", {"instance": BASE + 1, "camera": {"size": "4294969216x1080"}})
+        check(status == 400, "a size too large for an int is a 400, not wrapped into range")
+        check(call("POST", "/vehicles", {"instance": BASE + 1, "camera": {"fps": 0.5}})[0] == 400,
+              "fps below 1 is a 400")
+        check(call("GET", f"/instances/{BASE + 1}/camera")[0] == 404, "... none of them spawned anything")
         status, _ = call("POST", "/vehicles", {"instance": BASE, "camera": {"size": f"{OWN[0]}x{OWN[1]}",
                                                                              "fps": OWN[2]}})
         check(status == 200, "spawn with a camera of its own")

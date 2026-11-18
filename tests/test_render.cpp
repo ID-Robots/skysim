@@ -432,6 +432,20 @@ void test_camera_modes() {
     bad.picture_width = 100; // 100x72 against a 64x36 draw size: stretched, so refused
     CHECK(!service.configure(1, bad, &error) && error.find("aspect") != std::string::npos);
     CHECK(!service.camera(1).normal_own && !service.camera(1).picture_own);
+    // check(): the same verdicts for a vehicle with no settings yet (a spawn's), nothing changed.
+    CHECK(!service.check(bad, &error) && error.find("aspect") != std::string::npos);
+    skysim::render::CameraSettingsPatch fine;
+    fine.picture_width = 256;
+    fine.picture_height = 144;
+    CHECK(service.check(fine, &error) && !service.camera(1).picture_own);
+    // "WxH" exactly, never wrapped into range.
+    int pw = 0;
+    int ph = 0;
+    CHECK(skysim::render::parse_wxh("1920x1080", pw, ph) && pw == 1920 && ph == 1080);
+    CHECK(!skysim::render::parse_wxh("4294969216x1080", pw, ph));
+    CHECK(!skysim::render::parse_wxh("1920x", pw, ph) && !skysim::render::parse_wxh("x1080", pw, ph));
+    CHECK(!skysim::render::parse_wxh("1920x1080x", pw, ph) &&
+          !skysim::render::parse_wxh(" 1920x1080", pw, ph));
     skysim::render::CameraSettingsPatch slow;
     slow.normal.fps = 5.0;
     cam = *service.configure(2, slow, &error);

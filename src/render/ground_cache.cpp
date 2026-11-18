@@ -146,24 +146,38 @@ const GroundCache::Tile *GroundCache::acquire(int level, int64_t ti, int64_t tj,
         tile = it->second.get();
     }
     tile->last_used.store(frame_.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    uint8_t state = tile->state.load(std::memory_order_acquire);
-    if (state == 2) {
-        return tile;
+    // Ready; or empty, and this thread fills it; or another thread is filling it — a tile takes a
+    // fraction of a millisecond, and every texel of it comes out the same whoever computes it, so
+    // wait rather than compute it twice. A fill that failed leaves it empty again (fill()), and a
+    // waiter then takes it on.
+    for (;;) {
+        const uint8_t state = tile->state.load(std::memory_order_acquire);
+        if (state == 2) {
+            return tile;
+        }
+        if (state == 0) {
+            uint8_t empty = 0;
+            if (tile->state.compare_exchange_strong(empty, 1, std::memory_order_acq_rel)) {
+                fill(*tile, level, ti, tj);
+                return tile;
+            }
+            continue;
+        }
+        tile->state.wait(1, std::memory_order_acquire);
     }
-    uint8_t empty = 0;
-    if (tile->state.compare_exchange_strong(empty, 1, std::memory_order_acq_rel)) {
-        build(*tile, level, ti, tj);
-        built_.fetch_add(1, std::memory_order_relaxed);
-        tile->state.store(2, std::memory_order_release);
-        tile->state.notify_all();
-        return tile;
+}
+
+void GroundCache::fill(Tile &tile, int level, int64_t ti, int64_t tj) {
+    try {
+        build(tile, level, ti, tj);
+    } catch (...) {
+        tile.state.store(0, std::memory_order_release);
+        tile.state.notify_all();
+        throw;
     }
-    // Another thread is filling it: a tile takes a fraction of a millisecond, and every texel of
-    // it comes out the same whoever computes it, so wait rather than compute it twice.
-    while ((state = tile->state.load(std::memory_order_acquire)) != 2) {
-        tile->state.wait(state, std::memory_order_acquire);
-    }
-    return tile;
+    built_.fetch_add(1, std::memory_order_relaxed);
+    tile.state.store(2, std::memory_order_release);
+    tile.state.notify_all();
 }
 
 const GroundCache::Tile *GroundCache::Sampler::tile(int level, int64_t ti, int64_t tj, bool optional) {
@@ -353,10 +367,7 @@ void GroundCache::prepare(std::vector<uint64_t> &required, std::vector<uint64_t>
             int64_t ti = 0;
             int64_t tj = 0;
             unkey(todo[k].first, level, ti, tj);
-            build(tile, level, ti, tj);
-            built_.fetch_add(1, std::memory_order_relaxed);
-            tile.state.store(2, std::memory_order_release);
-            tile.state.notify_all();
+            fill(tile, level, ti, tj);
         }
     };
     if (pool != nullptr && todo.size() > 1) {

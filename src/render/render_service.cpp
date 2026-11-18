@@ -275,6 +275,23 @@ RenderService::configure(uint32_t vehicle_id, const CameraPatch &patch, std::str
     std::lock_guard<std::mutex> lock(settings_mutex_);
     const auto it = settings_.find(vehicle_id);
     Setting next = it != settings_.end() ? it->second : Setting{};
+    if (!apply(next, patch, error)) {
+        return std::nullopt;
+    }
+    Setting &stored = settings_[vehicle_id];
+    stored.picture = next.picture;
+    stored.normal = next.normal;
+    stored.landing = next.landing;
+    stored.landing_enabled = next.landing_enabled;
+    return describe(&stored);
+}
+
+bool RenderService::check(const CameraPatch &patch, std::string *error) const {
+    Setting fresh;
+    return apply(fresh, patch, error);
+}
+
+bool RenderService::apply(Setting &next, const CameraPatch &patch, std::string *error) const {
     if (patch.reset) {
         next.picture.reset();
         next.normal.reset();
@@ -283,7 +300,7 @@ RenderService::configure(uint32_t vehicle_id, const CameraPatch &patch, std::str
     }
     if (patch.picture_width || patch.picture_height) {
         if (!check_picture_patch(patch, error)) {
-            return std::nullopt;
+            return false;
         }
         const std::pair<int, int> now = picture_of(&next);
         next.picture = std::pair<int, int>{patch.picture_width.value_or(now.first),
@@ -292,7 +309,7 @@ RenderService::configure(uint32_t vehicle_id, const CameraPatch &patch, std::str
     if (!patch.normal.empty()) {
         CameraMode m = normal_of(&next);
         if (!apply_mode_patch(m, patch.normal, error)) {
-            return std::nullopt;
+            return false;
         }
         next.normal = m;
     }
@@ -302,7 +319,7 @@ RenderService::configure(uint32_t vehicle_id, const CameraPatch &patch, std::str
         CameraMode m =
             next.landing ? *next.landing : (usable(cfg_.landing) ? cfg_.landing : normal_of(&next));
         if (!apply_mode_patch(m, patch.landing, error)) {
-            return std::nullopt;
+            return false;
         }
         next.landing = m;
         next.landing_enabled = true; // giving it a landing camera is asking for one
@@ -324,14 +341,9 @@ RenderService::configure(uint32_t vehicle_id, const CameraPatch &patch, std::str
             *error = "a mode's draw size must have the picture's aspect ratio (" +
                      std::to_string(picture.first) + "x" + std::to_string(picture.second) + ")";
         }
-        return std::nullopt;
+        return false;
     }
-    Setting &stored = settings_[vehicle_id];
-    stored.picture = next.picture;
-    stored.normal = next.normal;
-    stored.landing = next.landing;
-    stored.landing_enabled = next.landing_enabled;
-    return describe(&stored);
+    return true;
 }
 
 RenderService::VehicleCamera RenderService::camera(uint32_t vehicle_id) const {

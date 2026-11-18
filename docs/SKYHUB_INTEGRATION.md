@@ -159,7 +159,7 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
     /instances/<n>/camera` (also `/vehicles/<id>/camera`) at run time: `width`/`height` (or
     `"size":"WxH"`) the picture; `draw_width`/`draw_height` (or `"draw":"WxH"`), `fps`,
     `bitrate_kbps` the normal mode; `"landing":{...}` its own landing mode; `"landing":false`
-    turns it off for the vehicle. Bounds 16..3840 x 16..2160, 0.5..60 fps, 0 or 64..8000 kbit/s,
+    turns it off for the vehicle. Bounds 16..3840 x 16..2160, 1..60 fps, 0 or 64..8000 kbit/s,
     and a draw size keeps the picture's aspect ratio (1 %); out of bounds is `400` and changes
     nothing (and spawns nothing). The settings belong to the vehicle and go when it despawns.
   - **What a consumer sees**: the same endpoints, formats and picture size. Switching between the

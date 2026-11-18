@@ -100,6 +100,15 @@ void VideoService::set_settings(Stream &s, const EncoderSettings &next) {
     s.settings = next;
 }
 
+void VideoService::remember_parameter_sets(const std::tuple<int, int, double> &key, const ParameterSets &ps) {
+    // A cache, not a record: every fps a POST names is a key, so it is emptied once it holds
+    // more than any real deployment uses (the fleet's mode and a landing mode, a few sizes).
+    if (parameter_sets_.size() >= kMaxParameterSets && parameter_sets_.count(key) == 0) {
+        parameter_sets_.clear();
+    }
+    parameter_sets_.try_emplace(key, ps);
+}
+
 EncoderSettings VideoService::effective(const Stream &s) const {
     EncoderSettings e = s.settings;
     const double cam = std::max(camera_fps(s), kMinFps);
@@ -239,7 +248,7 @@ std::optional<VideoService::ParameterSets> VideoService::parameter_sets(int widt
     }
     ParameterSets ps{enc->sps(), enc->pps(), enc->width(), enc->height()};
     std::lock_guard<std::mutex> lock(mutex_);
-    parameter_sets_.try_emplace(key, ps);
+    remember_parameter_sets(key, ps);
     return ps;
 }
 
@@ -426,8 +435,8 @@ void VideoService::worker() {
 
         lock.lock();
         if (rebuild && enc) {
-            parameter_sets_.try_emplace(std::make_tuple(enc->width(), enc->height(), settings.fps),
-                                        ParameterSets{enc->sps(), enc->pps(), enc->width(), enc->height()});
+            remember_parameter_sets(std::make_tuple(enc->width(), enc->height(), settings.fps),
+                                    ParameterSets{enc->sps(), enc->pps(), enc->width(), enc->height()});
         }
         s.encoder = std::move(enc);
         s.busy = false;

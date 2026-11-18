@@ -134,6 +134,9 @@ class GroundCache {
     Shard &shard_of(uint64_t key) { return shards_[(key * 0x9E3779B97F4A7C15ULL) >> 58]; }
     const Tile *acquire(int level, int64_t ti, int64_t tj, uint64_t key, bool optional);
     void build(Tile &tile, int level, int64_t ti, int64_t tj) const;
+    // Builds a tile this thread claimed (state 1) and marks it ready; should building throw, it
+    // goes back to empty, its waiters are woken, and the exception goes on.
+    void fill(Tile &tile, int level, int64_t ti, int64_t tj);
 
     std::shared_ptr<const RasterScene> scene_;
     size_t budget_bytes_;

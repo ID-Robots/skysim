@@ -545,8 +545,7 @@ bool parse_size_fields(const radio::json::Value &obj, const char *w_name, const 
     if (const radio::json::Value *size = obj.find(size_name)) {
         int w = 0;
         int h = 0;
-        char tail = 0;
-        if (!size->is_string() || std::sscanf(size->text.c_str(), "%dx%d%c", &w, &h, &tail) != 2) {
+        if (!size->is_string() || !render::parse_wxh(size->text.c_str(), w, h)) {
             error = std::string(size_name) + " must be a string WxH, e.g. \"1920x1080\"";
             return false;
         }
@@ -974,7 +973,7 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
     // stop answering. Sized for streams rather than for cores.
     s.new_task_queue = [] { return new httplib::ThreadPool(kWorkerThreads); };
 
-    s.Post("/vehicles", [&queue](const httplib::Request &req, httplib::Response &res) {
+    s.Post("/vehicles", [&queue, snapshots](const httplib::Request &req, httplib::Response &res) {
         SpawnCommand cmd;
         cmd.request.launch_process = parse_launch_process(req.body);
         cmd.request.instance = parse_instance(req.body);
@@ -991,7 +990,8 @@ ControlServer::ControlServer(const std::string &bind_addr, int port, CommandQueu
             }
             if (camera != nullptr && !camera->is_null()) {
                 render::CameraSettingsPatch patch;
-                if (!parse_camera_settings(*camera, patch, error)) {
+                if (!parse_camera_settings(*camera, patch, error) ||
+                    (snapshots.camera_check && !snapshots.camera_check(patch, &error))) {
                     reply_error(res, 400, "camera: " + error);
                     return;
                 }

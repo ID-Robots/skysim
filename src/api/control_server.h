@@ -230,6 +230,10 @@ class ControlServer {
         std::function<std::optional<render::VehicleCameraState>(
             const VehicleInfo &, const render::CameraSettingsPatch *patch, std::string *error)>
             camera_settings;
+        // Whether a spawn's "camera" would be taken (the checks camera_settings makes that the
+        // body's own bounds cannot: a draw size against the picture's aspect ratio), so a bad
+        // one is a 400 and spawns nothing. Null with the camera off: the spawn then ignores it.
+        std::function<bool(const render::CameraSettingsPatch &, std::string *error)> camera_check;
         // A vehicle's dock marker (TASK-2562): as it is; with `patch`, after applying it (in one
         // step, so concurrent partial changes cannot undo each other); with `reset`, after putting
         // it back home. Nothing for a vehicle that has none (it has just gone). Null when no dock

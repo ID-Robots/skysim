@@ -308,8 +308,7 @@ Options parse_args(int argc, char **argv) {
             const char *v = need_value(flag);
             int w = 0;
             int h = 0;
-            char tail = 0;
-            if (std::sscanf(v, "%dx%d%c", &w, &h, &tail) != 2 || w < skysim::render::kMinCameraSide ||
+            if (!skysim::render::parse_wxh(v, w, h) || w < skysim::render::kMinCameraSide ||
                 w > skysim::render::kMaxCameraWidth || h < skysim::render::kMinCameraSide ||
                 h > skysim::render::kMaxCameraHeight) {
                 std::fprintf(stderr, "skysim: %s must be WxH, 16x16..3840x2160\n", flag);
@@ -328,7 +327,7 @@ Options parse_args(int argc, char **argv) {
             o.camera_landing_fps = finite_number(need_value("--camera-landing-fps"), "--camera-landing-fps");
             if (o.camera_landing_fps < skysim::render::kMinCameraFps ||
                 o.camera_landing_fps > skysim::render::kMaxCameraFps) {
-                std::fprintf(stderr, "skysim: --camera-landing-fps must be 0.5..60\n");
+                std::fprintf(stderr, "skysim: --camera-landing-fps must be 1..60\n");
                 std::exit(2);
             }
             o.camera_landing = true;
@@ -341,6 +340,7 @@ Options parse_args(int argc, char **argv) {
                              "skysim: --camera-landing-bitrate must be 0 (the stream's own) or 64..8000\n");
                 std::exit(2);
             }
+            o.camera_landing = true;
         } else if (std::strcmp(argv[i], "--camera-landing-radius") == 0) {
             o.camera_landing_radius_m =
                 metres(need_value("--camera-landing-radius"), "--camera-landing-radius");
@@ -1800,6 +1800,10 @@ int main(int argc, char **argv) {
                     return app.render_service->camera(v.id);
                 }
                 return app.render_service->configure(v.id, *patch, error);
+            };
+            snaps.camera_check = [&app](const skysim::render::CameraSettingsPatch &patch,
+                                        std::string *error) {
+                return app.render_service->check(patch, error);
             };
             skysim::api::CameraIntrinsics &ci = snaps.camera_intrinsics;
             ci.enabled = true;

@@ -10,7 +10,9 @@
 // rest rate (--camera-rest-fps) while it sits still on the ground. So a consumer sees the same
 // endpoints, formats and picture size throughout: OpenCV's FFmpeg capture, for one, does not follow
 // a picture that changes size mid-stream (it keeps returning the last frame of the old size).
+#include <charconv>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <string>
 
@@ -34,7 +36,7 @@ struct CameraMode {
 inline constexpr int kMinCameraSide = 16;
 inline constexpr int kMaxCameraWidth = 3840;
 inline constexpr int kMaxCameraHeight = 2160;
-inline constexpr double kMinCameraFps = 0.5;
+inline constexpr double kMinCameraFps = 1.0; // the H.264 stream's own floor (video/video_service.h)
 inline constexpr double kMaxCameraFps = 60.0;
 inline constexpr int kMinCameraBitrateKbps = 64; // the encoder route's own bounds
 inline constexpr int kMaxCameraBitrateKbps = 8000;
@@ -48,6 +50,18 @@ struct CameraModePatch {
 
     bool empty() const { return !width && !height && !fps && !bitrate_kbps; }
 };
+
+// "WxH" as two whole numbers, exactly: nothing before, between or after them but the 'x', and
+// each within int (a number too long is refused, not wrapped into range as sscanf's %d would).
+inline bool parse_wxh(const char *text, int &width, int &height) {
+    const char *end = text + std::strlen(text);
+    const auto w = std::from_chars(text, end, width);
+    if (w.ec != std::errc() || w.ptr == end || *w.ptr != 'x') {
+        return false;
+    }
+    const auto h = std::from_chars(w.ptr + 1, end, height);
+    return h.ec == std::errc() && h.ptr == end;
+}
 
 // The given fields of `patch` against the bounds above. False with `error` naming the first one
 // out of them. (A field the patch does not give is not checked: the fleet's own settings, from
@@ -66,7 +80,7 @@ inline bool check_mode_patch(const CameraModePatch &patch, std::string *error) {
         return fail("height must be 16..2160");
     }
     if (patch.fps && !(*patch.fps >= kMinCameraFps && *patch.fps <= kMaxCameraFps)) {
-        return fail("fps must be 0.5..60");
+        return fail("fps must be 1..60");
     }
     if (patch.bitrate_kbps && *patch.bitrate_kbps != 0 &&
         (*patch.bitrate_kbps < kMinCameraBitrateKbps || *patch.bitrate_kbps > kMaxCameraBitrateKbps)) {

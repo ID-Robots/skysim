@@ -216,6 +216,8 @@ class VideoService {
     std::optional<RtspServer::StreamInfo> describe(int instance);
     // From the cache, or made (outside the lock) and cached. Null when x264 refuses the size.
     std::optional<ParameterSets> parameter_sets(int width, int height, double fps);
+    // Caches them (under mutex_), bounded.
+    void remember_parameter_sets(const std::tuple<int, int, double> &key, const ParameterSets &ps);
     void playing(int instance, bool on);
     void worker();
     void housekeeping();
@@ -230,7 +232,9 @@ class VideoService {
     uint64_t house_epoch_{0};
     std::unordered_map<int, Stream> streams_; // never erased: references stay valid unlocked
     std::unordered_map<uint32_t, int> by_vehicle_;
-    // By picture size and fps: few distinct ones ever exist (the fleet's and the landing camera's).
+    // By picture size and fps: the fleet's, a landing mode's, and whatever fps an encoder POST
+    // named — at most kMaxParameterSets at once (remember_parameter_sets).
+    static constexpr size_t kMaxParameterSets = 64;
     std::map<std::tuple<int, int, double>, ParameterSets> parameter_sets_;
     std::deque<int> ready_;
 
