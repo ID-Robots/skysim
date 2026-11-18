@@ -336,6 +336,20 @@ and then re-analyses the same frames with 4.5.4 from apt on an Ubuntu 22.04 cont
    perfectly level camera exactly over the marker, heading exactly along it. A fake SITL can hover
    like that and a real flight cannot. Its tvec, the part a landing uses, stays correct
    (`ippe_lateral_err_m` in the report), and the proof solves with `SOLVEPNP_ITERATIVE`.
+4. **From 5 m, legacy cv2.aruco misses 228 in some stills by a twentieth of a millimetre.** This is
+   the white border's outline from finding 2. On this dock's ground (gravel, with centimetre
+   speckle), that outline is the quad the detector decodes. Where the speckle puts its corners,
+   it decodes with 0-1 bit errors or with 5, and with the default correction it allows 4. On a
+   1920x1080 HFOV 81 still straight down, 228 is missed at camera heights of 5.0036, 5.0039,
+   5.0044 and 5.0049 m, and found in every 0.05 mm step from 4.9985 to 5.0020 m. The same pixels
+   come out of the renderers of TASK-2562 and of TASK-2661. A uniform surround decides it one way
+   for good: a light pad around the plate (albedo 0.6 or 0.8) decodes at every height in
+   between, a dark one (0.3) at none. So this is finding 2 again, and on Observer 1 it depends on
+   the real dock's surface.
+   The proof settled its hover to 1 cm, which left the vehicle closing in at about a millimetre
+   a second. Its 5 m still landed at 5.0048-5.0049 m depending on tens of milliseconds of
+   scheduling, and failed now and then (TASK-2661 CI). It now settles to 1 mm and 2 mm/s
+   (`FakeSitl.hold`), so the pictures are taken at the height named.
 
 Regenerate the proof:
 

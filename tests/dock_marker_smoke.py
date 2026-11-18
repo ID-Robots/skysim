@@ -400,7 +400,15 @@ class FakeSitl(threading.Thread):
             return dict(self.state) if self.state else None
 
     def hold(self, target: float, timeout: float = 90.0) -> bool:
-        """Fly to `target` metres up and wait until settled there."""
+        """Fly to `target` metres up and wait until settled there: within 1 mm and 2 mm/s for a
+        second, so the pictures are taken at the height asked for whatever the scheduling.
+
+        Settled to 1 cm, the hover was still closing in at about a millimetre a second when the
+        still was taken, at 5.0048 to 5.0049 m depending on tens of milliseconds of timing, and
+        legacy cv2.aruco (4.5/4.6) misses 228 in a still from 5.0036, 5.0039, 5.0044 or 5.0049 m on
+        this ground: it decodes the white border's outline (finding 2 in docs/DOCK_MARKER.md) with
+        0-1 bit errors or with 5, depending on where the gravel speckle puts that outline's corners.
+        From 4.9985 to 5.0020 m it decodes in every 0.05 mm step."""
         self.target = target
         deadline = time.time() + timeout
         steady_since = None
@@ -408,7 +416,7 @@ class FakeSitl(threading.Thread):
             s = self.snapshot()
             if s is not None:
                 h, vz = -s["position"][2], -s["velocity"][2]
-                if abs(h - target) < 0.01 and abs(vz) < 0.01:
+                if abs(h - target) < 0.001 and abs(vz) < 0.002:
                     steady_since = steady_since or time.time()
                     if time.time() - steady_since > 1.0:
                         return True
