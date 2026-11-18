@@ -4,6 +4,7 @@
 #include "core/world.h"
 #include "render/camera.h"
 #include "render/dock_marker.h"
+#include "render/ground_cache.h"
 #include "render/image.h"
 #include "render/scene.h"
 
@@ -35,8 +36,9 @@ struct ScreenTriangle {
 //
 // Threading: each band's pixels and buffers are touched by exactly one thread, so there are
 // no atomics and no locks in the inner loops, and the picture is identical whatever the
-// thread count. Bands are dealt round-robin to the workers so sky-heavy and city-heavy bands
-// share the load evenly.
+// thread count. Workers take the next band as they finish one, so a thread that drew sky is
+// not left idle while another is still on a band of grass (bands of the ground cost several
+// times what bands of sky do, and a fixed deal left a quarter of a 4-thread frame idle).
 class Rasterizer {
   public:
     explicit Rasterizer(const CameraConfig &cfg) : cfg_(cfg) {}
@@ -44,10 +46,12 @@ class Rasterizer {
     // `surface`, when given, receives one entry per pixel: the scene triangle index, or
     // kSurfaceGround / kSurfaceSky. caller_runs = false keeps the calling thread out of the
     // work (see ThreadPool::parallel_for). `markers`, when given, are the dock markers lying on
-    // the ground (render/dock_marker.h); a marker's pixels are ground in `surface`.
+    // the ground (render/dock_marker.h); a marker's pixels are ground in `surface`. `ground`,
+    // when given, is where the lit ground plane's colour is read from instead of computed per
+    // pixel (render/ground_cache.h; the pilot camera's, TASK-2661): it must be built on `scene`.
     Image render(const RasterScene &scene, const Camera &camera, core::ThreadPool *pool,
                  std::vector<int32_t> *surface = nullptr, bool caller_runs = true,
-                 const GroundMarkers *markers = nullptr) const;
+                 const GroundMarkers *markers = nullptr, GroundCache *ground = nullptr) const;
 
   private:
     // Project, clip against the near plane and cull, producing screen triangles.

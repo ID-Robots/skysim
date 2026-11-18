@@ -3,8 +3,10 @@
 #include "render/shading.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
+#include <optional>
 
 namespace skysim::render {
 namespace {
@@ -79,8 +81,8 @@ void fill(const std::vector<ScreenTriangle> &tris, int width, Band &band) {
 } // namespace
 
 Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::ThreadPool *pool,
-                         std::vector<int32_t> *surface, bool caller_runs,
-                         const GroundMarkers *markers) const {
+                         std::vector<int32_t> *surface, bool caller_runs, const GroundMarkers *markers,
+                         GroundCache *ground_cache) const {
     Image image;
     std::vector<ScreenTriangle> tris;
     MarkerView marker_view;
@@ -98,6 +100,9 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
         // The dock markers in shot, once a frame (a marker's texture is built here the first
         // time one is, so on a worker too).
         marker_view = MarkerView(markers, camera);
+        if (ground_cache != nullptr) {
+            ground_cache->begin_frame();
+        }
     };
     if (pool != nullptr && !caller_runs) {
         pool->parallel_for(1, [&](size_t, size_t) { setup(); }, false);
@@ -109,10 +114,67 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
     const auto &normals = scene.normals();
     const auto &triangles = scene.triangles();
 
-    const auto shade_band = [&](Band &band) {
+    // The pilot camera's ground fast path (with a ground cache, TASK-2661): a pixel no triangle
+    // covers and that sees the ground plane is the commonest pixel of a camera looking down, and
+    // for it the ray, the hit point and the footprint are closed forms of the pixel's position.
+    // The ray, un-normalised, is forward + right * cx + down * cy (tangent-plane coordinates),
+    // so its forward component is 1, and the ground (plane normal n = down, the camera h above
+    // it) is hit at h / r_z along it. The footprint is Camera::footprint's for that plane, which
+    // works out to (h / focal) * r_z^-1.5. The same numbers as the general path below to within
+    // rounding; the stills, which have no cache, keep the general path exactly.
+    const bool fast_ground = ground_cache != nullptr && eye[2] < 0.0;
+    const double height_m = -eye[2];
+    const double footprint_k = height_m / camera.focal_px();
+    const Vec3 &fwd = camera.forward();
+    const Vec3 &right = camera.right();
+    const Vec3 &down = camera.down();
+    const double tan_x = camera.tan_half_x();
+    const double step_x = 2.0 / cfg_.width * tan_x;
+
+    const auto shade_band = [&](Band &band, GroundCache::Sampler *sampler) {
         for (int y = band.y0; y < band.y1; ++y) {
+            const double cy = ((y + 0.5) / cfg_.height * 2.0 - 1.0) * camera.tan_half_y();
+            const double row[3] = {fwd[0] + down[0] * cy, fwd[1] + down[1] * cy, fwd[2] + down[2] * cy};
             for (int x = 0; x < cfg_.width; ++x) {
                 const size_t bi = static_cast<size_t>(y - band.y0) * cfg_.width + static_cast<size_t>(x);
+                if (fast_ground && sampler != nullptr && band.ids[bi] < 0) {
+                    const double cx = (x + 0.5) * step_x - tan_x;
+                    const double rx = row[0] + right[0] * cx;
+                    const double ry = row[1] + right[1] * cx;
+                    const double rz = row[2] + right[2] * cx;
+                    const double rn = std::sqrt(rx * rx + ry * ry + rz * rz);
+                    if (rz > 1e-9 * rn) {
+                        const double inv = 1.0 / rz;
+                        const double along = height_m * inv;
+                        const double distance = along * rn;
+                        if (distance <= kMaxGroundM) {
+                            const double north = eye[0] + rx * along;
+                            const double east = eye[1] + ry * along;
+                            const double footprint = std::min(footprint_k * inv * std::sqrt(inv), 1e3);
+                            double marker = 0.0;
+                            const double covered =
+                                marker_view.empty()
+                                    ? 0.0
+                                    : marker_view.albedo(x, y, north, east, footprint, marker);
+                            if (!(covered > 0.0)) {
+                                double colour[3];
+                                sampler->lit(north, east, footprint, colour);
+                                const double haze = haze_at(distance, cfg_.max_range_m, cfg_.haze_start);
+                                const size_t pi =
+                                    (static_cast<size_t>(y) * cfg_.width + static_cast<size_t>(x)) * 3;
+                                for (int c = 0; c < 3; ++c) {
+                                    image.rgb[pi + static_cast<size_t>(c)] =
+                                        to_byte(mix(colour[c], kSkyHorizon[c], haze));
+                                }
+                                if (surface != nullptr) {
+                                    (*surface)[static_cast<size_t>(y) * cfg_.width + static_cast<size_t>(x)] =
+                                        kSurfaceGround;
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                }
                 const Vec3 dir = camera.ray(x, y);
                 int32_t id = band.ids[bi];
                 double t = -1.0;
@@ -170,6 +232,8 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
                             colour[c] = mix(ground[c], marker, covered);
                         }
                         scene.light(id, p, colour);
+                    } else if (sampler != nullptr && id == kSurfaceGround) {
+                        sampler->lit(p[0], p[1], footprint, colour);
                     } else {
                         scene.lit_colour(id, p, footprint, colour);
                     }
@@ -203,17 +267,23 @@ Image Rasterizer::render(const RasterScene &scene, const Camera &camera, core::T
         band.depth.assign(n, std::numeric_limits<float>::infinity());
         band.ids.assign(n, kSurfaceGround);
         fill(tris, cfg_.width, band);
-        shade_band(band);
+        std::optional<GroundCache::Sampler> sampler;
+        if (ground_cache != nullptr) {
+            sampler.emplace(*ground_cache);
+        }
+        shade_band(band, sampler ? &*sampler : nullptr);
     };
 
     if (pool != nullptr) {
         const size_t workers = pool->size() + (caller_runs ? 1 : 0);
+        std::atomic<int> next_band{0};
         pool->parallel_for(
             workers,
             [&](size_t begin, size_t end) {
                 for (size_t w = begin; w < end; ++w) {
-                    for (size_t b = w; b < static_cast<size_t>(bands); b += workers) {
-                        do_band(static_cast<int>(b));
+                    for (int b = next_band.fetch_add(1, std::memory_order_relaxed); b < bands;
+                         b = next_band.fetch_add(1, std::memory_order_relaxed)) {
+                        do_band(b);
                     }
                 }
             },

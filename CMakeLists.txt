@@ -227,6 +227,7 @@ add_library(skysim_render STATIC
     src/render/still.cpp
     src/render/texture.cpp
     src/render/dock_marker.cpp
+    src/render/ground_cache.cpp
     ${CMAKE_BINARY_DIR}/generated/dock_marker_png.cpp
 )
 target_include_directories(skysim_render PUBLIC src)
