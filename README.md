@@ -189,7 +189,9 @@ docker run --rm -p 8642:8642 -p 9002-9202:9002-9202/udp \
 `SKYSIM_API_PORT`, `SKYSIM_VEHICLES`, `SKYSIM_TILES`, `SKYSIM_STREAM_RADIUS`,
 `SKYSIM_STREAM_MAX`, `SKYSIM_DT`, `SKYSIM_TIME_MODE`, `SKYSIM_SPAWN_HOME`,
 `SKYSIM_RADIO_SPEC`, `SKYSIM_STILL_CONCURRENCY`, `SKYSIM_TEXTURE_SEED`, `SKYSIM_DOCK_MARKERS`,
-`SKYSIM_DOCK_MARKER_SIZE`, `SKYSIM_DOCK_INNER_SIZE`, `SKYSIM_DOCK_MARKERS_VISIBLE`, and
+`SKYSIM_DOCK_MARKER_SIZE`, `SKYSIM_DOCK_INNER_SIZE`, `SKYSIM_DOCK_MARKERS_VISIBLE`, the camera's
+(below; `SKYSIM_CAMERA_DRAW_SIZE`, `SKYSIM_CAMERA_LANDING_SIZE`, `_FPS`, `_BITRATE`, `_RADIUS`,
+`_HEIGHT`, `SKYSIM_CAMERA_REST_FPS` and `SKYSIM_CAMERA_CACHE_MB` among them), and
 `SKYSIM_EXTRA_ARGS` for anything not listed.
 
 **Set `SKYSIM_TIME_MODE=interactive` on a long-lived server.** The default is `strict`,
@@ -211,10 +213,13 @@ RTSP stream, or a `camera.jpg` within the last 3 s — so a camera nobody watche
 many vehicles there are, and a parked vehicle's frame is re-sent rather than redrawn.
 `SKYSIM_CAMERA_THREADS` is the number of threads drawing a frame (at background priority);
 by default it is the number of CPUs the container may use — its cgroup quota and affinity,
-not the host's core count — at most 4. A textured 640x360 frame of a flying vehicle is about
-75 ms of CPU in the image, so a 2-vCPU task streams one watched flying vehicle at 15 fps and
-three at about 9 fps each. `GET /metrics` reports what the camera achieves (`camera.fps`,
-`camera.render_ms`) and the log carries the same every 10 s while frames are drawn:
+not the host's core count — at most 4. The ground a camera sees is computed once per texel of a
+world-space cache shared by every vehicle (`SKYSIM_CAMERA_CACHE_MB`, default 512, `0` = off) and
+read back after that: a textured 1920x1080 frame looking down is about 140 ms of CPU warm and
+190 ms with its H.264 encode in a climbing flight (800-900 ms before TASK-2661), and a 640x360 one
+about 17-19 ms (77-105) ([cost table](#what-the-camera-costs-task-2661)). `GET /metrics` reports what the camera
+achieves (`camera.fps`, `camera.render_ms`, `camera.landing`, `camera.ground_cache_mb`) and the
+log carries the same every 10 s while frames are drawn:
 
 ```bash
 docker run --rm -p 8642:8642 -p 8554:8554 -p 9002-9202:9002-9202/udp \
@@ -236,6 +241,45 @@ for an IDR. `SKYSIM_CAMERA_MJPEG=0` retires `camera.mjpg` once nothing reads it.
 [docs/SKYHUB_INTEGRATION.md](docs/SKYHUB_INTEGRATION.md) ([S6]) and
 [docs/PROTOCOL.md](docs/PROTOCOL.md#pilot-camera-video-rtsp--rtp-not-part-of-the-wire-protocol).
 
+**Each vehicle's picture keeps one size; what changes is how it is drawn** (TASK-2661). Every
+frame of a vehicle's camera — camera.jpg, camera.mjpg, the RTSP stream (H.264 crops an odd width or
+height down to even, at the right and bottom, so the intrinsics' cx and cy hold), the intrinsics —
+has the same picture size, the fleet's `SKYSIM_CAMERA_SIZE` or the vehicle's own (set at spawn,
+`POST /vehicles {"instance":3,"camera":{"size":"1280x720"}}`): OpenCV's FFmpeg capture, for one,
+does not follow a stream whose picture changes size (it keeps returning the last frame of the old
+size). A vehicle draws that picture in one of three modes:
+
+- **normal**: drawn at `SKYSIM_CAMERA_DRAW_SIZE` (default the picture size) and scaled up to the
+  picture, at `SKYSIM_CAMERA_FPS`;
+- **landing**: while it is in the air within `SKYSIM_CAMERA_LANDING_RADIUS` (default 25 m) of its
+  dock and at most `SKYSIM_CAMERA_LANDING_HEIGHT` (40 m) above the ground — where skyhub_core's
+  ArUco precision landing, which takes over at 30 m within 15 m of home, reads the dock marker —
+  drawn at `SKYSIM_CAMERA_LANDING_SIZE` (default the picture size: every pixel) at
+  `SKYSIM_CAMERA_LANDING_FPS`, its stream at `SKYSIM_CAMERA_LANDING_BITRATE` kbit/s. On when either
+  of the last three is set. Leaving takes 5 m more of either; a hover more than 0.12 m up, however still, keeps it;
+- **at rest**: a vehicle that has not moved (2 cm, half a degree) for 5 s on the ground — parked on
+  its dock — is drawn in its normal mode at `SKYSIM_CAMERA_REST_FPS` (default `0`: its mode's rate).
+  Its picture does not change, so this only saves re-sending and re-encoding it; its stream keeps
+  its frame rate. A vehicle spawned on its dock starts at rest. "On the ground" is a height, not a
+  contact: its centre within 0.12 m of the ground plane (a quad resting there has it 0.07 m up), so
+  a hover held that low and that still for 5 s counts as at rest too.
+
+A mode keeps the picture's aspect ratio. Each vehicle is drawn on its own schedule, so a landing
+drawn at 1920x1080@15 and a fleet drawn at 640x360@30 share the render threads without one
+pacing the others. A vehicle's own settings, at spawn (`POST /vehicles` `"camera"`) or at any time
+(`POST /instances/3/camera {"fps":10,"draw":"960x540"}`; `DELETE` puts the fleet's back), are in the
+[control plane table](#control-plane---api-port). For dock precision landing on dev:
+
+```bash
+SKYSIM_CAMERA_FPS=15 SKYSIM_CAMERA_SIZE=1920x1080 SKYSIM_CAMERA_DRAW_SIZE=640x360 SKYSIM_CAMERA_FOV=81 \
+SKYSIM_CAMERA_LANDING_FPS=15 SKYSIM_CAMERA_LANDING_BITRATE=4000 SKYSIM_CAMERA_REST_FPS=2 \
+SKYSIM_CAMERA_THREADS=8   # every CPU of an 8-vCPU task, at background priority
+```
+
+What a consumer has to accept, and what that costs:
+[docs/SKYHUB_INTEGRATION.md](docs/SKYHUB_INTEGRATION.md) ([S8]),
+[What the camera costs](#what-the-camera-costs-task-2661).
+
 **The camera follows the vehicle's gimbal** when the vehicle drives one (TASK-2548): ArduPilot's
 mount pitch and yaw on servo outputs `SKYSIM_GIMBAL_PITCH_CHANNEL` (default 10, pitch -90..20
 degrees) and `SKYSIM_GIMBAL_YAW_CHANNEL` (default 11, yaw -180..180), both over 1100..1900 us —
@@ -249,7 +293,7 @@ at 1.00 m with ID 11 at 0.09 m nested in its centre cell, from skyhub_core's gen
 (`assets/markers/`). It lies flat on the ground at the vehicle's home, heading north, and both
 cameras draw it at its real size, so a SITL can land on it with the unmodified aruco_landing
 module. `GET /instances/<n>/camera/intrinsics` publishes the pinhole the camera renders with (fx,
-fy, cx, cy, no distortion). `GET /instances/<n>/camera/dock` gives the marker's ground truth
+fy, cx, cy, no distortion) and the `vehicle` and `picture_revision` it is for. `GET /instances/<n>/camera/dock` gives the marker's ground truth
 (pose, lat/lon, both markers' corners, the vehicle's offset from it); `POST` moves it and `DELETE`
 puts it back. `SKYSIM_DOCK_MARKERS=0` turns it off, and `SKYSIM_DOCK_MARKER_SIZE` /
 `SKYSIM_DOCK_INNER_SIZE` set the sizes. A vehicle's own cameras (pilot camera, RTSP, stills) draw
@@ -274,13 +318,14 @@ camera feed alike — see [Survey stills](#survey-stills-and-the-reconstruction-
 | `POST /vehicles` `{"instance":N, "launch_process":true}` (both fields optional) | reserve a requested or next-free ArduPilot instance (optionally forks arducopter) → `{id, instance, json_port, mavlink_tcp}` |
 | `DELETE /vehicles/{id}` | despawn, release instance, kill managed process |
 | `GET /vehicles` | per-vehicle: connected, frozen, silent_ticks, pos_ned, `midair_collisions`, `building_contacts`; `radio` when a radio field is set |
-| `GET /metrics` | tick p50/p99 µs, straggler_events, freezes, resident_tiles; `camera` (`null` when off): `target_fps`, achieved `fps` per watched vehicle, `watched`, `render_ms` / `render_ms_max` / `encode_ms` per frame, `threads`, `frames_drawn`, `frames_reused`; `video` (`null` when RTSP is off): `rtsp_port`, `streams`, `clients`, `threads`, `encode_ms`, `frames_encoded`, `frames_dropped`, `keyframes`, `bytes_sent` |
+| `GET /metrics` | tick p50/p99 µs, straggler_events, freezes, resident_tiles; `camera` (`null` when off): `target_fps`, achieved `fps` per watched vehicle, `watched`, `render_ms` / `render_ms_max` / `encode_ms` per frame, `threads`, `frames_drawn`, `frames_reused`, `landing` (vehicles on the landing camera), `ground_cache_mb` / `ground_cache_budget_mb` / `ground_tiles_built`; `video` (`null` when RTSP is off): `rtsp_port`, `streams`, `clients`, `threads`, `encode_ms`, `frames_encoded`, `frames_dropped`, `keyframes`, `bytes_sent` |
 | `POST /mission/check` `{"waypoints_ned":[[n,e,d],...], "clearance_m":1.0}` | sweep a planned route through loaded building geometry → `{checked, clear, hits}` |
 | `PUT` / `GET` / `DELETE /radio` | set, read or clear the simulated 4G radio field (carriers, towers, coverage holes) |
 | `GET /radio/sample?lat&lon&alt_amsl` | RSRP / RSRQ / SINR / RSSI, serving cell and link quality per carrier at a point |
 | `GET /radio/grid?bbox&alt_rel&step_m&carrier` | the same as a ground-truth raster over an area (≤ 250 000 cells) |
 | `GET /instances/{n}/still.jpg`, `GET /vehicles/{id}/still.jpg` | one survey still, rendered on demand from the vehicle's pose; query `w h hfov pitch yaw roll_stab range q`, pose in `X-Skysim-*` headers |
-| `GET /instances/{n}/camera.jpg` / `.mjpg` (and by `/vehicles/{id}`) | the pilot camera feed (`--camera-fps`); `.mjpg` off with `--camera-mjpeg 0` |
+| `GET /instances/{n}/camera.jpg` / `.mjpg` (and by `/vehicles/{id}`) | the pilot camera feed (`--camera-fps`); `.mjpg` off with `--camera-mjpeg 0`. Each JPEG (and each `.mjpg` part) names the vehicle and the picture revision it was drawn for in `X-Skysim-Vehicle` and `X-Skysim-Picture-Revision`: the numbers `vehicle` and `picture.revision` of `GET .../camera` and `vehicle` and `picture_revision` of `GET .../camera/intrinsics` name while they describe that picture. A size change (`POST .../camera`) makes a new revision, and no frame of the old size is served after it — but a frame and a calibration read in two requests can straddle one, or a replacement vehicle at the same instance (a new id within one skysim run, its revisions counted from 0 again), so a reader that needs the pair compares both the vehicle and the revision |
+| `GET` / `POST` / `DELETE /instances/{n}/camera` (and by `/vehicles/{id}`) | the vehicle's camera (TASK-2661): `picture` (`width`, `height`, `own`, `revision`: how many times its size has changed), `now` (`mode` normal or landing, `resting`, `draw_width`, `draw_height`, `fps`, `bitrate_kbps`), `normal` and `landing` (the same fields; `own`, and for landing `available`, `enabled`, `active`, `radius_m`, `height_m`), `rest_fps`, `watched`, `achieved_fps`, `render_ms`; a landing mode that is not available has its draw size, `fps` and `bitrate_kbps` null (POSTing a GET back leaves nulls alone). POST: `width`/`height` (or `"size":"WxH"`) set its picture size — best at spawn, it is what a reader's stream changes to; `draw_width`/`draw_height` (or `"draw":"WxH"`), `fps`, `bitrate_kbps` its normal mode (also inside `"normal":{}`); `"landing":{...}` its own landing mode; `"landing":false/true` turns that off or on. Out of bounds (16..3840 x 16..2160, 1..60 fps, 0 or 64..8000 kbps), or a draw size of another aspect ratio than the picture's (one rule, here and for `--camera-draw-size`: width over height within 1 % of the picture's, or the height within half a pixel of the picture's share of the width, or the width within half a pixel of its share of the height, so a size given by either side alone passes), or one side given alone whose other side — the picture's aspect ratio of it — falls outside those bounds (a draw width of 3840 for a 16x2160 picture), is `400` and changes nothing. A draw size that is only the one the vehicle already draws at by inheritance (the picture's, or the fleet's) is not a setting, so a GET's answer can be POSTed back with one field changed and the vehicle still follows its picture; a different one is the vehicle's own. DELETE: the fleet's settings again. Unlike spawn and despawn these take effect on the camera's next frame, not at a tick boundary (the camera is not world state). `POST /vehicles` takes the same object as `"camera"` (and a bad one spawns nothing — with the pilot camera on; without `--camera-fps` the pilot camera is off and the `camera` member is ignored, whatever it holds, as the spawn ignores it). `instance`, `launch_process` and the battery members of a spawn are read from the top level of the body, never from inside `"camera"` |
 | `GET` / `POST /instances/{n}/camera/encoder` `{"bitrate_kbps","fps","keyframe_interval_s"}` | the H.264 encoder behind `rtsp://<host>:8554/instances/{n}/main.264`; POST answers with the values applied (clamped) |
 | `POST /instances/{n}/camera/keyframe` | the stream's next frame is an IDR |
 
@@ -407,6 +452,63 @@ The performance suite fails if a 200-vehicle world misses its 1,250 µs tick bud
 protocol hot path exceeds 2,000 ns per vehicle, or if the pooled 100-vehicle reply path
 misses the same 1,250 µs budget.
 
+### What the camera costs (TASK-2661)
+
+`tools/bench/camera_cost.py` runs skysim per camera setting and fleet size with a stand-in SITL
+and one RTSP reader per vehicle (what skyhub_core's camera input is), and measures skysim's CPU
+from `/proc`. Every vehicle climbs off its dock with its gimbal at -90 degrees: all ground, the
+costliest thing to draw, and a cold ground cache at every halving of its height. Measured on a
+Ryzen 7 5700X with skysim pinned to 4 cores (`--cpus 0-3`, 4 render and 2 encoder threads), on a
+pretile city of 400 buildings (`pretile.py --extent 1000`). *CPU-ms/frame* is the camera's CPU per
+frame delivered (render, scale, H.264); *cores for target* is that times the target rate and the
+fleet: the CPUs the setting needs. *fps each* is what each reader got from the 4 cores — the box
+was shared with a desktop (load 5-7), and the render threads run at nice +10, so a frame rate
+below target here is CPU the box did not give, not CPU skysim lacked. Before = `cec2ac9`.
+
+| camera | vehicles | before: fps each | before: render ms | before: CPU-ms/frame | before: cores used | before: cores for target | after: fps each | after: render ms | after: CPU-ms/frame | after: cores used | after: cores for target |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 640x360@30 | 1 | 17.0 | 50.0 | 105.0 | 1.78 | 3.15 | 30.0 | 4.6 | 19.3 | 0.58 | 0.58 |
+| 640x360@30 | 4 | 8.16 | 29.9 | 88.5 | 2.89 | 10.62 | 30.0 | 4.5 | 17.5 | 2.1 | 2.1 |
+| 640x360@30 | 8 | 4.27 | 36.5 | 76.9 | 2.62 | 18.46 | 25.34 | 4.8 | 16.9 | 3.43 | 4.06 |
+| 1280x720@30 | 1 | 5.75 | 157.5 | 369.9 | 2.13 | 11.1 | 30.0 | 18.2 | 72.6 | 2.18 | 2.18 |
+| 1280x720@30 | 4 | 1.72 | 153.3 | 312.5 | 2.15 | 37.51 | 11.53 | 20.0 | 72.9 | 3.36 | 8.75 |
+| 1280x720@30 | 8 | 0.89 | 137.5 | 299.4 | 2.13 | 71.85 | 5.94 | 18.4 | 72.0 | 3.42 | 17.29 |
+| 1920x1080@10 | 1 | 2.75 | 344.5 | 788.8 | 2.17 | 7.89 | 10.0 | 59.7 | 209.5 | 2.09 | 2.1 |
+| 1920x1080@10 | 4 | 0.78 | 341.9 | 713.9 | 2.23 | 28.55 | 4.97 | 49.1 | 180.6 | 3.59 | 7.22 |
+| 1920x1080@10 | 8 | 0.53 | 217.3 | 736.2 | 3.13 | 58.89 | 2.34 | 53.3 | 189.0 | 3.54 | 15.12 |
+| 1920x1080@15 | 1 | 2.75 | 372.4 | 772.9 | 2.13 | 11.59 | 14.87 | 55.2 | 191.5 | 2.85 | 2.87 |
+| 1920x1080@15 | 4 | 0.78 | 312.5 | 715.6 | 2.24 | 42.94 | 5.03 | 50.6 | 178.2 | 3.59 | 10.69 |
+| 1920x1080@15 | 8 | 0.39 | 326.6 | 717.2 | 2.24 | 86.06 | 2.3 | 47.8 | 196.4 | 3.61 | 23.57 |
+| 1920x1080@30 | 1 | 2.25 | 376.1 | 907.8 | 2.04 | 27.23 | 17.62 | 55.9 | 190.0 | 3.35 | 5.7 |
+| 1920x1080@30 | 4 | 0.66 | 405.1 | 840.5 | 2.21 | 100.86 | 4.91 | 51.0 | 179.8 | 3.53 | 21.57 |
+| 1920x1080@30 | 8 | 0.41 | 287.2 | 698.8 | 2.27 | 167.72 | 1.98 | 60.6 | 210.7 | 3.34 | 50.56 |
+
+Three changes make the difference: the lit ground is read from a world-space cache instead of
+computed per pixel (the procedural ground texture was three quarters of a frame), the tiles a frame
+needs are built across every render thread before it is drawn, and bands are handed out as threads
+come free. Per frame that is 4-5x less CPU at every size.
+
+With a picture kept at 1920x1080 and drawn as `SKYSIM_CAMERA_DRAW_SIZE=640x360`,
+`SKYSIM_CAMERA_LANDING_FPS=15`, `SKYSIM_CAMERA_LANDING_BITRATE=4000`, `SKYSIM_CAMERA_REST_FPS=2`
+(the settings recommended for dev), eight vehicles on the same 4 cores:
+
+| fleet | normal fps | camera cores used | CPU-ms per frame | note |
+|---|---|---|---|---|
+| 8 parked, read over RTSP | 30 | 0.18 | 11 | 2 fps each (the rest rate); before: 2.0 cores at 1920x1080, 0.43 at 640x360 |
+| 8 flying, normal mode | 30 | 3.66 (all of them) | 46 | 9.9 fps each of 30: needs 11 cores |
+| 8 flying, normal mode | 15 | 3.58 (all of them) | 52 | 8.7 fps each of 15: needs 6.2 cores |
+| 1 landing, 7 flying | 15 | 3.59 (all of them) | 72 | |
+| 2 landing, 6 flying | 15 | 3.53 (all of them) | 104 | |
+| 1 landing, 3 flying, 4 parked | 15 | 3.0 | 107 | |
+
+Per vehicle, then, in cores of this machine: **parked and read** 0.02 (at 2 fps); **flying, normal
+mode** 0.05 per fps (a 640x360 drawing, scaled, and a 1920x1080 H.264 encode of about 17 ms);
+**landing** 0.19 per fps (a 1920x1080 drawing, about 140 ms of CPU warm and up to 190 while it
+climbs or descends through new ground-cache levels). Physics and the SITL lockstep add about 0.2
+for a handful of vehicles. One Fargate vCPU (a hyperthread of a 2.5-3.5 GHz Xeon or EPYC) is
+assumed to do about half of what a core here does — an estimate, not a measurement: read
+`GET /metrics` `camera` and the task's CPU on dev after a landing to check it.
+
 ## Project status
 
 Milestones M0–M6 are complete: protocol layer, single-quad flight conformance, wind /
@@ -431,9 +533,11 @@ src/api/        REST control plane (cpp-httplib)
 src/radio/      simulated 4G radio field: spec validation + deterministic RSRP/SINR model
 src/render/     threaded software rasteriser + JPEG/MJPEG camera feed per vehicle
 tools/cooker/   pretile.py (demo city) + osm_buildings.py (real city) + tile_cooker CLI
-tools/bench/    gated world, protocol, and UDP reply-path performance benchmarks
+tools/bench/    gated world, protocol, and UDP reply-path performance benchmarks; camera_cost.py
+                (the camera's CPU by picture size, rate and fleet)
 tools/harness/  conformance / determinism / straggler / churn / collision / corridor
-tools/render_probe/  render one frame from a given camera pose, to a JPEG
+tools/render_probe/  render one frame from a given camera pose, to a JPEG; --dock and --cache,
+                aruco_check.py (cv2.aruco on probe pictures), stream_check.py (cv2.aruco through RTSP)
 tools/survey/   survey_still (stills from poses, no simulator) + survey_fixture.py (ODM fixture)
 tools/getting_started.sh  build + cook + render the demo city (see "Getting started")
 tests/          unit tests + app_smoke.py driving the real binary

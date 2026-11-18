@@ -33,10 +33,15 @@ class FrameStore {
         // Unix epoch; 0 when unknown. What an MJPEG part's X-Skysim-Capture-Unix-Usec carries,
         // so a receiver can measure the feed's latency.
         int64_t captured_unix_us{0};
+        // The vehicle's picture revision this JPEG was drawn for (VehicleCameraState::picture_revision):
+        // the intrinsics and GET .../camera name the same number while they describe this picture.
+        // It counts within the vehicle the slot is keyed by: the routes that serve the frame name
+        // that vehicle too (X-Skysim-Vehicle), since a replacement at one instance starts again.
+        uint64_t picture_revision{0};
     };
 
     void publish(uint32_t vehicle_id, std::vector<uint8_t> jpeg, double sim_time_s,
-                 int64_t captured_unix_us = 0) {
+                 int64_t captured_unix_us = 0, uint64_t picture_revision = 0) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             Frame &slot = frames_[vehicle_id];
@@ -44,6 +49,7 @@ class FrameStore {
             slot.sim_time_s = sim_time_s;
             slot.seq = ++seq_;
             slot.captured_unix_us = captured_unix_us;
+            slot.picture_revision = picture_revision;
         }
         published_.notify_all();
     }

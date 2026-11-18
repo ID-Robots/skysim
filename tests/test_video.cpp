@@ -959,7 +959,7 @@ void test_render_video_demand() {
     cfg.demand_window_s = 0.3;
     cfg.background_priority = false;
     cfg.video_sink = [&](uint32_t id, std::shared_ptr<const Image> image, double,
-                         std::chrono::steady_clock::time_point) {
+                         std::chrono::steady_clock::time_point, const skysim::render::CameraMode &) {
         std::lock_guard<std::mutex> lock(mutex);
         pictures.emplace_back(id, std::move(image));
     };
@@ -1009,6 +1009,192 @@ void test_render_video_demand() {
     CHECK(count() == lapsed);
 }
 
+// TASK-2661: a vehicle's camera mode sets its stream's picture size, rate and bitrate. A new size
+// mid-stream is a new encoder on the same session, announced by an IDR with the new SPS; the
+// landing camera's bitrate applies while it draws and the stream's own after; a POSTed fps is a cap.
+void test_video_camera_modes() {
+    using skysim::render::CameraMode;
+    std::mutex mode_mutex;
+    CameraMode mode{96, 64, 20.0, 0};
+    VideoService::Config cfg;
+    cfg.width = 64;
+    cfg.height = 48;
+    cfg.max_fps = 10.0;
+    cfg.defaults.fps = 10.0; // at the fleet's rate: the stream follows each vehicle's camera
+    cfg.threads = 1;
+    cfg.background_priority = false;
+    cfg.rtsp.bind = "127.0.0.1";
+    cfg.rtsp.port = 0;
+    cfg.refresh_s = 0.05;
+    VideoService::Hooks hooks;
+    hooks.resolve = [](int instance) -> uint32_t { return instance == 4 ? 40 : 0; };
+    hooks.want_frames = [](uint32_t) {};
+    hooks.camera = [&](uint32_t id) {
+        std::lock_guard<std::mutex> lock(mode_mutex);
+        return id == 40 ? mode : CameraMode{};
+    };
+    VideoService video(cfg, hooks);
+    const std::string url = "rtsp://127.0.0.1:" + std::to_string(video.port()) + "/instances/4/main.264";
+
+    // Before any picture, the hook's mode: its size, its rate as the ceiling and the rate.
+    auto st = video.encoder(4, 40);
+    CHECK(st.width == 96 && st.height == 64 && st.max_fps == 20.0 && st.settings.fps == 20.0);
+    CHECK(st.settings.bitrate_kbps == 1200);
+
+    rtsp_test::Client c(video.port());
+    auto r = c.request("DESCRIBE", url);
+    CHECK(r && r->status == 200 && r->body.find("a=x-dimensions:96,64") != std::string::npos);
+    r = c.request("SETUP", url + "/trackID=0", "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n");
+    CHECK(r && r->status == 200);
+    r = c.request("PLAY", url, "Session: " + (r ? r->session() : std::string{}) + "\r\n");
+    CHECK(r && r->status == 200);
+    std::this_thread::sleep_for(100ms);
+
+    // Pictures at the mode's rate. With `each`, every picture is waited for until it is encoded
+    // (bounded), so a slow runner cannot let one replace another in the stream's one-picture
+    // mailbox and turn an exact count into a race; the capture times keep the mode's cadence.
+    const auto feed = [&](const CameraMode &m, int frames, int t0, bool each = true) {
+        const auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < frames; ++i) {
+            const auto at = start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                        std::chrono::duration<double>(i / m.fps));
+            std::this_thread::sleep_until(at);
+            const uint64_t encoded = video.stats().frames_encoded;
+            video.on_frame(40, std::make_shared<Image>(card(m.width, m.height, t0 + i)), 0.0, at, m);
+            const auto deadline = std::chrono::steady_clock::now() + 2000ms;
+            while (each && video.stats().frames_encoded == encoded &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(2ms);
+            }
+        }
+        std::this_thread::sleep_for(150ms);
+    };
+    const auto received = [&](size_t frames) {
+        c.wait_packets(frames, 0, 3000);
+        c.settle();
+        rtsp_test::Depacketizer depack;
+        for (const auto &[channel, data] : c.packets()) {
+            if (channel == 0) {
+                depack.push(data);
+            }
+        }
+        c.packets().clear();
+        return depack.frames;
+    };
+    const auto sps_of = [](const rtsp_test::Depacketizer::Frame &f) {
+        for (const auto &n : f.nals) {
+            if (!n.empty() && (n[0] & 0x1F) == kNalSps) {
+                return parse_sps(n);
+            }
+        }
+        return SpsInfo{};
+    };
+
+    // The normal mode: 96x64 at 20 fps, every picture encoded, the first an IDR of that size.
+    auto frames = received(0);
+    auto before = video.stats();
+    feed(mode, 6, 0);
+    frames = received(6);
+    CHECK(video.stats().frames_encoded - before.frames_encoded == 6);
+    CHECK(frames.size() == 6 && frames[0].has(kNalIdr));
+    if (!frames.empty()) {
+        const SpsInfo sps = sps_of(frames[0]);
+        CHECK(sps.ok && sps.width == 96 && sps.height == 64);
+    }
+
+    // The landing camera: twice the size at 10 fps and 900 kbps. The next picture is an IDR whose
+    // SPS has the new size, on the same session; the encoder route reports the landing bitrate.
+    const CameraMode landing{192, 128, 10.0, 900};
+    {
+        std::lock_guard<std::mutex> lock(mode_mutex);
+        mode = landing;
+    }
+    feed(landing, 4, 100);
+    frames = received(4);
+    CHECK(frames.size() == 4 && frames[0].has(kNalIdr) && !frames[1].has(kNalIdr));
+    if (!frames.empty()) {
+        const SpsInfo sps = sps_of(frames[0]);
+        CHECK(sps.ok && sps.width == 192 && sps.height == 128);
+    }
+    st = video.encoder(4, 40);
+    CHECK(st.width == 192 && st.height == 128 && st.max_fps == 10.0 && st.settings.fps == 10.0);
+    CHECK(st.settings.bitrate_kbps == 900);
+
+    // Back to the normal mode: its size again (another IDR), and the stream's own bitrate.
+    {
+        std::lock_guard<std::mutex> lock(mode_mutex);
+        mode = CameraMode{96, 64, 20.0, 0};
+    }
+    feed(CameraMode{96, 64, 20.0, 0}, 4, 200);
+    frames = received(4);
+    CHECK(frames.size() == 4 && frames[0].has(kNalIdr));
+    if (!frames.empty()) {
+        const SpsInfo sps = sps_of(frames[0]);
+        CHECK(sps.ok && sps.width == 96 && sps.height == 64);
+    }
+    CHECK(video.encoder(4, 40).settings.bitrate_kbps == 1200);
+
+    // A change of rate alone, at one picture size (the landing mode's at the fleet's picture): a
+    // new encoder all the same, its first frame an IDR whose SPS times the new rate.
+    const CameraMode slower{96, 64, 10.0, 0};
+    {
+        std::lock_guard<std::mutex> lock(mode_mutex);
+        mode = slower;
+    }
+    feed(slower, 3, 400);
+    frames = received(3);
+    CHECK(frames.size() == 3 && frames[0].has(kNalIdr) && !frames[1].has(kNalIdr));
+    if (!frames.empty()) {
+        const SpsInfo sps = sps_of(frames[0]);
+        CHECK(sps.ok && sps.width == 96 && sps.height == 64);
+        // x264 writes the frame rate as time_scale / (2 * num_units_in_tick).
+        CHECK(sps.timing_info && sps.num_units_in_tick > 0 &&
+              std::fabs(static_cast<double>(sps.time_scale) / (2.0 * sps.num_units_in_tick) - 10.0) < 1e-6);
+    }
+    {
+        std::lock_guard<std::mutex> lock(mode_mutex);
+        mode = CameraMode{96, 64, 20.0, 0};
+    }
+    // ... and the return to 20 fps at that picture size is one too: both frames arrive, the first an
+    // IDR whose SPS times 20 fps (not the old rate's P-frame, or no frame at all).
+    feed(CameraMode{96, 64, 20.0, 0}, 2, 500);
+    frames = received(2);
+    CHECK(frames.size() == 2 && frames[0].has(kNalIdr));
+    if (!frames.empty()) {
+        const SpsInfo sps = sps_of(frames[0]);
+        CHECK(sps.ok && sps.width == 96 && sps.height == 64);
+        CHECK(sps.timing_info && sps.num_units_in_tick > 0 &&
+              std::fabs(static_cast<double>(sps.time_scale) / (2.0 * sps.num_units_in_tick) - 20.0) < 1e-6);
+    }
+
+    // A POSTed fps is a cap below the camera's rate: 5 of 20 fps is every fourth picture.
+    EncoderPatch patch;
+    patch.fps = 5.0;
+    st = video.encoder(4, 40, &patch);
+    CHECK(st.settings.fps == 5.0 && st.max_fps == 20.0);
+    // A bitrate-only POST while the camera runs slower than the cap keeps the cap as it was.
+    {
+        std::lock_guard<std::mutex> lock(mode_mutex);
+        mode = CameraMode{96, 64, 4.0, 0};
+    }
+    EncoderPatch rate_only;
+    rate_only.bitrate_kbps = 900.0;
+    st = video.encoder(4, 40, &rate_only);
+    CHECK(st.settings.fps == 4.0 && st.max_fps == 4.0); // the camera's 4 for now
+    {
+        std::lock_guard<std::mutex> lock(mode_mutex);
+        mode = CameraMode{96, 64, 20.0, 0};
+    }
+    st = video.encoder(4, 40);
+    CHECK(st.settings.fps == 5.0 && st.settings.bitrate_kbps == 900); // the cap of 5 again, not 4
+    before = video.stats();
+    feed(CameraMode{96, 64, 20.0, 0}, 20, 300, false); // decimated: most pictures are never encoded
+    const uint64_t encoded = video.stats().frames_encoded - before.frames_encoded;
+    CHECK(encoded >= 4 && encoded <= 6);
+    c.close();
+    video.stop();
+}
+
 } // namespace
 
 int main() {
@@ -1019,6 +1205,7 @@ int main() {
     test_rtsp_server();
     test_video_service();
     test_render_video_demand();
+    test_video_camera_modes();
     if (g_failures != 0) {
         std::printf("test_video: %d failure(s)\n", g_failures);
         return 1;

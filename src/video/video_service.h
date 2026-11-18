@@ -19,6 +19,7 @@
 // encoder is freed after a linger period. The renderer keeps drawing for its demand window
 // (RenderService::Config::demand_window_s) after the last session ends; those pictures are
 // dropped here unencoded.
+#include "render/camera_mode.h"
 #include "render/image.h"
 #include "video/h264.h"
 #include "video/rtsp_server.h"
@@ -34,6 +35,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -55,9 +57,9 @@ struct EncoderPatch {
     std::optional<double> keyframe_interval_s;
 };
 
-// The bounds a POST is clamped to. The frame rate's ceiling is the camera's render rate
-// (--camera-fps): a stream cannot have pictures that were never drawn, and the render rate is
-// the CPU budget the deployment chose.
+// The bounds a POST is clamped to. The frame rate's ceiling is the camera's render rate — the
+// vehicle's camera mode now (render/camera_mode.h, TASK-2661): a stream cannot have pictures that
+// were never drawn, and the render rate is the CPU budget the deployment chose.
 inline constexpr int kMinBitrateKbps = 64;
 inline constexpr int kMaxBitrateKbps = 8000;
 inline constexpr double kMinFps = 1.0;
@@ -72,9 +74,13 @@ class VideoService {
     using Clock = std::chrono::steady_clock;
 
     struct Config {
-        int width{256}; // the camera's picture size
+        // The fleet camera's picture size and render rate: what a stream assumes for a vehicle
+        // whose camera Hooks::camera cannot name. A stream's pictures carry their own size and
+        // the encoder follows it (TASK-2661): a vehicle whose camera changes size mid-stream
+        // gets a new encoder and an IDR with the new SPS/PPS, on the same RTSP session.
+        int width{256};
         int height{144};
-        double max_fps{10.0}; // the camera's render rate, the ceiling for a stream's fps
+        double max_fps{10.0}; // the ceiling for a stream's fps when its camera's rate is unknown
         // A stream's settings until somebody changes them. fps is clamped to max_fps.
         EncoderSettings defaults{};
         std::string preset{"veryfast"};
@@ -94,6 +100,11 @@ class VideoService {
         std::function<uint32_t(int instance)> resolve;
         // Keep drawing this vehicle for a stream (RenderService::want_video). Same.
         std::function<void(uint32_t vehicle_id)> want_frames;
+        // What the vehicle's stream carries now — its picture size, and its mode's nominal frame
+        // rate and bitrate (RenderService::stream_mode, not mode_now: that one is the draw size and
+        // the rest rate) — for a DESCRIBE or an encoder route before its next picture says.
+        // Optional; without it the Config's size and rate.
+        std::function<render::CameraMode(uint32_t vehicle_id)> camera;
     };
 
     struct Stats {
@@ -129,9 +140,10 @@ class VideoService {
     // Must run before whatever the hooks call into goes away. Idempotent.
     void stop();
 
-    // From the render thread: a picture of a vehicle a stream asked for. Never blocks.
+    // From the render thread: a picture of a vehicle a stream asked for, drawn in camera mode
+    // `mode` (its frame rate and bitrate; a default mode means the Config's). Never blocks.
     void on_frame(uint32_t vehicle_id, std::shared_ptr<const render::Image> image, double sim_time_s,
-                  Clock::time_point drawn);
+                  Clock::time_point drawn, const render::CameraMode &mode = {});
 
     // The control API. `vehicle_id` is the vehicle the caller found at `instance`: settings
     // belong to that vehicle, so the next vehicle spawned at the instance starts from defaults.
@@ -147,14 +159,25 @@ class VideoService {
         int instance{0};
         uint32_t vehicle_id{0};     // where its pictures come from while it is played
         uint32_t settings_owner{0}; // the vehicle `settings` were made for
+        // What the encoder route set, or the defaults: its fps is a cap below the camera's rate
+        // once fps_set (a POST named one), and otherwise the stream follows the camera.
         EncoderSettings settings;
+        bool fps_set{false};
+        // The camera its pictures come from, as the latest picture or Hooks::camera said
+        // (TASK-2661): size (0 = the Config's), frame rate (0 = Config::max_fps) and the bitrate
+        // its mode asks for (0 = the settings' own).
+        int camera_width{0};
+        int camera_height{0};
+        double camera_fps{0.0};
+        int camera_bitrate_kbps{0};
         size_t clients{0};
         Clock::time_point idle_since{};
 
         // Taken by the worker encoding it (busy) and put back after.
+        // What it encodes at — the picture's size, the effective fps and bitrate — is compared
+        // with what the stream wants on every picture: a new size or fps builds a new encoder,
+        // a new bitrate reconfigures it in place.
         std::unique_ptr<H264Encoder> encoder;
-        bool rebuild{false};   // fps changed: a new encoder
-        bool rebitrate{false}; // bitrate changed: reconfigure in place
         bool force_idr{true};
         bool have_idr{false};
         Clock::time_point last_idr{};
@@ -163,6 +186,8 @@ class VideoService {
         std::shared_ptr<const render::Image> pending;
         double pending_sim_s{0.0};
         Clock::time_point pending_at{};
+        double pending_fps{0.0}; // the camera rate and bitrate it was drawn for
+        int pending_bitrate_kbps{0};
         bool queued{false};
         bool busy{false};
 
@@ -171,7 +196,7 @@ class VideoService {
         Clock::time_point next_due{};
     };
 
-    // What an encoder at a frame rate writes as SPS and PPS (they depend on nothing else here).
+    // What an encoder at a size and frame rate writes as SPS and PPS (they depend on nothing else here).
     struct ParameterSets {
         std::vector<uint8_t> sps;
         std::vector<uint8_t> pps;
@@ -184,9 +209,21 @@ class VideoService {
     void bind_vehicle(Stream &s, uint32_t vehicle_id);
     void set_settings(Stream &s, const EncoderSettings &next);
     StreamState state_of(const Stream &s) const;
+    // The settings a stream encodes at now: its fps capped by (or following) the camera's rate,
+    // the camera mode's bitrate over its own when the mode names one.
+    EncoderSettings effective(const Stream &s) const;
+    // The same for a camera rate and bitrate other than the stream's latest (a queued picture's).
+    EncoderSettings effective_for(const Stream &s, double camera_fps, int camera_bitrate_kbps) const;
+    double camera_fps(const Stream &s) const { return s.camera_fps > 0.0 ? s.camera_fps : cfg_.max_fps; }
+    int camera_width(const Stream &s) const { return s.camera_width > 0 ? s.camera_width : cfg_.width; }
+    int camera_height(const Stream &s) const { return s.camera_height > 0 ? s.camera_height : cfg_.height; }
+    // The vehicle's camera mode from Hooks::camera, recorded on its stream. Call with no lock held.
+    void refresh_camera(int instance, uint32_t vehicle_id);
     std::optional<RtspServer::StreamInfo> describe(int instance);
     // From the cache, or made (outside the lock) and cached. Null when x264 refuses the size.
-    std::optional<ParameterSets> parameter_sets(double fps);
+    std::optional<ParameterSets> parameter_sets(int width, int height, double fps);
+    // Caches them (under mutex_), bounded.
+    void remember_parameter_sets(const std::tuple<int, int, double> &key, const ParameterSets &ps);
     void playing(int instance, bool on);
     void worker();
     void housekeeping();
@@ -201,7 +238,10 @@ class VideoService {
     uint64_t house_epoch_{0};
     std::unordered_map<int, Stream> streams_; // never erased: references stay valid unlocked
     std::unordered_map<uint32_t, int> by_vehicle_;
-    std::map<double, ParameterSets> parameter_sets_; // by fps: few distinct rates ever exist
+    // By picture size and fps: the fleet's, a landing mode's, and whatever fps an encoder POST
+    // named — at most kMaxParameterSets at once (remember_parameter_sets).
+    static constexpr size_t kMaxParameterSets = 64;
+    std::map<std::tuple<int, int, double>, ParameterSets> parameter_sets_;
     std::deque<int> ready_;
 
     uint64_t frames_encoded_{0};

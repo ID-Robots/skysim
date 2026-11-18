@@ -25,6 +25,8 @@
 #include "core/world.h"
 #include "render/dock.h"
 #include "render/dock_marker.h"
+#include "render/ground_cache.h"
+#include "render/raster.h"
 #include "render/render_service.h"
 #include "render/scene.h"
 #include "render/still.h"
@@ -431,6 +433,36 @@ void test_frames() {
     CHECK(render::MarkerView(&own, camera).albedo(0, 0, 50.0, 50.0, 0.01, albedo) == 0.0 && albedo == -1.0);
 }
 
+// A dock marker's plate is drawn without the ground cache, so the tiles a cached frame gathers
+// ahead (Rasterizer::render, GroundCache::prepare) leave out what it covers: a vehicle on its dock
+// looks down at its marker, and building the ground under it all made that camera's first frame
+// twice as slow as drawing it without the cache — past camera.jpg's 2 s wait in a Debug build.
+// Looking straight down from 0.4 m, the marker fills the frame: no tile built, and the same
+// picture as without the cache. From 3 m the ground around it is gathered as before.
+void test_marker_skips_ground_cache() {
+    auto scene = std::make_shared<render::RasterScene>();
+    scene->build({});
+    render::CameraConfig cfg;
+    cfg.width = 320;
+    cfg.height = 180;
+    cfg.fov_deg = 81.0;
+    const render::Quat nadir = render::camera_quat_from_angles(0.0, -90.0, 0.0);
+    const render::GroundMarkers markers{render::GroundMarker{7, DockPose{}, DockMarkerSpec{}, nullptr}};
+    const render::Rasterizer raster(cfg);
+    for (const double h : {0.4, 3.0}) {
+        const render::Camera camera = render::Camera::with_attitude(cfg, render::Vec3{0.0, 0.0, -h}, nadir);
+        render::GroundCache cache(scene, 0);
+        const render::Image cached = raster.render(*scene, camera, nullptr, nullptr, true, &markers, &cache);
+        const render::Image plain = raster.render(*scene, camera, nullptr, nullptr, true, &markers, nullptr);
+        if (h < 1.0) {
+            CHECK(cache.stats().tiles_built == 0);
+            CHECK(cached.rgb == plain.rgb);
+        } else {
+            CHECK(cache.stats().tiles_built > 0);
+        }
+    }
+}
+
 void test_board() {
     render::DockBoard board{DockMarkerSpec{}};
     CHECK(board.spec().outer_size_m == 1.0);
@@ -603,7 +635,7 @@ void test_render_service_own_dock() {
         cfg.threads = 2;
         cfg.background_priority = false;
         cfg.video_sink = [&](uint32_t id, std::shared_ptr<const render::Image> image, double,
-                             std::chrono::steady_clock::time_point) {
+                             std::chrono::steady_clock::time_point, const render::CameraMode &) {
             if (id == 1) {
                 std::lock_guard<std::mutex> lock(mutex);
                 latest = std::move(image);
@@ -680,6 +712,7 @@ int main() {
     test_bad_images();
     test_pose_math();
     test_frames();
+    test_marker_skips_ground_cache();
     test_board();
     test_render_service_redraws_on_move();
     test_visibility_names();

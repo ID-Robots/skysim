@@ -1,0 +1,496 @@
+#!/usr/bin/env python3
+"""Does aruco_landing see the dock through the stream it really gets? (TASK-2661)
+
+tools/render_probe/aruco_check.py looks at lossless renders. This looks at what a SITL's landing
+consumer is handed: skysim's H.264 RTSP stream, decoded by OpenCV's VideoCapture (its FFmpeg
+backend over TCP), with the camera arguments a deployment runs. It starts skysim with those
+arguments, flies one vehicle straight up over its dock with an altitude hold (gimbal at -90 deg),
+and at each height reads the stream for a few seconds and runs cv2.aruco (DICT_7X7_250, default
+DetectorParameters) on every frame.
+
+One VideoCapture stays open for the whole flight, from the ground up, as a consumer's would, and
+the run lists every picture size it decoded: with a landing mode the stream must keep one size
+(OpenCV's FFmpeg capture keeps returning the last frame of the old size when it changes).
+--offset moves the dock that far east of the vehicle's climb, as when the landing takes over
+within 15 m of home.
+
+  python3 tools/render_probe/stream_check.py --sim build/skysim --label dev \\
+      --args "--camera-fps 30 --camera-size 640x360 --camera-fov 78"
+  python3 tools/render_probe/stream_check.py --sim build/skysim --label landing \\
+      --args "--camera-fps 30 --camera-size 1920x1080 --camera-draw-size 640x360 --camera-fov 81 \\
+              --camera-landing-fps 15 --camera-landing-bitrate 4000 --camera-rest-fps 2"
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import shlex
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+
+try:
+    import cv2
+except ImportError:  # pragma: no cover - reported, not crashed on
+    cv2 = None
+
+API_PORT = 18704
+RTSP_PORT = 18705
+INSTANCE = 110
+
+# What holding an altitude means, for hold() to start a measurement and for every reply after it,
+# until the measurement ends: telemetry that is no more than FRESH_S old (replies still coming),
+# within HOLD_BAND_M of the height and moving at less than HOLD_SPEED_MS.
+FRESH_S = 0.2
+HOLD_BAND_M = 0.05
+HOLD_SPEED_MS = 0.05
+
+
+def api(path: str, body: dict | None = None, method: str = "GET"):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(f"http://127.0.0.1:{API_PORT}{path}", data=data, method=method)
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode() or "{}")
+
+
+def has_telemetry(state) -> bool:
+    """Whether a decoded reply has the position and velocity (three numbers each) the hold flies by."""
+    return isinstance(state, dict) and all(
+        isinstance(state.get(k), list) and len(state[k]) >= 3 and all(isinstance(v, (int, float)) for v in state[k][:3])
+        for k in ("position", "velocity"))
+
+
+class FakeSitl(threading.Thread):
+    """JSON lockstep with an altitude hold on all four motors and the gimbal at -90 deg (the
+    altitude hold tests/dock_marker_smoke.py flies with)."""
+
+    MASS, K_THRUST, OMEGA_MAX, G = 1.5, 7.65e-6, 1200.0, 9.81
+
+    def __init__(self, port: int) -> None:
+        super().__init__(daemon=True)
+        self.port = port
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.settimeout(0.5)
+        self.target = 0.0
+        self.state: dict | None = None
+        self.lock = threading.Lock()
+        self.done = threading.Event()
+        self.integral = 0.0
+        self.received = 0.0  # when the last state reply arrived (monotonic)
+        self.window: dict | None = None  # what the replies since hold() returned looked like
+        self.settling: dict | None = None  # while hold() waits: its target, and in the band since when
+
+    def pwm(self) -> int:
+        if self.state is None or self.target <= 0.0:
+            return 1000
+        h = -self.state["position"][2]
+        vz = -self.state["velocity"][2]
+        v_cmd = max(-2.5, min(2.5, 1.2 * (self.target - h)))
+        err = v_cmd - vz
+        self.integral = max(-2.0, min(2.0, self.integral + err / 800.0))
+        acc = max(-3.0, min(3.0, 2.5 * err + 0.8 * self.integral))
+        thrust = max(self.MASS * (self.G + acc), 0.0)
+        u = math.sqrt(thrust / (4.0 * self.K_THRUST)) / self.OMEGA_MAX
+        return round(1000 + 1000 * max(0.0, min(1.0, u)))
+
+    def run(self) -> None:
+        fc = 0
+        while not self.done.is_set():
+            motor = self.pwm()
+            channels = [motor] * 4 + [1000] * 5 + [1100, 1500] + [1000] * 5
+            self.sock.sendto(struct.pack("<HHI16H", 18458, 800, fc, *channels), ("127.0.0.1", self.port))
+            try:
+                reply = self.sock.recv(4096)
+            except TimeoutError:
+                continue
+            fc += 1
+            try:
+                state = json.loads(reply.decode())
+            except ValueError:
+                continue
+            self.accept(state)
+
+    def accept(self, state) -> None:
+        """A state reply arrived: it is the latest telemetry, and it counts in the window hold() opened
+        (if there is one). Not a state reply — no position, no velocity — it is ignored: it does not make
+        the last one fresh."""
+        if not has_telemetry(state):
+            return
+        with self.lock:
+            now = time.monotonic()
+            p = self.settling
+            if p is not None:
+                # Every reply counts toward the second hold() waits for, not only the ones its polls
+                # happen to see: one out of the band, or one after a stale gap, starts it again.
+                if now - self.received >= FRESH_S or not self._in_band(state, p["target"]):
+                    p["since"] = None
+                if self._in_band(state, p["target"]) and p["since"] is None:
+                    p["since"] = time.time()
+            self.state = state
+            w = self.window
+            if w is not None:
+                w["gap"] = max(w["gap"], now - w["last"])
+                w["deviation"] = max(w["deviation"], abs(-state["position"][2] - w["target"]))
+                w["speed"] = max(w["speed"], abs(state["velocity"][2]))
+                w["replies"] += 1
+                w["last"] = now
+            self.received = now
+
+    def height(self) -> float:
+        with self.lock:
+            return -self.state["position"][2] if self.state else 0.0
+
+    @staticmethod
+    def _in_band(state, target: float) -> bool:
+        return abs(-state["position"][2] - target) < HOLD_BAND_M and abs(state["velocity"][2]) < HOLD_SPEED_MS
+
+    def hold(self, target: float, timeout: float = 90.0) -> bool:
+        self.target = target
+        deadline = time.time() + timeout
+        with self.lock:
+            # From here every reply is judged as it arrives (accept): the second in the band is
+            # counted from the first reply of an unbroken in-band run, so an excursion that comes and
+            # goes between two polls below still starts it again. The reply already here starts it
+            # if it is fresh and in the band.
+            s = self.state
+            fresh = time.monotonic() - self.received < FRESH_S
+            self.settling = {"target": target,
+                             "since": time.time() if s is not None and fresh and self._in_band(s, target) else None}
+        try:
+            while time.time() < deadline:
+                # The telemetry is judged and — when the hold has lasted — the window opened, all
+                # under the lock a reply is stored under (accept): no reply can come between "it has
+                # been in the band for a second" and the window that is to see every reply after, so
+                # one that is not in the band either restarted the second here, or is in the window.
+                with self.lock:
+                    p = self.settling
+                    if time.monotonic() - self.received >= FRESH_S:  # replies stopped: a stale gap
+                        p["since"] = None
+                    elif p["since"] is not None and time.time() - p["since"] > 1.0:
+                        # Held — and the replies from here on are watched (end_window) until whoever
+                        # measures has finished: a hold that was true when this returned says nothing
+                        # about the seconds the stream is read for.
+                        self.window = {"target": target, "last": self.received, "gap": 0.0, "deviation": 0.0,
+                                       "speed": 0.0, "replies": 0}
+                        self.settling = None
+                        return True
+                time.sleep(0.05)
+            return False
+        finally:
+            with self.lock:
+                self.settling = None
+
+    def end_window(self) -> list[str]:
+        """Stops watching what hold() started to, and says why the hold did not last: nothing when
+        telemetry kept coming (never a gap of FRESH_S, and one that is that fresh now), and the
+        vehicle stayed inside the band and under the speed hold() asked for, the whole time."""
+        with self.lock:
+            w, self.window = self.window, None
+            now = time.monotonic()
+            last = self.received
+        if w is None:
+            return ["no hold was being watched"]
+        gap = max(w["gap"], now - max(last, w["last"]))  # the silence since the last reply counts
+        why = []
+        if w["replies"] == 0:
+            why.append("no telemetry at all")
+        if gap >= FRESH_S:
+            why.append(f"telemetry stale for {gap:.2f} s")
+        if w["deviation"] >= HOLD_BAND_M:
+            why.append(f"{w['deviation']:.2f} m off the height")
+        if w["speed"] >= HOLD_SPEED_MS:
+            why.append(f"vertical speed {w['speed']:.2f} m/s")
+        return why
+
+
+class Reader(threading.Thread):
+    """One VideoCapture on the stream for the whole run: the latest frame, and every frame's size."""
+
+    def __init__(self, url: str) -> None:
+        super().__init__(daemon=True)
+        os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+        self.cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"OpenCV could not open {url}")
+        self.lock = threading.Lock()
+        self.frames: list = []  # (time, frame) while collecting
+        self.collecting = False
+        self.sizes: list[tuple[int, int]] = []
+        self.stop = False
+        self.errors = 0
+
+    def run(self) -> None:
+        while not self.stop:
+            ok, frame = self.cap.read()
+            if not ok:
+                self.errors += 1
+                time.sleep(0.05)
+                continue
+            size = (frame.shape[1], frame.shape[0])
+            with self.lock:
+                if not self.sizes or self.sizes[-1] != size:
+                    self.sizes.append(size)
+                if self.collecting:
+                    self.frames.append((time.time(), frame))
+
+    def collect(self, seconds: float) -> list:
+        with self.lock:
+            self.frames = []
+            self.collecting = True
+        time.sleep(seconds)
+        with self.lock:
+            self.collecting = False
+            batch, self.frames = self.frames, []  # handed over, not kept: a 1080p batch is ~0.5 GB
+            return batch
+
+
+class _ReleaseHook:
+    """A lock that calls `after()` each time it is released: a place for a telemetry reply to arrive
+    exactly where hold() lets go of the lock."""
+
+    def __init__(self, after) -> None:
+        self._lock = threading.Lock()
+        self.after = after
+
+    def __enter__(self) -> "_ReleaseHook":
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._lock.release()
+        self.after()
+
+
+class _VirtualClock:
+    """time.time() and time.sleep() for hold() in the self-test: sleeping advances the clock and
+    waits for nothing, so the run is the same every time and the moment hold() decides is known
+    exactly. monotonic() stays real (the telemetry's freshness), and the whole run takes
+    milliseconds, well inside FRESH_S."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def time(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+    @staticmethod
+    def monotonic() -> float:
+        return _real_time.monotonic()
+
+
+_real_time = time
+
+
+def _selftest_run(at: float, inject) -> tuple[bool, float, list[float], list[str]]:
+    """hold(10.0) on a virtual clock, in one thread, from one in-band reply: `inject(sitl)` runs once,
+    at the first moment hold() lets go of the lock after `at` seconds on the clock hold() reads.
+    Returns whether hold() held, after how long, when the injection ran, and what its window says."""
+    clock = _VirtualClock()
+    started = clock.now
+    sitl = FakeSitl(0)
+    fired: list[float] = []
+
+    def after_release() -> None:
+        if not fired and clock.now - started > at:
+            fired.append(clock.now - started)
+            inject(sitl)
+
+    sitl.lock = _ReleaseHook(after_release)  # type: ignore[assignment]
+    globals()["time"] = clock
+    try:
+        sitl.accept({"position": [0.0, 0.0, -10.0], "velocity": [0.0, 0.0, 0.0]})
+        held = sitl.hold(10.0, timeout=30.0)
+    finally:
+        globals()["time"] = _real_time
+    why = sitl.end_window() if held else []
+    return held, clock.now - started, fired, why
+
+
+def selftest() -> int:
+    """hold() against replies injected at the moments that matter, on a virtual clock (sleeping
+    advances it), in one thread, so each lands at that point every time. No simulator, no OpenCV.
+
+    1. A reply out of the band, at the first moment hold() lets go of the lock in the iteration in
+       which it decides the hold has lasted a second: between its check and (in a hold() that took
+       the lock twice) the opening of its window. hold() must return True — the telemetry was in the
+       band — and its window must have seen the reply: end_window() names the deviation.
+    2. A reply out of the band and an in-band one replacing it, both between two of hold()'s polls,
+       half a second in: the second must start again there, so hold() returns no earlier than a
+       second after the excursion (it would return at 1.05 s if only its polls judged the replies).
+    3. A stale gap that ends between two polls, half a second in: the same."""
+    in_band = {"position": [0.0, 0.0, -10.0], "velocity": [0.0, 0.0, 0.0]}
+    off = {"position": [0.0, 0.0, -10.4], "velocity": [0.0, 0.0, 0.0]}  # 0.4 m off
+
+    def excursion(sitl) -> None:
+        sitl.accept(off)
+        sitl.accept(in_band)
+
+    def stale_gap(sitl) -> None:
+        with sitl.lock:
+            sitl.received -= FRESH_S + 0.05  # the last reply came longer than FRESH_S ago
+        sitl.accept(in_band)
+
+    failures = []
+    # 1: the injection is in the iteration that decides (the first with `time - since > 1.0`; the
+    # one before it is at exactly 1.0 and does not).
+    held, took, fired, why = _selftest_run(1.0, lambda sitl: sitl.accept(off))
+    print(f"stream_check selftest 1: hold() returned {held} after {took:.2f} s on the virtual clock, the "
+          f"reply was injected at {[round(t, 2) for t in fired]}, the window says: {why}")
+    if not fired:
+        failures.append("1: the reply was never injected")
+    if not held:
+        failures.append("1: hold() did not return True on steady telemetry")
+    elif not any("off the height" in w for w in why):
+        failures.append("1: hold() returned, and its window missed the out-of-band reply")
+    for n, name, inject in ((2, "an excursion", excursion), (3, "a stale gap", stale_gap)):
+        held, took, fired, _ = _selftest_run(0.5, inject)
+        print(f"stream_check selftest {n}: {name} between two polls at {[round(t, 2) for t in fired]} s, "
+              f"hold() returned {held} after {took:.2f} s")
+        if not fired:
+            failures.append(f"{n}: {name} was never injected")
+        elif not held:
+            failures.append(f"{n}: hold() did not return True on steady telemetry after {name}")
+        elif took - fired[0] <= 1.0:
+            failures.append(f"{n}: hold() returned {took - fired[0]:.2f} s after {name}, not a second")
+    for f in failures:
+        print(f"stream_check selftest: FAIL: {f}")
+    if not failures:
+        print("stream_check selftest: OK")
+    return 1 if failures else 0
+
+
+def main() -> int:
+    if "--selftest" in sys.argv[1:]:
+        return selftest()
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--sim", default="build/skysim")
+    ap.add_argument("--args", default="--camera-fps 30 --camera-size 640x360 --camera-fov 78",
+                    help="skysim camera arguments, one string")
+    ap.add_argument("--heights", default="30,20,10,3")
+    ap.add_argument("--seconds", type=float, default=3.0, help="stream read at each height")
+    ap.add_argument("--label", default="")
+    ap.add_argument("--json", default="")
+    ap.add_argument("--save", default="", help="keep one decoded frame per height here")
+    ap.add_argument("--offset", type=float, default=0.0, help="the dock this many metres east of the vehicle")
+    args = ap.parse_args()
+    if cv2 is None:
+        print("stream_check: needs python3 OpenCV (cv2)", file=sys.stderr)
+        return 2
+    params = cv2.aruco.DetectorParameters_create() if hasattr(cv2.aruco, "DetectorParameters_create") \
+        else cv2.aruco.DetectorParameters()
+    dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_7X7_250)
+    if hasattr(cv2.aruco, "ArucoDetector"):
+        det = cv2.aruco.ArucoDetector(dictionary, params)
+        detect = lambda grey: det.detectMarkers(grey)[1]  # noqa: E731
+    else:
+        detect = lambda grey: cv2.aruco.detectMarkers(grey, dictionary, parameters=params)[1]  # noqa: E731
+
+    cmd = [args.sim, "--vehicles", "0", "--base-instance", str(INSTANCE), "--time-mode", "interactive",
+           "--api-port", str(API_PORT), "--rtsp-port", str(RTSP_PORT), "--rtsp-bind", "127.0.0.1",
+           "--straggler-timeout", "10", *shlex.split(args.args)]
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    sitl = reader = None
+    rows = []
+    failures: list[str] = []
+    try:
+        deadline = time.time() + 20
+        while True:
+            try:
+                api("/metrics")
+                break
+            except OSError:
+                if time.time() > deadline:
+                    raise
+                time.sleep(0.1)
+        api("/vehicles", {"instance": INSTANCE}, "POST")
+        while not any(v["instance"] == INSTANCE for v in api("/vehicles")):
+            time.sleep(0.05)
+        if args.offset:
+            api(f"/instances/{INSTANCE}/camera/dock", {"north_m": 0.0, "east_m": args.offset}, "POST")
+        sitl = FakeSitl(9002 + 10 * INSTANCE)
+        sitl.start()
+        reader = Reader(f"rtsp://127.0.0.1:{RTSP_PORT}/instances/{INSTANCE}/main.264")
+        reader.start()
+        time.sleep(2.0)
+        if not reader.sizes:
+            raise RuntimeError("OpenCV decoded no frame from the stream")
+        time.sleep(2.0)
+        for h in [float(x) for x in args.heights.split(",") if x]:
+            held = sitl.hold(h)
+            if not held:
+                # Not at the height asked for: nothing measured is labelled with it.
+                print(f"stream_check: did not hold {h:g} m (at {sitl.height():.1f} m); not measured", flush=True)
+                failures.append(f"hold {h:g} m")
+                continue
+            time.sleep(1.0)  # past the switch and its IDR
+            cam = api(f"/instances/{INSTANCE}/camera")
+            frames = reader.collect(args.seconds)
+            # The hold must have lasted from hold() to here, the whole of the read: a vehicle that
+            # drifted off the height, or telemetry that stopped (the last reply repeated is a
+            # position nobody is measuring), makes the frames some other height's.
+            left = sitl.end_window()
+            if left:
+                print(f"stream_check: did not stay at {h:g} m while the stream was read "
+                      f"({'; '.join(left)}); not measured", flush=True)
+                failures.append(f"hold {h:g} m lost while reading ({left[0]})")
+                frames.clear()
+                continue
+            if not frames:
+                failures.append(f"no decoded frames at {h:g} m")
+            found = 0
+            for _, frame in frames:
+                ids = detect(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+                found += 1 if ids is not None and 228 in ids.ravel().tolist() else 0
+            size = f"{frames[-1][1].shape[1]}x{frames[-1][1].shape[0]}" if frames else "-"
+            count = len(frames)
+            if args.save and frames:
+                os.makedirs(args.save, exist_ok=True)
+                name = f"{args.label or 'stream'}_{h:g}m" + (f"_east{args.offset:g}m" if args.offset else "")
+                cv2.imwrite(os.path.join(args.save, name + ".png"), frames[-1][1])
+            frames.clear()  # released before the next height's batch arrives
+            row = {"label": args.label, "height_m": h, "offset_m": args.offset, "held": held,
+                   "mode": cam["now"]["mode"],
+                   "camera": f"{cam['now']['draw_width']}x{cam['now']['draw_height']}@{cam['now']['fps']:g}",
+                   "decoded_size": size, "frames": count,
+                   "fps": round(count / args.seconds, 1), "detected_228": found}
+            rows.append(row)
+            print(json.dumps(row), flush=True)
+    finally:
+        if reader is not None:
+            reader.stop = True
+            reader.join(timeout=5)
+        if sitl is not None:
+            sitl.done.set()
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    sizes = reader.sizes if reader else []
+    print(f"stream_check: picture sizes OpenCV decoded, in order: {sizes}; read errors {reader.errors if reader else 0}")
+    print(f"| {args.label} | height | camera now (mode, drawn at) | decoded | frames | 228 detected |")
+    for r in rows:
+        print(f"| | {r['height_m']:g} m | {r['mode']} {r['camera']} | {r['decoded_size']} | {r['frames']} | "
+              f"{r['detected_228']} of {r['frames']} |")
+    if args.json:
+        with open(args.json, "w") as f:
+            json.dump({"label": args.label, "args": args.args, "opencv": cv2.__version__, "sizes": sizes,
+                       "rows": rows, "failures": failures}, f, indent=2)
+    if failures:
+        print(f"stream_check: not measured as asked: {', '.join(failures)}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

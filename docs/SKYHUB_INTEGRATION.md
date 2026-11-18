@@ -134,6 +134,57 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   route, and drive the gimbal pitch on servo output 10. Read the findings in DOCK_MARKER.md before
   trusting inner-marker detection with OpenCV 4.5.4's default parameters.
 
+- **[S8] One picture size per vehicle; camera modes change how it is drawn** (done; TASK-2661,
+  [`docs/DOCK_MARKER.md`](DOCK_MARKER.md#full-resolution-at-the-dock-task-2661)): a 1920x1080
+  picture drawn in full for every vehicle at 30 fps does not fit a task (about 0.8 s of CPU a frame
+  before TASK-2661; 0.12-0.2 s now, with the lit-ground cache), and the landing needs it only near
+  the dock. So every frame of a vehicle keeps its picture size, and a mode decides how it is drawn.
+  - **Picture**: `SKYSIM_CAMERA_SIZE` (the fleet's), or the vehicle's own at spawn. It does not
+    change by itself: OpenCV 4.6's FFmpeg capture (and the core image's 4.5) keeps returning the
+    last frame of the old size when an RTSP picture changes size, so a size switch would blind a
+    landing in progress.
+  - **Normal mode**: drawn at `SKYSIM_CAMERA_DRAW_SIZE` (default the picture size) and scaled up to
+    the picture, at `SKYSIM_CAMERA_FPS`.
+  - **Landing mode**: `SKYSIM_CAMERA_LANDING_SIZE` (draw size, default the picture's),
+    `SKYSIM_CAMERA_LANDING_FPS` (default the fleet's), `SKYSIM_CAMERA_LANDING_BITRATE` (kbit/s,
+    default the stream's own), `SKYSIM_CAMERA_LANDING_RADIUS` (25 m), `SKYSIM_CAMERA_LANDING_HEIGHT`
+    (40 m): drawn while a vehicle is within the radius of its dock (`GET .../camera/dock`), at most
+    the height above the ground, from when it leaves the ground until it leaves the zone or comes
+    to rest on the ground again. Leaving the zone takes 5 m more of either. A hover more than
+    0.12 m up never counts as rest, so a SITL searching for the marker at 28.5 m keeps it.
+    "On the ground" is a height, not a contact: a quad resting on the ground plane has its centre
+    0.07 m up, and one held still with its centre within 0.12 m (skids within about 5 cm of the
+    ground) for 5 s counts as landed. skysim's physics counts new contacts but does not track
+    which ones are still touching, so there is no contact signal to use instead.
+  - **At rest**: `SKYSIM_CAMERA_REST_FPS` (default 0 = off): a vehicle still (2 cm, 0.5 deg) for 5 s
+    on the ground is drawn — re-sent — at this rate. Its stream keeps its nominal frame rate (the
+    encoder and SPS do not change); frames just come less often. A vehicle spawned on its dock
+    starts at rest.
+  - **Per vehicle**: `POST /vehicles {"camera":{...}}` at spawn, and `GET` / `POST` / `DELETE
+    /instances/<n>/camera` (also `/vehicles/<id>/camera`) at run time: `width`/`height` (or
+    `"size":"WxH"`) the picture; `draw_width`/`draw_height` (or `"draw":"WxH"`), `fps`,
+    `bitrate_kbps` the normal mode; `"landing":{...}` its own landing mode; `"landing":false`
+    turns it off for the vehicle. Bounds 16..3840 x 16..2160, 1..60 fps, 0 or 64..8000 kbit/s,
+    and a draw size keeps the picture's aspect ratio (1 %, or to the nearest pixel; the same rule
+    as `--camera-draw-size`), also the side inferred from a draw width or height given alone; out
+    of bounds is `400` and changes nothing (and spawns nothing, with the pilot camera on). A draw
+    size that is only the inherited one is not a setting, so a GET's answer can be POSTed back.
+    The settings belong to the vehicle and go when it despawns.
+  - **What a consumer sees**: the same endpoints, formats and picture size. Switching between the
+    normal and landing modes changes the frame rate (15 vs 30 fps): the stream's next frame is an
+    IDR with SPS/PPS for the new rate, same picture size, same session. `GET .../camera/intrinsics`
+    is the picture's pinhole always (`fx = width/2 / tan(hfov/2)`), plus `drawn` (`mode`, the draw
+    `width` and `height`) and `fps` now, `vehicle` and `picture_revision`: every `camera.jpg` and
+    MJPEG part carries `X-Skysim-Vehicle` and `X-Skysim-Picture-Revision`, and a frame and a
+    calibration with the same vehicle and the same revision are for the same picture size (a size
+    change makes a new revision; a replacement vehicle at the same instance has a new id and counts
+    its revisions from 0 again, so a client must match both values, not the revision alone). Ids
+    are unique within one skysim run and start again at 1 after a restart. In the normal mode the picture is a 640x360 drawing scaled
+    up, so it is soft; in the landing mode it is sharp.
+  - **Cost**: [README, "What the camera costs"](../README.md#what-the-camera-costs-task-2661) and
+    `tools/bench/camera_cost.py`. `GET /metrics` `camera.landing` counts vehicles in the landing
+    mode; `camera.ground_cache_mb` is the lit-ground cache (`SKYSIM_CAMERA_CACHE_MB`, 512).
+
 #### Using the still camera from a simulated survey (core, gateway)
 
 - **core `SurveyCaptureHandler`** (contract section 2): with `SKYSIM_URL` and
@@ -194,6 +245,26 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   transport to use between tasks; UDP RTP leaves skysim from an ephemeral port pair, so the
   receiver's security group would have to admit UDP from skysim on its own client ports.
 
+- **[C5] Precision landing at full resolution** (TASK-2661, needs [S8]): nothing in the camera
+  input has to change for the picture, which keeps one size — but aruco_landing's calibration for
+  the "observer1-sim" profile must be the picture skysim streams. Run skysim with
+  `SKYSIM_CAMERA_SIZE=1920x1080` and `SKYSIM_CAMERA_FOV=81` (the ZR30 at 1x) and the profile's
+  camera matrix must read fx = fy = 1124.016, cx = 959.5, cy = 539.5, no distortion — exactly
+  `GET /instances/<n>/camera/intrinsics`. Better: take fx/fy/cx/cy from that route at start-up
+  instead of a constant, so a vehicle spawned with its own picture size is calibrated too. If the
+  core reads the stream with OpenCV's `VideoCapture`, never give a vehicle a new picture size
+  (`POST .../camera {"size":...}`) while it is being read: OpenCV 4.5/4.6 keeps returning the last
+  frame of the old size. Where the normal and landing rates differ, the frame rate changes at the landing
+  zone's edge (an IDR with new SPS, same size): OpenCV 4.6 reads straight through it
+  (`tools/render_probe/stream_check.py`, 30 to 15 fps); a Janus/WebRTC path was not tried.
+- **[C6] Infrastructure** (terraform, the dev skysim task): the env of [S8] —
+  `SKYSIM_CAMERA_SIZE=1920x1080 SKYSIM_CAMERA_DRAW_SIZE=640x360 SKYSIM_CAMERA_FOV=81
+  SKYSIM_CAMERA_FPS=15 SKYSIM_CAMERA_LANDING_FPS=15 SKYSIM_CAMERA_LANDING_BITRATE=4000
+  SKYSIM_CAMERA_REST_FPS=2 SKYSIM_CAMERA_THREADS=8` (the default would be 4 threads) — on the
+  same 8 vCPU / 16 GB task (README, "What the camera costs"). The lit-ground cache keeps 512 MB
+  between frames; while a frame is drawn it can briefly hold that frame's new tiles on top (tens of
+  MB at 1920x1080), which 16 GB has room for.
+
 ### 3. skyhub_gateway_service
 - **[G1] Settings**: `SKYSIM_ENABLED`, `SKYSIM_URL` (default `http://127.0.0.1:8642`),
   `SKYSIM_MODEL_IP` (default `127.0.0.1` for host networking).
@@ -221,10 +292,18 @@ external physics server — `skyhub_sitl@a616454 scripts/isaac_sim_startup.sh:34
   warning, never as a failed drone creation. One skysim world holds one field, so the last
   spec PUT wins.
 
+- **[G6] A camera per simulated drone** (optional, TASK-2661): the fleet's camera settings
+  ([S8]) are enough for dock landings. To give one drone another picture size, rate or landing
+  mode, add `"camera": {...}` to the `POST /vehicles` body ([G2]) — at spawn, before anything reads
+  its stream; a bad one is a `400` and spawns nothing.
+
 ### 4. skyhub_dashboard (optional polish)
 - **[D1]** Toast/banner on the new `crash` SocketIO event (PrimeNG `MessageService`, same
   pattern as `vehicle-command.service.ts:97`) + a collision counter on the SITL drone
   card. Nothing else: mission upload/start UI already works unchanged.
+- **[D2]** Simulated video (TASK-2661): nothing to change. The picture keeps its size; with the
+  dev settings of [S8] it is 1920x1080 at 15 fps (a 640x360 drawing scaled up outside the landing
+  zone, so it looks soft there).
 
 ## Test plan (this machine, staged)
 

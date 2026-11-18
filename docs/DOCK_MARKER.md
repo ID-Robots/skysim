@@ -193,6 +193,75 @@ same table except at 5 m, where the 1920x1080 pictures decode the inner 11 inste
 `--analyse DIR` re-checks a capture with another OpenCV; CI re-checks its frames with Ubuntu
 22.04's 4.5.4.
 
+## Full resolution at the dock (TASK-2661)
+
+On dev (18.11) every SITL's aruco_landing took the RTL over at 30 m within 15 m of home, searched
+20 s and held at about 28.5 m: the pilot camera ran at 640x360, where a cell of the outer marker is
+1.5 px from 30 m. The real Observer camera is 1920x1080. Pixels per cell of the 1.00 m outer
+marker (9 cells across with its border, 0.111 m), straight down, `cell * fx / height`:
+
+| camera | fx | 30 m | 20 m | 10 m | 3 m |
+|---|---|---|---|---|---|
+| 640x360, HFOV 78 (dev until now) | 395.1 | 1.46 | 2.20 | 4.39 | 14.64 |
+| 1280x720, HFOV 81 | 749.3 | 2.78 | 4.16 | 8.33 | 27.75 |
+| 1920x1080, HFOV 81 (Observer 1, the landing camera) | 1124.0 | 4.16 | 6.24 | 12.49 | 41.63 |
+
+**Probe pictures.** `tools/render_probe/aruco_check.py` renders the view straight down onto the dock
+from each height with `tools/render_probe --dock` (the rasteriser and the marker exactly as the
+server draws them, ground cache on), saves the pictures and runs cv2.aruco on them (`DICT_7X7_250`,
+default `DetectorParameters`, the observer1-sim dictionary as this repo's proofs use it). OpenCV
+4.6.0, bench city, marker centred and 10 m off-centre (east, so still in the picture):
+
+| camera | 30 m | 30 m, 10 m off | 20 m | 20 m, 10 m off | 10 m | 3 m |
+|---|---|---|---|---|---|---|
+| 1920x1080 HFOV 81 | 228 (37.0 px of 37.5) | 228 | 228 (55.0 / 56.2) | 228 | 228 (111.0 / 112.4) | 228 (404 / 375) |
+| 1280x720 HFOV 81 | 228 | 228 | 228 | 228 | 228 | 228 and 11 |
+| 640x360 HFOV 78 | 228 (12.0 / 13.2) | no detect | 228 | 228 | 228 | 228 and 11 |
+
+The 1920x1080 pictures (JPEG copies of the lossless pictures the detector read) and the whole run
+are in [docs/dock_marker/](dock_marker/) (`probe_1920x1080_*.jpg`,
+[probe-opencv-4.6.0.md](dock_marker/probe-opencv-4.6.0.md)). To make them again:
+
+```bash
+python3 tools/render_probe/aruco_check.py --probe build/render_probe --tiles build/bench_city/tiles \
+    --out /tmp/probe --report docs/dock_marker/probe-opencv-4.6.0.md
+# the committed JPEGs are those PNGs at quality 90:
+python3 -c "import cv2; [cv2.imwrite(f'docs/dock_marker/probe_1920x1080_{h}m.jpg', \
+    cv2.imread(f'/tmp/probe/dock_1920x1080_hfov81_{h}m.png'), [cv2.IMWRITE_JPEG_QUALITY, 90]) for h in (30, 20, 10, 3)]"
+```
+
+(The bench city is `python3 tools/cooker/pretile.py build/bench_city_obj --extent 1000` cooked with
+`tile_cooker`.)
+
+So 1920x1080 is enough at 30 m, with the marker under the camera or 10 m to the side (the two
+placements tested): nothing about the marker
+needed changing in the renderer (it is drawn from its own mip-mapped texture, box-filtered per
+pixel, untouched by the ground cache; the same table comes out with the cache off). 640x360
+decodes a centred, lossless picture at 1.5 px a cell and nothing else; what a consumer gets is an
+H.264 stream (below). The 3 m side of 404 px against 375 is finding 2 above (the quad framing the
+white border on darker ground); ID 11 is finding 1 (OpenCV 4.5/4.6's `minMarkerDistanceRate`).
+
+**Through the stream.** What aruco_landing gets is H.264 over RTSP, and
+`tools/render_probe/stream_check.py` reads it the way a consumer would: one OpenCV `VideoCapture`
+(FFmpeg backend, TCP) open from the ground up while a stand-in SITL climbs over the dock with the
+gimbal at -90 deg and holds at each height for 3 s. OpenCV 4.6.0, bench city, frames with ID 228:
+
+| skysim camera | dock | 30 m | 20 m | 10 m | 3 m | picture sizes decoded |
+|---|---|---|---|---|---|---|
+| dev until now: `640x360` @ 30, HFOV 78, 1200 kbit/s | under | 89 of 89 | 90 of 90 | 90 of 90 | 90 of 90 | 640x360 |
+| the same | 10 m east | **0 of 90** | 90 of 90 | out of shot | out of shot | 640x360 |
+| landing mode: `1920x1080` picture, drawn at 640x360 @ 30 normally and full size @ 15, 4000 kbit/s, near the dock | under | 45 of 45 | 45 of 45 | 45 of 45 | 30 of 45 | 1920x1080 only |
+| the same | 10 m east | 45 of 45 | 45 of 45 | out of shot | out of shot | 1920x1080 only |
+
+So 640x360 is marginal, not blind: straight over the marker the stream decodes, and with the dock
+10 m to the side from 30 m — a landing that takes over within 15 m of home — it does not. At
+1920x1080 it does. At 3 m the full-size picture is perfect (the marker is 375 px) and OpenCV
+4.6's legacy detector misses a third of the frames, as it does in the stills (findings 1 and 2
+below). The first version of the landing camera switched the stream's picture size; OpenCV's
+FFmpeg capture then kept returning the last 640x360 frame (`Slice parameters 0, 1088 are invalid`)
+and found nothing. That is why a vehicle's picture keeps one size and a mode only changes how it
+is drawn (README; `docs/SKYHUB_INTEGRATION.md` [S8], [C5]).
+
 ## The proof
 
 `tests/dock_marker_smoke.py` (ctest `dock_marker_smoke`, label happy-path) starts skysim with the
@@ -267,6 +336,20 @@ and then re-analyses the same frames with 4.5.4 from apt on an Ubuntu 22.04 cont
    perfectly level camera exactly over the marker, heading exactly along it. A fake SITL can hover
    like that and a real flight cannot. Its tvec, the part a landing uses, stays correct
    (`ippe_lateral_err_m` in the report), and the proof solves with `SOLVEPNP_ITERATIVE`.
+4. **From 5 m, legacy cv2.aruco misses 228 in some stills by a twentieth of a millimetre.** This is
+   the white border's outline from finding 2. On this dock's ground (gravel, with centimetre
+   speckle), that outline is the quad the detector decodes. Where the speckle puts its corners,
+   it decodes with 0-1 bit errors or with 5, and with the default correction it allows 4. On a
+   1920x1080 HFOV 81 still straight down, 228 is missed at camera heights of 5.0036, 5.0039,
+   5.0044 and 5.0049 m, and found in every 0.05 mm step from 4.9985 to 5.0020 m. The same pixels
+   come out of the renderers of TASK-2562 and of TASK-2661. A uniform surround decides it one way
+   for good: a light pad around the plate (albedo 0.6 or 0.8) decodes at every height in
+   between, a dark one (0.3) at none. So this is finding 2 again, and on Observer 1 it depends on
+   the real dock's surface.
+   The proof settled its hover to 1 cm, which left the vehicle closing in at about a millimetre
+   a second. Its 5 m still landed at 5.0048-5.0049 m depending on tens of milliseconds of
+   scheduling, and failed now and then (TASK-2661 CI). It now settles to 1 mm and 2 mm/s
+   (`FakeSitl.hold`), so the pictures are taken at the height named.
 
 Regenerate the proof:
 

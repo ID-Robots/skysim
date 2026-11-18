@@ -118,6 +118,27 @@ struct Options {
     int video_threads = 0;
     // Keep serving camera.mjpg (SKYSIM_CAMERA_MJPEG). On until every consumer reads RTSP.
     bool camera_mjpeg = true;
+    // How the pictures are drawn (TASK-2661; render/camera_mode.h). Every picture is
+    // camera_width x camera_height; the normal mode draws it at camera_draw_* (0: that size) and
+    // scales it up. The landing mode is what a vehicle draws while it is in the air within
+    // camera_landing_radius_m of its dock and camera_landing_height_m above it — full size for
+    // the dock marker, where a precision landing reads it — on when a landing size or fps is
+    // given (SKYSIM_CAMERA_LANDING_SIZE / _FPS; the size defaults to the picture's, the fps to
+    // the fleet's, the bitrate, 0, to the stream's own). camera_rest_fps (0: off) is the rate of
+    // a vehicle sitting still on the ground.
+    int camera_draw_width = 0;
+    int camera_draw_height = 0;
+    double camera_rest_fps = 0.0;
+    bool camera_landing = false;
+    int camera_landing_width = 0;
+    int camera_landing_height = 0;
+    double camera_landing_fps = 0.0;
+    int camera_landing_bitrate_kbps = 0;
+    double camera_landing_radius_m = 25.0;
+    double camera_landing_height_m = 40.0;
+    // Lit ground the pilot camera remembers between frames (render/ground_cache.h;
+    // SKYSIM_CAMERA_CACHE_MB): 0 computes every pixel, as before. A 1920x1080 view needs 20-45 MB.
+    int camera_cache_mb = 512;
     // Observer 1's e-ArUco dock marker on the ground at every vehicle's dock (TASK-2562;
     // render/dock_marker.h), drawn by the pilot camera and the survey stills alike
     // (SKYSIM_DOCK_MARKERS, SKYSIM_DOCK_MARKER_SIZE, SKYSIM_DOCK_INNER_SIZE). The sizes are the
@@ -163,6 +184,18 @@ double metres(const char *text, const char *flag) {
     const auto parsed = std::from_chars(text, end, v);
     if (parsed.ec != std::errc() || parsed.ptr != end || !std::isfinite(v)) {
         std::fprintf(stderr, "skysim: %s must be a length in metres\n", flag);
+        std::exit(2);
+    }
+    return v;
+}
+
+// A finite number, or exit with the bad-option code (atof would read "15fps" as 15 and "abc" as 0).
+double finite_number(const char *text, const char *flag) {
+    double v = 0.0;
+    const char *end = text + std::strlen(text);
+    const auto parsed = std::from_chars(text, end, v);
+    if (parsed.ec != std::errc() || parsed.ptr != end || !std::isfinite(v)) {
+        std::fprintf(stderr, "skysim: %s must be a number\n", flag);
         std::exit(2);
     }
     return v;
@@ -268,6 +301,55 @@ Options parse_args(int argc, char **argv) {
         } else if (std::strcmp(argv[i], "--video-threads") == 0) {
             o.video_threads =
                 static_cast<int>(whole_number(need_value("--video-threads"), "--video-threads", 0, 16));
+        } else if (std::strcmp(argv[i], "--camera-landing-size") == 0 ||
+                   std::strcmp(argv[i], "--camera-draw-size") == 0) {
+            const bool landing = std::strcmp(argv[i], "--camera-landing-size") == 0;
+            const char *flag = landing ? "--camera-landing-size" : "--camera-draw-size";
+            const char *v = need_value(flag);
+            int w = 0;
+            int h = 0;
+            if (!skysim::render::parse_wxh(v, w, h) || w < skysim::render::kMinCameraSide ||
+                w > skysim::render::kMaxCameraWidth || h < skysim::render::kMinCameraSide ||
+                h > skysim::render::kMaxCameraHeight) {
+                std::fprintf(stderr, "skysim: %s must be WxH, 16x16..3840x2160\n", flag);
+                std::exit(2);
+            }
+            (landing ? o.camera_landing_width : o.camera_draw_width) = w;
+            (landing ? o.camera_landing_height : o.camera_draw_height) = h;
+            o.camera_landing = o.camera_landing || landing;
+        } else if (std::strcmp(argv[i], "--camera-rest-fps") == 0) {
+            o.camera_rest_fps = finite_number(need_value("--camera-rest-fps"), "--camera-rest-fps");
+            if (o.camera_rest_fps != 0.0 && (o.camera_rest_fps < 0.1 || o.camera_rest_fps > 60.0)) {
+                std::fprintf(stderr, "skysim: --camera-rest-fps must be 0 (off) or 0.1..60\n");
+                std::exit(2);
+            }
+        } else if (std::strcmp(argv[i], "--camera-landing-fps") == 0) {
+            o.camera_landing_fps = finite_number(need_value("--camera-landing-fps"), "--camera-landing-fps");
+            if (o.camera_landing_fps < skysim::render::kMinCameraFps ||
+                o.camera_landing_fps > skysim::render::kMaxCameraFps) {
+                std::fprintf(stderr, "skysim: --camera-landing-fps must be 1..60\n");
+                std::exit(2);
+            }
+            o.camera_landing = true;
+        } else if (std::strcmp(argv[i], "--camera-landing-bitrate") == 0) {
+            o.camera_landing_bitrate_kbps = static_cast<int>(
+                whole_number(need_value("--camera-landing-bitrate"), "--camera-landing-bitrate", 0, 8000));
+            if (o.camera_landing_bitrate_kbps != 0 &&
+                o.camera_landing_bitrate_kbps < skysim::render::kMinCameraBitrateKbps) {
+                std::fprintf(stderr,
+                             "skysim: --camera-landing-bitrate must be 0 (the stream's own) or 64..8000\n");
+                std::exit(2);
+            }
+            o.camera_landing = true;
+        } else if (std::strcmp(argv[i], "--camera-landing-radius") == 0) {
+            o.camera_landing_radius_m =
+                metres(need_value("--camera-landing-radius"), "--camera-landing-radius");
+        } else if (std::strcmp(argv[i], "--camera-landing-height") == 0) {
+            o.camera_landing_height_m =
+                metres(need_value("--camera-landing-height"), "--camera-landing-height");
+        } else if (std::strcmp(argv[i], "--camera-cache-mb") == 0) {
+            o.camera_cache_mb = static_cast<int>(
+                whole_number(need_value("--camera-cache-mb"), "--camera-cache-mb", 0, 65536));
         } else if (std::strcmp(argv[i], "--camera-mjpeg") == 0) {
             o.camera_mjpeg = whole_number(need_value("--camera-mjpeg"), "--camera-mjpeg", 0, 1) == 1;
         } else if (std::strcmp(argv[i], "--dock-markers") == 0) {
@@ -326,6 +408,12 @@ Options parse_args(int argc, char **argv) {
     // period, and stb quietly reads quality 0 as 90.
     if (o.camera_quality < 1 || o.camera_quality > 100) {
         std::fprintf(stderr, "skysim: --camera-quality must be 1-100\n");
+        std::exit(2);
+    }
+    if (o.camera_landing_radius_m < 0.0 || o.camera_landing_radius_m > 10000.0 ||
+        o.camera_landing_height_m < 0.0 || o.camera_landing_height_m > 10000.0) {
+        std::fprintf(stderr,
+                     "skysim: --camera-landing-radius / --camera-landing-height must be 0..10000 m\n");
         std::exit(2);
     }
     if (o.frame_grace < 0.0 || o.frame_grace > 1.0) {
@@ -421,6 +509,8 @@ struct VehicleSlot {
     int instance = 0;
     std::optional<pid_t> pid; // set when this slot's arducopter is managed by us
     uint32_t body_id = 0;
+    // Where it spawned (NED): the dock the landing camera measures from without dock markers.
+    skysim::core::Vec3 home_ned{};
     skysim::vehicle::QuadParams params;
     std::array<skysim::vehicle::MotorState, 4> motors{};
     skysim::core::BodyState state;
@@ -851,6 +941,7 @@ struct App {
         bp.start_pos_ned = {0.0, opt.spacing_m * (instance - opt.base_instance),
                             -(bp.half_extents_frd[2] + 0.005)};
         slot->body_id = world->add_vehicle(bp);
+        slot->home_ned = bp.start_pos_ned;
         slot->state = world->get_state(slot->body_id);
         if (docks) {
             // Its home, heading north: where ArduPilot will set home when it arms, so an RTL comes
@@ -869,6 +960,9 @@ struct App {
         world->remove_vehicle(v.body_id);
         if (docks) {
             docks->remove(v.vehicle_id);
+        }
+        if (render_service) {
+            render_service->forget(v.vehicle_id); // its own camera settings go with it
         }
         manager->release_instance(v.instance);
         fleet.erase(fleet.begin() + static_cast<long>(idx));
@@ -909,6 +1003,22 @@ struct App {
                     result = skysim::vehicle::SpawnResult{slot->vehicle_id, instance, 9002 + 10 * instance,
                                                           5760 + 10 * instance};
                     std::printf("skysim: spawned vehicle %u on instance %d\n", slot->vehicle_id, instance);
+                    // Its own camera (TASK-2661), in place before its first frame is drawn. Checked
+                    // against the bounds by the control plane already; with the camera off there is
+                    // nothing to apply it to.
+                    if (spawn->camera && render_service) {
+                        std::string error;
+                        const auto cam = render_service->configure(slot->vehicle_id, *spawn->camera, &error);
+                        if (cam) {
+                            std::printf("skysim: vehicle %u camera %dx%d, drawn at %dx%d @ %.1f fps%s\n",
+                                        slot->vehicle_id, cam->picture_width, cam->picture_height,
+                                        cam->normal.width, cam->normal.height, cam->normal.fps,
+                                        cam->landing_available ? " (landing mode on)" : "");
+                        } else {
+                            std::fprintf(stderr, "skysim: vehicle %u camera not applied: %s\n",
+                                         slot->vehicle_id, error.c_str());
+                        }
+                    }
                     fleet.push_back(std::move(slot));
                 } catch (const std::exception &e) {
                     std::fprintf(stderr, "skysim: spawn failed: %s\n", e.what());
@@ -988,6 +1098,8 @@ struct App {
             pose.gimbal = g.present;
             pose.gimbal_pitch_rad = g.pitch_rad;
             pose.gimbal_yaw_rad = g.yaw_rad;
+            pose.home_north_m = v->home_ned[0];
+            pose.home_east_m = v->home_ned[1];
             poses.push_back(pose);
         }
         render_service->publish_poses(std::move(poses));
@@ -1407,6 +1519,35 @@ int main(int argc, char **argv) {
         rcfg.docks = app.docks;
         rcfg.fps = opt.camera_fps;
         rcfg.quality = opt.camera_quality;
+        // How the pictures are drawn (TASK-2661): the normal mode at --camera-draw-size, scaled up
+        // to the picture; the landing mode, full size by default, near the dock only, where a
+        // landing reads the marker; the rest rate for a vehicle sitting still on the ground.
+        // Every mode keeps the picture's aspect ratio, or its pictures would be stretched.
+        // The rule the control plane holds a vehicle's draw size to as well (camera_mode.h), so every
+        // fleet this accepts is one a POST or DELETE .../camera can leave as it is.
+        const auto aspect_ok = [&opt](int w, int h) {
+            return w == 0 || skysim::render::same_aspect_ratio(w, h, opt.camera_width, opt.camera_height);
+        };
+        if (!aspect_ok(opt.camera_draw_width, opt.camera_draw_height) ||
+            !aspect_ok(opt.camera_landing_width, opt.camera_landing_height)) {
+            std::fprintf(stderr,
+                         "skysim: --camera-draw-size and --camera-landing-size must have --camera-size's "
+                         "aspect ratio (%dx%d)\n",
+                         opt.camera_width, opt.camera_height);
+            return 1;
+        }
+        rcfg.draw_width = opt.camera_draw_width;
+        rcfg.draw_height = opt.camera_draw_height;
+        rcfg.rest_fps = opt.camera_rest_fps;
+        if (opt.camera_landing) {
+            rcfg.landing.width = opt.camera_landing_width;
+            rcfg.landing.height = opt.camera_landing_height;
+            rcfg.landing.fps = opt.camera_landing_fps > 0.0 ? opt.camera_landing_fps : opt.camera_fps;
+            rcfg.landing.bitrate_kbps = opt.camera_landing_bitrate_kbps;
+        }
+        rcfg.landing_radius_m = opt.camera_landing_radius_m;
+        rcfg.landing_height_m = opt.camera_landing_height_m;
+        rcfg.ground_cache_bytes = static_cast<size_t>(opt.camera_cache_mb) * 1024 * 1024;
         const int cpus = skysim::core::available_cpus();
         rcfg.threads = opt.camera_threads > 0 ? opt.camera_threads : skysim::core::default_render_threads(cpus);
         // A line every ten seconds while frames are being drawn — achieved fps against the
@@ -1432,6 +1573,11 @@ int main(int argc, char **argv) {
                     r->want_video(id);
                 }
             };
+            // The vehicle's stream now (TASK-2661): its picture size, its mode's rate and bitrate.
+            vhooks.camera = [&app](uint32_t id) {
+                auto *r = app.render_ptr.load();
+                return r != nullptr ? r->stream_mode(id) : skysim::render::CameraMode{};
+            };
             try {
                 app.video_service = std::make_unique<skysim::video::VideoService>(vcfg, std::move(vhooks));
             } catch (const std::exception &e) {
@@ -1440,16 +1586,44 @@ int main(int argc, char **argv) {
             }
             rcfg.video_sink =
                 [v = app.video_service.get()](uint32_t id, std::shared_ptr<const skysim::render::Image> image,
-                                              double sim_time_s, std::chrono::steady_clock::time_point at) {
-                    v->on_frame(id, std::move(image), sim_time_s, at);
+                                              double sim_time_s, std::chrono::steady_clock::time_point at,
+                                              const skysim::render::CameraMode &mode) {
+                    v->on_frame(id, std::move(image), sim_time_s, at, mode);
                 };
         }
         app.render_service = std::make_unique<skysim::render::RenderService>(rcfg);
         app.render_ptr.store(app.render_service.get());
         std::printf("skysim: camera %dx%d @ %.1f fps on %d render thread(s) (%s; %d CPU(s) available), "
-                    "drawn only while somebody is watching\n",
+                    "drawn only while somebody is watching; lit-ground cache %d MB\n",
                     opt.camera_width, opt.camera_height, opt.camera_fps, app.render_service->threads(),
-                    opt.camera_threads > 0 ? "--camera-threads" : "default", cpus);
+                    opt.camera_threads > 0 ? "--camera-threads" : "default", cpus, opt.camera_cache_mb);
+        {
+            const int draw_w = opt.camera_draw_width > 0 ? opt.camera_draw_width : opt.camera_width;
+            const int draw_h = opt.camera_draw_height > 0 ? opt.camera_draw_height : opt.camera_height;
+            std::printf(
+                "skysim: camera modes: normal drawn at %dx%d%s; landing %s; at rest %s\n", draw_w, draw_h,
+                draw_w != opt.camera_width ? " and scaled to the picture" : "",
+                opt.camera_landing
+                    ? (std::to_string(rcfg.landing.width > 0 ? rcfg.landing.width : opt.camera_width) + "x" +
+                       std::to_string(rcfg.landing.height > 0 ? rcfg.landing.height : opt.camera_height) +
+                       " @ " +
+                       [](double fps) {
+                           char text[32];
+                           std::snprintf(text, sizeof(text), "%.1f", fps);
+                           return std::string(text);
+                       }(rcfg.landing.fps) +
+                       " fps" +
+                       (rcfg.landing.bitrate_kbps > 0
+                            ? ", " + std::to_string(rcfg.landing.bitrate_kbps) + " kbps"
+                            : std::string()) +
+                       ", within " + std::to_string(static_cast<int>(rcfg.landing_radius_m)) +
+                       " m of a vehicle's dock and " +
+                       std::to_string(static_cast<int>(rcfg.landing_height_m)) + " m above it, in the air")
+                          .c_str()
+                    : "off (--camera-landing-size)",
+                opt.camera_rest_fps > 0.0 ? (std::to_string(opt.camera_rest_fps) + " fps").c_str()
+                                          : "its mode's rate (--camera-rest-fps)");
+        }
         if (app.video_service) {
             const auto defaults = skysim::video::apply_patch({}, {}, opt.camera_fps);
             std::printf("skysim: camera H.264 (constrained baseline) on rtsp://%s:%d/instances/<n>/main.264, "
@@ -1550,6 +1724,11 @@ int main(int argc, char **argv) {
                 m.camera.threads = s.threads;
                 m.camera.frames_drawn = s.frames_drawn;
                 m.camera.frames_reused = s.frames_reused;
+                m.camera.landing = s.landing;
+                m.camera.ground_cache_mb = static_cast<double>(s.ground.bytes) / (1024.0 * 1024.0);
+                m.camera.ground_cache_budget_mb =
+                    static_cast<double>(s.ground.budget_bytes) / (1024.0 * 1024.0);
+                m.camera.ground_tiles_built = s.ground.tiles_built;
             }
             if (app.video_service) {
                 const auto v = app.video_service->stats();
@@ -1616,6 +1795,20 @@ int main(int argc, char **argv) {
             };
         }
         if (app.render_service) {
+            // A vehicle's own camera (TASK-2661): read, or changed through RenderService, which
+            // checks the bounds and takes effect on the vehicle's next frame.
+            snaps.camera_settings =
+                [&app](const skysim::api::VehicleInfo &v, const skysim::render::CameraSettingsPatch *patch,
+                       std::string *error) -> std::optional<skysim::render::VehicleCameraState> {
+                if (patch == nullptr) {
+                    return app.render_service->camera(v.id);
+                }
+                return app.render_service->configure(v.id, *patch, error);
+            };
+            snaps.camera_check = [&app](const skysim::render::CameraSettingsPatch &patch,
+                                        std::string *error) {
+                return app.render_service->check(patch, error);
+            };
             skysim::api::CameraIntrinsics &ci = snaps.camera_intrinsics;
             ci.enabled = true;
             ci.width = opt.camera_width;
