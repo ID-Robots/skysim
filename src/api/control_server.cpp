@@ -163,7 +163,32 @@ skysim::vehicle::BatteryPack parse_battery(const std::string &body) {
 }
 
 // {"clearance_m":1.5} — absent means a conservative default airframe half-width.
-double parse_clearance(const std::string &body) { return parse_double_field(body, "clearance_m", 1.0); }
+//
+// Zero is an answer, not an absence: the bare centreline, which the gateway's map probe
+// (GET /map/structures, the Arbiter's map context) asks for to find where a wall or a roof
+// is. Read as the 1 m default, its level legs hit walls up to 1 m below them and its roof
+// probe took the highest surface within 1 m of the point (TASK-2679). Only a missing,
+// negative or non-numeric value falls back.
+double parse_clearance(const std::string &body) {
+    constexpr double kDefault = 1.0;
+    const char *p = std::strstr(body.c_str(), "\"clearance_m\"");
+    if (p == nullptr) {
+        return kDefault;
+    }
+    p += std::strlen("\"clearance_m\"");
+    while (*p == ':' || std::isspace(static_cast<unsigned char>(*p)) != 0) {
+        ++p;
+    }
+    char *end = nullptr;
+    const double value = std::strtod(p, &end);
+    const char *rest = end;
+    while (std::isspace(static_cast<unsigned char>(*rest)) != 0) {
+        ++rest;
+    }
+    // The whole token, not a number's start: "0oops" is not a zero.
+    const bool whole = end != p && (*rest == ',' || *rest == '}' || *rest == '\0');
+    return whole && std::isfinite(value) && value >= 0.0 ? value : kDefault;
+}
 
 // {"waypoints_ned":[[n,e,d],[n,e,d],...]} — flat scan for numbers in triples, matching the
 // deliberately dependency-free parsing style of this file.

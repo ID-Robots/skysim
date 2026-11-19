@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include "api/control_server.h"
 
@@ -227,6 +228,30 @@ int main() {
               mission_unavailable->body.find("\"checked\":false") != std::string::npos);
         CHECK(mission_unavailable && mission_unavailable->body.find("\"clear\":false") != std::string::npos);
         CHECK(path_checks.load() == 3);
+
+        // clearance_m 0 is the bare centreline the gateway's map probe asks for (TASK-2679),
+        // not a missing value; only a negative or non-numeric one falls back to the default.
+        const std::pair<const char *, double> clearances[] = {
+            {R"({"clearance_m":0,"waypoints_ned":[[9,0,-10],[20,0,-10]]})", 0.0},
+            {R"({"clearance_m": 0.0, "waypoints_ned":[[9,0,-10],[20,0,-10]]})", 0.0},
+            {R"({"clearance_m":0.25,"waypoints_ned":[[9,0,-10],[20,0,-10]]})", 0.25},
+            {"{\"clearance_m\"\r\n:\n 0,\"waypoints_ned\":[[9,0,-10],[20,0,-10]]}", 0.0},
+            {R"({"clearance_m":-2,"waypoints_ned":[[9,0,-10],[20,0,-10]]})", 1.0},
+            {R"({"clearance_m":null,"waypoints_ned":[[9,0,-10],[20,0,-10]]})", 1.0},
+            {R"({"clearance_m":"nan","waypoints_ned":[[9,0,-10],[20,0,-10]]})", 1.0},
+            {R"({"clearance_m":nan,"waypoints_ned":[[9,0,-10],[20,0,-10]]})", 1.0},
+            {R"({"clearance_m":0oops,"waypoints_ned":[[9,0,-10],[20,0,-10]]})", 1.0},
+            {R"({"clearance_m":0.5.3,"waypoints_ned":[[9,0,-10],[20,0,-10]]})", 1.0},
+            {R"({"waypoints_ned":[[9,0,-10],[20,0,-10]],"clearance_m":0 })", 0.0},
+            {R"({"waypoints_ned":[[9,0,-10],[20,0,-10]],"clearance_m":0)", 0.0},
+        };
+        size_t checks = 3;
+        for (const auto &[body, clearance] : clearances) {
+            auto mission = client.Post("/mission/check", body, "application/json");
+            CHECK(mission && mission->status == 200);
+            CHECK(path_checks.load() == ++checks);
+            CHECK(last_clearance.load() == clearance);
+        }
 
         // Fitting a fresh pack. The gateway calls this after every landing, because
         // resetting only the autopilot's counter leaves skysim discharging the old pack

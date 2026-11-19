@@ -425,6 +425,12 @@ if(Python3_FOUND)
     add_test(NAME survey_fixture
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/survey_fixture_smoke.py
                      $<TARGET_FILE:survey_still> $<TARGET_FILE:tile_cooker>)
+    # Building heights match the map's (TASK-2679): three real Plovdiv buildings cooked from OSM by
+    # the Mapbox Streets v8 rules and from Mapbox vector tiles, each roof probed through
+    # POST /mission/check the way the gateway's GET /map/structures does for the Arbiter.
+    add_test(NAME building_heights
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/building_heights_smoke.py
+                     $<TARGET_FILE:skysim> $<TARGET_FILE:tile_cooker>)
     # The camera as H.264 over RTSP, pulled with ffprobe (TASK-2561): two vehicles, both
     # transports, codec, profile, frame rate and keyframe interval. Skipped (77) without ffprobe.
     add_test(NAME rtsp_smoke
@@ -461,7 +467,7 @@ if(Python3_FOUND)
     add_test(NAME stream_check_selftest
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/render_probe/stream_check.py --selftest)
     set_tests_properties(stream_check_selftest PROPERTIES LABELS "unit" TIMEOUT 60)
-    set_tests_properties(app_smoke app_churn survey_fixture rtsp_smoke camera_modes_smoke PROPERTIES
+    set_tests_properties(app_smoke app_churn survey_fixture building_heights rtsp_smoke camera_modes_smoke PROPERTIES
         LABELS "happy-path"
         TIMEOUT 180
         RUN_SERIAL TRUE

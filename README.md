@@ -164,18 +164,31 @@ $ARDUPILOT_ROOT/build/sitl/bin/arducopter --model json:127.0.0.1 -I 1 \
 
 ### Build a world from real buildings
 
-`tools/cooker/osm_buildings.py` pulls real footprints and heights from
-[OpenStreetMap](https://www.openstreetmap.org/) (ODbL) and extrudes them into collision
-geometry, georeferenced to a WGS84 anchor so the simulated city lines up with the map your
-operators see:
+`tools/cooker/osm_buildings.py` extrudes real building footprints and heights into
+collision geometry, georeferenced to a WGS84 anchor so the simulated city lines up with the
+map your operators see — and stands as tall as it: the gateway's `GET /map/structures` reads
+the heights the Arbiter reasons with from this geometry. Two sources:
 
 ```bash
+# The buildings the SkyHub map draws: the Mapbox Streets v8 building layer (z16 vector tiles),
+# height / min_height / extrude as Mapbox serves them. Needs a Mapbox access token.
+MAPBOX_ACCESS_TOKEN=pk... python3 tools/cooker/osm_buildings.py build/city_obj --source mapbox \
+  --lat 42.1403890 --lon 24.7645490 --radius 5000 --cache build/mapbox_tiles
+
+# OpenStreetMap (ODbL), read by the rules Mapbox documents for that layer: height, else
+# building:levels x 3 m; min_height / building:min_level; building:part drawn instead of its
+# outline; multipolygon buildings.
 python3 tools/cooker/osm_buildings.py build/city_obj \
   --lat 42.1403890 --lon 24.7645490 --radius 5000
+
 ./build/tile_cooker build/city/tiles --anchor 42.1403890,24.7645490,0 build/city_obj/*.obj
 ```
 
-That produces ~19 000 buildings over a 5 km radius — a real city your fleet can crash into.
+Clear the output directory between cooks (stale `tile_*.obj` files would be cooked too) and
+refetch an Overpass `--cache` written before TASK-2679: it has no `building:part`s. OSM gives
+most buildings no height at all (9 of 10 within 2.5 km of the Plovdiv anchor), and those get
+`--default-height` (8 m); `anchor.json` counts how each height was found (`heights`), so check
+`default` there before deploying a world.
 
 ### Docker
 
@@ -319,7 +332,7 @@ camera feed alike — see [Survey stills](#survey-stills-and-the-reconstruction-
 | `DELETE /vehicles/{id}` | despawn, release instance, kill managed process |
 | `GET /vehicles` | per-vehicle: connected, frozen, silent_ticks, pos_ned, `midair_collisions`, `building_contacts`; `radio` when a radio field is set |
 | `GET /metrics` | tick p50/p99 µs, straggler_events, freezes, resident_tiles; `camera` (`null` when off): `target_fps`, achieved `fps` per watched vehicle, `watched`, `render_ms` / `render_ms_max` / `encode_ms` per frame, `threads`, `frames_drawn`, `frames_reused`, `landing` (vehicles on the landing camera), `ground_cache_mb` / `ground_cache_budget_mb` / `ground_tiles_built`; `video` (`null` when RTSP is off): `rtsp_port`, `streams`, `clients`, `threads`, `encode_ms`, `frames_encoded`, `frames_dropped`, `keyframes`, `bytes_sent` |
-| `POST /mission/check` `{"waypoints_ned":[[n,e,d],...], "clearance_m":1.0}` | sweep a planned route through loaded building geometry → `{checked, clear, hits}` |
+| `POST /mission/check` `{"waypoints_ned":[[n,e,d],...], "clearance_m":1.0}` | sweep a planned route through loaded building geometry → `{checked, clear, hits}`; `clearance_m` 1 when absent, `0` the bare centreline |
 | `PUT` / `GET` / `DELETE /radio` | set, read or clear the simulated 4G radio field (carriers, towers, coverage holes) |
 | `GET /radio/sample?lat&lon&alt_amsl` | RSRP / RSRQ / SINR / RSSI, serving cell and link quality per carrier at a point |
 | `GET /radio/grid?bbox&alt_rel&step_m&carrier` | the same as a ground-truth raster over an area (≤ 250 000 cells) |
