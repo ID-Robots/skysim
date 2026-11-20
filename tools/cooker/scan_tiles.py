@@ -18,9 +18,12 @@ Scan input (``--scan``, repeatable), each one of:
   georeference ``odm_georeferencing/coords.txt``;
 * a model file (``.obj`` or ``.glb``) with ``coords.txt`` beside it, or in
   ``../odm_georeferencing/``;
-* any of those with ``@LAT,LON`` appended: the model's origin in degrees instead of coords.txt.
-  That is what the gateway stores for a reconstruction (``model_origin`` beside ``model.glb``
-  or the smaller ``model_map.glb`` — same frame, coords.txt itself is not kept).
+* any of those with ``@LAT,LON`` appended: the model's origin in degrees, for a model with no
+  coords.txt. That is what the gateway stores for a reconstruction (``model_origin`` beside
+  ``model.glb`` or the smaller ``model_map.glb`` — same frame, coords.txt itself is not kept).
+  The UTM zone is the one in which the origin is the GLB's ``CESIUM_RTC`` centre, else the
+  standard zone of its longitude; ``@LAT,LON,34N`` names it. With a coords.txt as well, the
+  coords.txt grid is used and the origin only checked against it.
 
 ODM's georeferenced model is metres east (x), north (y) and up (z) of a UTM point (coords.txt:
 the projection, then that easting and northing; the GLB's ``CESIUM_RTC`` centre). Every vertex
@@ -40,17 +43,17 @@ Collision mesh, per scan:
    their members; triangles that collapse are dropped, the rest keep their winding. Each
    vertex moves at most a cell diagonal (1.7 m at 1 m; a plane's members average out, and the
    ODM fixture's walls stay a median 0.13 m from the truth).
-   Over ``--max-triangles`` the cell grows by half until under it.
+   Over ``--max-triangles`` the cell grows by half until under it (an error past 10 m).
 3. Ground: triangles wholly below ``--ground-cut`` (1 m) are dropped. skysim has its own ground
    slab, and a landing on a ground triangle of a tile would count as a building strike.
 4. Tiles: each triangle goes whole to the tile holding its centroid, like a whole building
    in ``osm_buildings.py``; the streamer keeps neighbouring tiles resident.
 
-Coverage (which OSM prisms the scan replaces): the scan's clustered vertices, ground included,
-rasterised on ``--coverage-cell`` (2 m) squares, gaps of up to two cells closed, then shrunk by
+Coverage (which OSM prisms the scan replaces): every clustered vertex of the scan — ground,
+roofs, walls, trees — rasterised on ``--coverage-cell`` (2 m) squares, gaps of up to two cells closed, then shrunk by
 ``--margin`` (5 m, rounded up to whole cells) — the edge of a reconstruction is its worst part. A
-prism is dropped only when every point of its footprint (vertices, edges and caps sampled at half
-a cell) is covered, and only by a scan that kept triangles.
+prism is dropped only when every square its footprint touches is covered, and only by a scan that
+kept triangles.
 
 Usage:
   python3 tools/cooker/osm_buildings.py osm_obj --lat 42.1403890 --lon 24.7645490 --radius 5000
@@ -69,8 +72,8 @@ Limits:
     The demo-city survey fixture (nadir + one -60 degree grid, ODM 3.x, 298 533 triangles ->
     78 687 at 1 m) puts roofs within 0.2 m and walls a median 0.13 m from the true boxes, but
     13 of 60 wall probes found no wall: the faces no oblique looked at.
-  - Coverage is ground the scan reconstructed, not walls it saw: a building at the edge of a
-    survey is replaced even when its outward wall is missing. Fly a building beyond the area
+  - Coverage is where the scan has any vertex (ground or roof), not which walls it saw: a
+    building at the edge of a survey is replaced even when its outward wall is missing. Fly a building beyond the area
     to replace, or raise ``--margin``.
   - skysim's ground is flat. A scan on a slope keeps its relief: ground more than
     ``--ground-cut`` above its ground level stays as geometry, and ground below it is not.
@@ -112,6 +115,7 @@ _K0 = 0.9996
 
 DEFAULT_CELL_M = 1.0
 DEFAULT_MAX_TRIANGLES = 300_000
+MAX_CELL_M = 10.0  # the coarsest decimation --max-triangles may grow the cell to
 DEFAULT_GROUND_CUT_M = 1.0
 DEFAULT_COVERAGE_CELL_M = 2.0
 DEFAULT_MARGIN_M = 5.0
@@ -241,10 +245,15 @@ def parse_coords(text: str) -> Georef:
     return Georef(zone[0], zone[1], easting, northing, "coords.txt")
 
 
-def georef_from_origin(lat: float, lon: float) -> Georef:
-    """The model's origin in degrees (the gateway's ``model_origin``) as a UTM offset."""
-    easting, northing, zone, northern = latlon_to_utm(lat, lon)
-    return Georef(zone, northern, easting, northing, f"origin {lat:.8f},{lon:.8f}")
+def georef_from_origin(lat: float, lon: float, zone: int | None = None, northern: bool | None = None) -> Georef:
+    """The model's origin in degrees (the gateway's ``model_origin``) as a UTM offset: in ``zone``,
+    else the standard zone of ``lon`` (ODM's zone is its first image's, which can be the
+    neighbouring one near a zone edge)."""
+    easting, northing, zone, north = latlon_to_utm(lat, lon, zone)
+    if northern is not None and northern != north:
+        northing += -10000000.0 if northern else 10000000.0
+        north = northern
+    return Georef(zone, north, easting, northing, f"origin {lat:.8f},{lon:.8f} (UTM {zone}{'N' if north else 'S'})")
 
 
 # ---------------------------------------------------------------------------- model readers
@@ -468,31 +477,55 @@ def _model_bytes(path: Path) -> tuple[str, bytes, str | None]:
 
 
 def load_scan(spec: str) -> Scan:
-    """``PATH`` or ``PATH@LAT,LON`` (see the module docstring)."""
+    """``PATH``, ``PATH@LAT,LON`` or ``PATH@LAT,LON,ZONE`` (see the module docstring)."""
     origin = None
-    match = re.fullmatch(r"(.+)@\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*", spec)
+    zone: tuple[int, bool] | None = None
+    match = re.fullmatch(r"(.+)@\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*(?:,\s*(\d{1,2})\s*([NSns])\s*)?", spec)
     if match:
         spec, origin = match.group(1), (float(match.group(2)), float(match.group(3)))
         if not (-90.0 <= origin[0] <= 90.0 and -180.0 <= origin[1] <= 180.0):
             raise ScanError(f"{spec}: origin {origin} is not a latitude,longitude")
+        if match.group(4):
+            zone = int(match.group(4)), match.group(5).upper() == "N"
+            if not 1 <= zone[0] <= 60:
+                raise ScanError(f"{spec}: UTM zone {zone[0]} does not exist")
     name, data, coords = _model_bytes(Path(spec))
-    if origin is not None:
-        georef = georef_from_origin(*origin)
-    elif coords is not None:
-        georef = parse_coords(coords)
-    else:
-        raise ScanError(f"{name}: no coords.txt found; append @LAT,LON (the model's origin)")
     if data[:4] == b"glTF":
         verts, faces, extensions = read_glb(data)
-        # ODM writes its UTM offset as the RTC centre: a georeference that disagrees is the wrong one.
         centre = (extensions.get("CESIUM_RTC") or {}).get("center")
-        if centre and len(centre) >= 2 and math.hypot(centre[0] - georef.easting, centre[1] - georef.northing) > 1.0:
-            raise ScanError(
-                f"{name}: CESIUM_RTC centre {centre[0]:.1f} {centre[1]:.1f} is not the {georef.source} offset "
-                f"{georef.easting:.1f} {georef.northing:.1f} (UTM {georef.zone})"
-            )
+        centre = tuple(float(c) for c in centre[:2]) if centre and len(centre) >= 2 else None
     else:
         verts, faces = read_obj(data.decode("utf-8", errors="replace"))
+        centre = None
+
+    if coords is not None:
+        # The model's own grid: coords.txt's zone and offset, whatever an origin says.
+        georef = parse_coords(coords)
+        if origin is not None:
+            there = georef_from_origin(*origin, georef.zone, georef.northern)
+            if math.hypot(there.easting - georef.easting, there.northing - georef.northing) > 1.0:
+                raise ScanError(f"{name}: @{origin[0]},{origin[1]} is not the coords.txt offset ({georef.source})")
+    elif origin is not None:
+        if zone is None and centre is not None:
+            # ODM writes its UTM offset as the RTC centre: the zone in which the origin is that point.
+            std = latlon_to_utm(*origin)[2]
+            zone = next(
+                (
+                    (z, origin[0] >= 0.0)
+                    for z in (std, std % 60 + 1, (std - 2) % 60 + 1)
+                    if math.dist(latlon_to_utm(*origin, z)[:2], centre) <= 1.0
+                ),
+                None,
+            )
+        georef = georef_from_origin(*origin, *(zone or (None, None)))
+    else:
+        raise ScanError(f"{name}: no coords.txt found; append @LAT,LON[,ZONE] (the model's origin)")
+    if centre is not None and math.hypot(centre[0] - georef.easting, centre[1] - georef.northing) > 1.0:
+        # A georeference that disagrees with the model's own is the wrong one.
+        raise ScanError(
+            f"{name}: CESIUM_RTC centre {centre[0]:.1f} {centre[1]:.1f} is not the {georef.source} offset "
+            f"{georef.easting:.1f} {georef.northing:.1f}"
+        )
     if not faces:
         raise ScanError(f"{name}: no triangles")
     if not all(math.isfinite(c) for v in verts for c in v):
@@ -635,11 +668,27 @@ def build_scan_mesh(
         faces = [(a, c, b) for a, b, c in faces]
     ground = ground_level(scan.verts, faces) if ground_z is None else ground_z
 
+    # Coarser than this a collision mesh no longer has a building's shape, and the cell would grow
+    # until every face collapsed (an empty mesh that meets any budget).
+    largest = max(MAX_CELL_M, cell)
+    start_cell = cell
     while True:  # in the model's own frame: UTM grid metres, which are metres to within 0.04 %
         verts, clustered = cluster(scan.verts, faces, cell)
-        kept = [f for f in clustered if max(verts[f[0]][2], verts[f[1]][2], verts[f[2]][2]) - ground >= ground_cut]
+        kept = [
+            f
+            for f in clustered
+            if max(verts[f[0]][2], verts[f[1]][2], verts[f[2]][2]) - ground >= ground_cut
+            and _cross_z_and_mean_z(verts, f)[2] > 2e-6  # more than a square millimetre: not a line
+        ]
         if max_triangles <= 0 or len(kept) * (2 if two_sided else 1) <= max_triangles:
-            break
+            if kept or cell == start_cell:
+                break
+            raise ScanError(f"--max-triangles {max_triangles} is met only by collapsing the scan to nothing")
+        if cell * 1.5 > largest:
+            raise ScanError(
+                f"cannot decimate to --max-triangles {max_triangles} with cells up to {largest:g} m: "
+                f"{len(kept)} triangles at {cell:.3g} m"
+            )
         cell *= 1.5
 
     # Into the map frame, every clustered vertex (the coverage needs the ground's too).
@@ -718,20 +767,38 @@ def solids(verts: list[Vec3], faces: list[Tri]) -> list[Solid]:
     return out
 
 
+def _overlaps_square(tri: list[tuple[float, float]], x0: float, y0: float, size: float) -> bool:
+    """Whether a 2D triangle (or the segment a wall projects to) and an axis-aligned square share
+    more than a boundary: separating axes, the square's two and the triangle's edge normals."""
+    eps = 1e-9
+    if max(p[0] for p in tri) <= x0 + eps or min(p[0] for p in tri) >= x0 + size - eps:
+        return False
+    if max(p[1] for p in tri) <= y0 + eps or min(p[1] for p in tri) >= y0 + size - eps:
+        return False
+    corners = ((x0, y0), (x0 + size, y0), (x0, y0 + size), (x0 + size, y0 + size))
+    for i in range(3):
+        (px, py), (qx, qy) = tri[i], tri[(i + 1) % 3]
+        nx, ny = qy - py, px - qx
+        if nx == 0.0 and ny == 0.0:
+            continue
+        t = [nx * x + ny * y for x, y in tri]
+        c = [nx * x + ny * y for x, y in corners]
+        if max(t) <= min(c) + eps * math.hypot(nx, ny) or min(t) >= max(c) - eps * math.hypot(nx, ny):
+            return False
+    return True
+
+
 def solid_inside(solid: Solid, coverage: Coverage) -> bool:
-    """Every point of the solid's footprint covered: vertices first (cheap), then each face
-    sampled at half a coverage cell (walls as lines, caps as areas)."""
+    """Every coverage square the solid's footprint touches is covered: vertices first (cheap),
+    then every square each face's projection (a cap's area, a wall's line) overlaps."""
     if not all(coverage.covers(x, y) for x, y, _ in solid.verts):
         return False
-    step = coverage.cell / 2.0
-    for a, b, c in solid.faces:
-        (ax, ay, _), (bx, by, _), (cx, cy, _) = solid.verts[a], solid.verts[b], solid.verts[c]
-        longest = max(math.hypot(bx - ax, by - ay), math.hypot(cx - bx, cy - by), math.hypot(ax - cx, ay - cy))
-        n = max(1, math.ceil(longest / step))
-        for i in range(n + 1):
-            for j in range(n + 1 - i):
-                u, v = i / n, j / n
-                if not coverage.covers(ax + u * (bx - ax) + v * (cx - ax), ay + u * (by - ay) + v * (cy - ay)):
+    size = coverage.cell
+    for face in solid.faces:
+        tri = [(solid.verts[k][0], solid.verts[k][1]) for k in face]
+        for i in range(math.floor(min(p[0] for p in tri) / size), math.floor(max(p[0] for p in tri) / size) + 1):
+            for j in range(math.floor(min(p[1] for p in tri) / size), math.floor(max(p[1] for p in tri) / size) + 1):
+                if (i, j) not in coverage.cells and _overlaps_square(tri, i * size, j * size, size):
                     return False
     return True
 
@@ -765,7 +832,7 @@ def main(argv: list[str] | None = None) -> int:
         "--scan",
         action="append",
         required=True,
-        metavar="PATH[@LAT,LON]",
+        metavar="PATH[@LAT,LON[,ZONE]]",
         help="ODM project dir, all.zip, or .obj/.glb (repeatable)",
     )
     ap.add_argument("--buildings", type=Path, help="osm_buildings.py output (tile_*.obj + anchor.json) to merge with")
@@ -804,6 +871,8 @@ def main(argv: list[str] | None = None) -> int:
 
     base_anchor: dict = {}
     if args.buildings is not None:
+        if not args.buildings.is_dir():
+            ap.error(f"--buildings {args.buildings}: no such directory")
         if args.buildings.resolve() == args.out_dir.resolve():
             ap.error("out_dir must not be the --buildings directory")
         anchor_path = args.buildings / "anchor.json"
@@ -820,8 +889,13 @@ def main(argv: list[str] | None = None) -> int:
     if len(origin) < 2:
         ap.error("no anchor: give --lat/--lon, or --buildings with an anchor.json")
     anchor_lat, anchor_lon = float(origin[0]), float(origin[1])
-    anchor_alt = float(origin[2]) if len(origin) > 2 else 0.0
-    tile_size = float(args.tile_size or base_anchor.get("tile_size_m") or 250.0)
+    anchor_alt = float(args.alt) if args.alt is not None else float(origin[2]) if len(origin) > 2 else 0.0
+    base_tile = base_anchor.get("tile_size_m")
+    if args.tile_size and base_tile and not math.isclose(float(args.tile_size), float(base_tile)):
+        ap.error(f"--tile-size {args.tile_size:g} differs from {args.buildings}/anchor.json tile_size_m {base_tile}")
+    tile_size = float(args.tile_size or base_tile or 250.0)
+    if not tile_size > 0.0:
+        ap.error("--tile-size must be positive")
 
     meshes = []
     for spec in args.scan:

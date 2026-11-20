@@ -214,9 +214,9 @@ most a cell diagonal; walls stay a median 0.13 m from the truth on the fixture b
 grows until a scan fits in `--max-triangles` (300 000). The scan's ground level is found from its level surfaces, or set with `--ground-z`, and becomes
 z = 0. Triangles wholly below `--ground-cut` (1 m) are dropped. `anchor.json` records each
 scan's triangle counts, ground level, coverage and how many footprints it replaced. Limits:
-ODM meshes are open surfaces, so a wall no camera saw is missing. Coverage is ground the scan
-reconstructed, so a building at a survey's edge is replaced even when its outward wall is
-missing: fly one building beyond the area you want replaced. A sloped scan keeps its relief on
+ODM meshes are open surfaces, so a wall no camera saw is missing. Coverage is wherever the scan has
+a vertex (ground or roof), not which walls it saw, so a building at a survey's edge is replaced
+even when its outward wall is missing: fly one building beyond the area you want replaced. A sloped scan keeps its relief on
 skysim's flat ground. ODM's own GLB is Draco-compressed and needs the DracoPy package; ODM's
 OBJ and the gateway's `model_map.glb` do not.
 

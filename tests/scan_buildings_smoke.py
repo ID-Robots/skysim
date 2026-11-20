@@ -213,6 +213,13 @@ def write_glb(
 # ---------------------------------------------------------------------------- unit checks
 
 
+def rotated(face: tuple[int, int, int]) -> tuple[int, ...]:
+    """A face with its lowest index first: the same triangle the same way round compares equal,
+    reversed winding does not."""
+    k = face.index(min(face))
+    return tuple(face[k:] + face[:k])
+
+
 def normal_z(t: tuple[Vec3, Vec3, Vec3]) -> float:
     (ax, ay, _), (bx, by, _), (cx, cy, _) = t
     return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
@@ -275,7 +282,7 @@ def unit_checks(st: types.ModuleType, ob: types.ModuleType, tmp: Path) -> None:
     check(
         worst < 1e-4
         and not st.is_inside_out(mverts, mfaces)
-        and sorted(map(sorted, mfaces)) == sorted(map(sorted, mesh.faces)),
+        and sorted(map(rotated, mfaces)) == sorted(map(rotated, mesh.faces)),
         f"a mirroring GLB node keeps the outward side (worst {worst:.2e} m)",
     )
     strip = json.loads(
@@ -344,6 +351,56 @@ def unit_checks(st: types.ModuleType, ob: types.ModuleType, tmp: Path) -> None:
         not shrunk.covers(5.0, 50.0) and shrunk.covers(7.0, 50.0) and shrunk.covers(90.0, 50.0),
         "coverage shrinks by the margin rounded up to whole cells (6 m)",
     )
+    # A footprint that only clips the corner of an uncovered square is not inside.
+    sliver = st.Solid([(0.0, 0.0, 0.0), (4.4, 0.0, 0.0), (0.0, 3.8, 0.0)], [(0, 1, 2)])
+    full = {(i, j) for i in range(-2, 5) for j in range(-2, 5)}
+    check(
+        not st.solid_inside(sliver, st.Coverage(2.0, full - {(1, 1)}))
+        and st.solid_inside(sliver, st.Coverage(2.0, full)),
+        "a footprint touching an uncovered square by a sliver is kept",
+    )
+
+    # UTM zone: coords.txt's grid wins; an origin alone takes the zone its GLB's RTC centre is in,
+    # or the one named. 24.05 E is zone 35, but ODM may have used 34 (its first image's).
+    lat0, lon0 = 42.0, 24.05
+    e34, n34, _, _ = st.latlon_to_utm(lat0, lon0, 34)
+    box = Mesh()
+    box.box(0.0, 4.0, 0.0, 3.0, 5.0, 1.0)
+    (tmp / "z34").mkdir()
+    write_glb(tmp / "z34" / "model.glb", box.verts, box.faces, (e34, n34))
+    write_obj(tmp / "z34" / "model.obj", box.verts, box.faces)
+    by_rtc = st.load_scan(f"{tmp / 'z34' / 'model.glb'}@{lat0},{lon0}").georef
+    named = st.load_scan(f"{tmp / 'z34' / 'model.obj'}@{lat0},{lon0},34N").georef
+    plain = st.load_scan(f"{tmp / 'z34' / 'model.obj'}@{lat0},{lon0}").georef
+    check(
+        by_rtc.zone == 34
+        and named.zone == 34
+        and plain.zone == 35
+        and math.dist((named.easting, named.northing), (e34, n34)) < 0.01,
+        f"zones: RTC {by_rtc.zone}, named {named.zone}, standard {plain.zone}",
+    )
+    (tmp / "z34" / "coords.txt").write_text(f"WGS84 UTM 34N\n{e34:.3f} {n34:.3f}\n")
+    from_coords = st.load_scan(f"{tmp / 'z34' / 'model.obj'}@{lat0},{lon0}").georef
+    check(from_coords.zone == 34 and from_coords.source == "coords.txt", f"coords.txt's grid wins ({from_coords})")
+    try:
+        st.load_scan(f"{tmp / 'z34' / 'model.obj'}@{lat0},{lon0 + 0.01}")
+        check(False, "an origin that is not the coords.txt offset is refused")
+    except st.ScanError as e:
+        check("coords.txt" in str(e), f"origin vs coords.txt refusal: {e}")
+
+    # An unreachable triangle budget is an error, not an ever-growing cell.
+    try:
+        st.build_scan_mesh(
+            st.Scan("box", box.verts, box.faces, from_coords),
+            lat0,
+            lon0,
+            max_triangles=1,
+            ground_z=0.0,
+            ground_cut=-1.0,
+        )
+        check(False, "an unreachable --max-triangles is refused")
+    except st.ScanError as e:
+        check("max-triangles" in str(e), f"budget refusal: {e}")
 
 
 # ---------------------------------------------------------------------------- the world
@@ -510,6 +567,46 @@ def main() -> int:
             "replaces no footprints" in empty and empty_anchor["footprints_replaced_by_scans"] == 0,
             f"a scan with no triangles replaces nothing ({empty_anchor['footprints_replaced_by_scans']})",
         )
+        # Operator mistakes the CLI refuses rather than cook a wrong world.
+        for extra, what in (
+            (["--buildings", str(tmp / "no_such_dir")], "a missing --buildings directory"),
+            (["--buildings", str(tmp / "osm_obj"), "--tile-size", "500"], "a --tile-size other than the prisms'"),
+        ):
+            refused = subprocess.run(
+                [
+                    sys.executable,
+                    str(COOKER_DIR / "scan_tiles.py"),
+                    str(tmp / "refused_obj"),
+                    "--lat",
+                    str(ANCHOR_LAT),
+                    "--lon",
+                    str(ANCHOR_LON),
+                    "--scan",
+                    str(project),
+                    *extra,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=False,
+            )
+            check(refused.returncode != 0, f"{what} is refused ({refused.stderr.strip()[-200:]})")
+        run(
+            [
+                sys.executable,
+                str(COOKER_DIR / "scan_tiles.py"),
+                str(tmp / "alt_obj"),
+                "--buildings",
+                str(tmp / "osm_obj"),
+                "--scan",
+                str(project),
+                "--alt",
+                "160",
+            ],
+            "scan_tiles.py --alt 160",
+        )
+        alt = json.loads((tmp / "alt_obj" / "anchor.json").read_text())["origin_wgs84"]
+        check(alt == [ANCHOR_LAT, ANCHOR_LON, 160.0], f"--alt applies to an inherited anchor ({alt})")
         # An earlier run's tile is removed; a tile of someone else's is only warned about.
         (tmp / "world_obj").mkdir()
         (tmp / "world_obj" / "tile_50_50.obj").write_text("# skysim merged tile tile_50_50.obj (old)\nv 0 0 0\n")
@@ -545,6 +642,17 @@ def main() -> int:
         objs = sorted(str(p) for p in (tmp / "world_obj").glob("*.obj"))
         names = [Path(p).name for p in objs]
         check("tile_m7_2.obj" in names and "tile_m6_2.obj" in names, f"the mast is cut to both tiles: {names}")
+        # No ground in the tiles: below 0.5 m, only the feet of the scanned walls (within 1 m of a footprint).
+        footprints = [(centre[0], centre[1], BOX_HALF[0], BOX_HALF[1]), (MAST_EAST, centre[1], MAST_HALF, MAST_HALF)]
+        low = 0
+        for path in objs:
+            for line in Path(path).read_text().splitlines():
+                if line.startswith("v "):
+                    x, y, z = (float(v) for v in line.split()[1:4])
+                    near = any(abs(x - fx) <= hx + 1.0 and abs(y - fy) <= hy + 1.0 for fx, fy, hx, hy in footprints)
+                    if z < 0.5 and abs(x - centre[0]) < SHEET_HALF and abs(y - centre[1]) < SHEET_HALF and not near:
+                        low += 1
+        check(low == 0, f"the scan's ground sheet is not in the tiles ({low} vertices of it)")
         run([cooker_bin, str(tmp / "tiles"), "--anchor", f"{ANCHOR_LAT},{ANCHOR_LON},0", *objs], "tile_cooker")
         if FAILURES:
             return report()
