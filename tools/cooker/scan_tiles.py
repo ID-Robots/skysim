@@ -59,10 +59,17 @@ Usage:
 Limits:
   - ODM models only: a UTM frame with a coords.txt offset (or an origin). Other georeferences
     would need their own reader.
-  - GLB: core glTF 2.0, float positions, triangle lists. Draco-compressed primitives are read
-    only with the DracoPy package installed; otherwise pass the ODM OBJ or ``model_map.glb``.
+  - GLB: core glTF 2.0, float positions, triangle lists. ODM's own GLB is Draco-compressed
+    (its obj2glb default), read only with the DracoPy package (and numpy) installed; otherwise
+    pass the ODM OBJ or the gateway's ``model_map.glb``.
   - The mesh is an open surface (ODM reconstructs what the cameras saw): walls no camera saw are
     missing, so a vehicle can pass through them. Courtyards, eaves and trees are kept as seen.
+    The demo-city survey fixture (nadir + one -60 degree grid, ODM 3.x, 298 533 triangles ->
+    78 687 at 1 m) puts roofs within 0.2 m and walls a median 0.13 m from the true boxes, but
+    13 of 60 wall probes found no wall: the faces no oblique looked at.
+  - Coverage is ground the scan reconstructed, not walls it saw: a building at the edge of a
+    survey is replaced even when its outward wall is missing. Fly a building beyond the area
+    to replace, or raise ``--margin``.
   - skysim's ground is flat. A scan on a slope keeps its relief: ground more than
     ``--ground-cut`` above its ground level stays as geometry, and ground below it is not.
   - Pure Python: a 200 000-triangle ODM model (ODM's default ``--mesh-size``) takes seconds.

@@ -214,9 +214,16 @@ about 0.9 m of the scan). The cell grows until a scan fits in `--max-triangles` 
 scan's ground level is found from its level surfaces, or set with `--ground-z`, and becomes
 z = 0. Triangles wholly below `--ground-cut` (1 m) are dropped. `anchor.json` records each
 scan's triangle counts, ground level, coverage and how many footprints it replaced. Limits:
-ODM meshes are open surfaces, so a wall no camera saw is missing. A sloped scan keeps its relief
-on skysim's flat ground. Draco-compressed GLBs need the DracoPy package; ODM's OBJ and the
-gateway's `model_map.glb` do not.
+ODM meshes are open surfaces, so a wall no camera saw is missing. Coverage is ground the scan
+reconstructed, so a building at a survey's edge is replaced even when its outward wall is
+missing: fly one building beyond the area you want replaced. A sloped scan keeps its relief on
+skysim's flat ground. ODM's own GLB is Draco-compressed and needs the DracoPy package; ODM's
+OBJ and the gateway's `model_map.glb` do not.
+
+On the demo-city reconstruction fixture (nadir plus one -60 degree grid, ODM 3.x), the
+298 533-triangle model becomes 78 687 collision triangles at 1 m (45 762 at 2 m) in about 4 s.
+Roofs land within 0.2 m of the true boxes and walls a median 0.13 m from them. 13 of 60 wall
+probes found no wall: those are the faces no oblique camera saw.
 
 To deploy a world, cooked or merged, pack the `tile_cooker` output with
 `tar -czf world.tgz -C build/world/tiles .` (`index.json` and the `.jshape` files at the root of
