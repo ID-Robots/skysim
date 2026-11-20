@@ -190,6 +190,41 @@ most buildings no height at all (9 of 10 within 2.5 km of the Plovdiv anchor), a
 `--default-height` (8 m); `anchor.json` counts how each height was found (`heights`), so check
 `default` there before deploying a world.
 
+### Survey scans in place of the map's blocks
+
+Where a survey has been flown and reconstructed, `tools/cooker/scan_tiles.py` swaps the
+extruded footprints for the OpenDroneMap model (TASK-2735). The scan goes into the same ENU frame
+about the same anchor (UTM to WGS84 to ENU vertex by vertex, which takes out the UTM grid's turn
+from north: about 1.5 degrees in Plovdiv). It is then decimated into a collision mesh, its ground
+is dropped (skysim has its own), and it is cut to the tile grid. Every OSM/Mapbox prism whose
+whole footprint lies inside the scan's coverage, shrunk by `--margin` (5 m), is dropped. The
+rest of the city stays as it was:
+
+```bash
+python3 tools/cooker/osm_buildings.py build/city_obj --lat 42.1403890 --lon 24.7645490 --radius 5000
+# a scan is an ODM project dir or NodeODM all.zip (model + odm_georeferencing/coords.txt), or the
+# gateway's model.glb / model_map.glb with its model_origin appended as @LAT,LON
+python3 tools/cooker/scan_tiles.py build/world_obj --buildings build/city_obj \
+  --scan build/odm_project --scan model.glb@LAT,LON
+./build/tile_cooker build/world/tiles --anchor 42.1403890,24.7645490,0 build/world_obj/*.obj
+```
+
+The decimation is vertex clustering on a `--cell` grid (1 m by default, so a wall stays within
+about 0.9 m of the scan). The cell grows until a scan fits in `--max-triangles` (300 000). The
+scan's ground level is found from its level surfaces, or set with `--ground-z`, and becomes
+z = 0. Triangles wholly below `--ground-cut` (1 m) are dropped. `anchor.json` records each
+scan's triangle counts, ground level, coverage and how many footprints it replaced. Limits:
+ODM meshes are open surfaces, so a wall no camera saw is missing. A sloped scan keeps its relief
+on skysim's flat ground. Draco-compressed GLBs need the DracoPy package; ODM's OBJ and the
+gateway's `model_map.glb` do not.
+
+To deploy a world, cooked or merged, pack the `tile_cooker` output with
+`tar -czf world.tgz -C build/world/tiles .` (`index.json` and the `.jshape` files at the root of
+the archive). Upload it to the S3 object the environment's CodeBuild project names in
+`WORLD_S3_URI`, then run that project. `buildspec.yml` unpacks the archive into `world-tiles/`,
+`Dockerfile.ecr` copies that into the image at `/opt/skysim/tiles`, and the ECS service is
+redeployed with it.
+
 ### Docker
 
 ```bash
@@ -545,7 +580,7 @@ src/terrain/    OBJ -> MeshShape cooker + proximity tile streamer
 src/api/        REST control plane (cpp-httplib)
 src/radio/      simulated 4G radio field: spec validation + deterministic RSRP/SINR model
 src/render/     threaded software rasteriser + JPEG/MJPEG camera feed per vehicle
-tools/cooker/   pretile.py (demo city) + osm_buildings.py (real city) + tile_cooker CLI
+tools/cooker/   pretile.py (demo city) + osm_buildings.py (real city) + scan_tiles.py (survey scans) + tile_cooker CLI
 tools/bench/    gated world, protocol, and UDP reply-path performance benchmarks; camera_cost.py
                 (the camera's CPU by picture size, rate and fleet)
 tools/harness/  conformance / determinism / straggler / churn / collision / corridor
