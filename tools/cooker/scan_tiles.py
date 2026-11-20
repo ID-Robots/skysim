@@ -684,12 +684,12 @@ def build_scan_mesh(
             if kept or cell == start_cell:
                 break
             raise ScanError(f"--max-triangles {max_triangles} is met only by collapsing the scan to nothing")
-        if cell * 1.5 > largest:
+        if cell >= largest:
             raise ScanError(
                 f"cannot decimate to --max-triangles {max_triangles} with cells up to {largest:g} m: "
-                f"{len(kept)} triangles at {cell:.3g} m"
+                f"{len(kept)} triangles left"
             )
-        cell *= 1.5
+        cell = min(cell * 1.5, largest)  # the last try is the largest cell itself
 
     # Into the map frame, every clustered vertex (the coverage needs the ground's too).
     enu = []

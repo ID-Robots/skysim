@@ -401,6 +401,19 @@ def unit_checks(st: types.ModuleType, ob: types.ModuleType, tmp: Path) -> None:
         check(False, "an unreachable --max-triangles is refused")
     except st.ScanError as e:
         check("max-triangles" in str(e), f"budget refusal: {e}")
+    # ... but the largest cell (10 m) is tried before refusing: here only it meets the budget.
+    two = [
+        (-20.0, -20.0, 5.0),
+        (-1.0, -20.0, 5.0),
+        (-20.0, -1.0, 5.0),
+        (1.0, 1.0, 5.0),
+        (9.0, 1.0, 5.0),
+        (1.0, 9.0, 5.0),
+    ]
+    last = st.build_scan_mesh(
+        st.Scan("two", two, [(0, 1, 2), (3, 4, 5)], from_coords), lat0, lon0, max_triangles=1, ground_z=0.0
+    )
+    check(last.stats["cell_m"] == 10.0 and last.stats["triangles"] == 1, f"the 10 m cell is tried ({last.stats})")
 
 
 # ---------------------------------------------------------------------------- the world
