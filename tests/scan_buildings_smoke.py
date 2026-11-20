@@ -171,10 +171,16 @@ def glb_bytes(doc: dict, binary: bytes) -> bytes:
     return struct.pack("<4sII", b"glTF", 2, 12 + len(body)) + body
 
 
-def write_glb(path: Path, verts: list[Vec3], faces: list[tuple[int, int, int]], offset: tuple[float, float]) -> None:
-    """The same model as a GLB: node translation + 90 degree rotation about z, CESIUM_RTC."""
+def write_glb(
+    path: Path, verts: list[Vec3], faces: list[tuple[int, int, int]], offset: tuple[float, float], mirror: bool = False
+) -> None:
+    """The same model as a GLB: node translation + 90 degree rotation about z (+ a mirroring
+    scale of x), CESIUM_RTC."""
     t = (10.0, -20.0, 5.0)
-    local = [(y - t[1], -(x - t[0]), z - t[2]) for x, y, z in verts]  # R^-1 (p - t), R = +90 about z
+    sx = -1.0 if mirror else 1.0
+    local = [(sx * (y - t[1]), -(x - t[0]), z - t[2]) for x, y, z in verts]  # S^-1 R^-1 (p - t), R = +90 about z
+    if mirror:  # mirrored, the stored triangles show the other side: the node mirrors them back
+        faces = [(a, c, b) for a, b, c in faces]
     positions = b"".join(struct.pack("<3f", *p) for p in local)
     indices = b"".join(struct.pack("<3I", *f) for f in faces)
     lo = [min(p[k] for p in local) for k in range(3)]
@@ -186,7 +192,10 @@ def write_glb(path: Path, verts: list[Vec3], faces: list[tuple[int, int, int]], 
         "extensions": {"CESIUM_RTC": {"center": [offset[0], offset[1], 0.0]}},
         "scene": 0,
         "scenes": [{"nodes": [0]}],
-        "nodes": [{"children": [1]}, {"mesh": 0, "translation": list(t), "rotation": [0.0, 0.0, s, s]}],
+        "nodes": [
+            {"children": [1]},
+            {"mesh": 0, "translation": list(t), "rotation": [0.0, 0.0, s, s], "scale": [sx, 1.0, 1.0]},
+        ],
         "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1, "mode": 4}]}],
         "buffers": [{"byteLength": len(positions) + len(indices)}],
         "bufferViews": [
@@ -260,6 +269,24 @@ def unit_checks(st: types.ModuleType, ob: types.ModuleType, tmp: Path) -> None:
     worst = max(math.dist(a, b) for a, b in zip(gverts, mesh.verts, strict=True))
     check(gfaces == mesh.faces and worst < 1e-4, f"GLB reads back the model (worst {worst:.2e} m)")
     check(ext.get("CESIUM_RTC", {}).get("center") == [313800.0, 4668300.0, 0.0], f"GLB extensions {ext}")
+    write_glb(tmp / "mirror.glb", mesh.verts, mesh.faces, (313800.0, 4668300.0), mirror=True)
+    mverts, mfaces, _ = st.read_glb((tmp / "mirror.glb").read_bytes())
+    worst = max(math.dist(a, b) for a, b in zip(mverts, mesh.verts, strict=True))
+    check(
+        worst < 1e-4
+        and not st.is_inside_out(mverts, mfaces)
+        and sorted(map(sorted, mfaces)) == sorted(map(sorted, mesh.faces)),
+        f"a mirroring GLB node keeps the outward side (worst {worst:.2e} m)",
+    )
+    strip = json.loads(
+        (tmp / "unit.glb").read_bytes()[20 : 20 + struct.unpack_from("<I", (tmp / "unit.glb").read_bytes(), 12)[0]]
+    )
+    strip["meshes"][0]["primitives"][0]["mode"] = 5
+    try:
+        st.read_glb(glb_bytes(strip, b""))
+        check(False, "a triangle strip is refused, not skipped")
+    except st.ScanError as e:
+        check("strip" in str(e), f"triangle strip refusal: {e}")
     draco_doc = {
         "asset": {"version": "2.0"},
         "nodes": [{"mesh": 0}],
@@ -307,6 +334,16 @@ def unit_checks(st: types.ModuleType, ob: types.ModuleType, tmp: Path) -> None:
     pieces = st.solids(*st.read_obj(tile.read_text()))
     inside = [st.solid_inside(p, cov) for p in pieces]
     check(inside == [True, False, False, False], f"prisms inside the coverage: {inside}")
+
+    # coverage_of: gaps of two cells closed, three not; the margin in whole cells.
+    points = [(x + 0.5, y + 0.5) for x in range(100) for y in range(100) if not (40 <= x < 44 or 60 <= x < 66)]
+    closed = st.coverage_of(points, 2.0, 0.0)
+    check(closed.covers(41.0, 50.0) and not closed.covers(62.0, 50.0), "coverage closes 2-cell gaps, not 3-cell ones")
+    shrunk = st.coverage_of(points, 2.0, 5.0)
+    check(
+        not shrunk.covers(5.0, 50.0) and shrunk.covers(7.0, 50.0) and shrunk.covers(90.0, 50.0),
+        "coverage shrinks by the margin rounded up to whole cells (6 m)",
+    )
 
 
 # ---------------------------------------------------------------------------- the world
@@ -405,10 +442,22 @@ def main() -> int:
         )
         check(abs(s["ground_z_model_m"] - DATUM_M) < 0.1 and not s["flipped"], f"ground found at the datum ({s})")
         check(s["triangles"] < s["source_triangles"] / 4, f"decimated ({s['source_triangles']} -> {s['triangles']})")
+        glb_bounds = from_glb.stats["bounds_enu_m"]
         check(
-            abs(from_glb.stats["triangles"] - s["triangles"]) <= 0.01 * s["triangles"],
-            f"GLB@origin and OBJ+coords.txt agree ({from_glb.stats['triangles']} vs {s['triangles']})",
+            abs(from_glb.stats["triangles"] - s["triangles"]) <= 0.01 * s["triangles"]
+            and all(abs(a - b) < 0.05 for a, b in zip(glb_bounds, s["bounds_enu_m"], strict=True)),
+            f"GLB@origin and OBJ+coords.txt agree ({from_glb.stats['triangles']} vs {s['triangles']} triangles, "
+            f"{glb_bounds} vs {s['bounds_enu_m']})",
         )
+        # A GLB whose RTC centre is not the coords.txt offset beside it is refused.
+        (tmp / "mismatch").mkdir()
+        (tmp / "mismatch" / "model.glb").write_bytes((tmp / "model.glb").read_bytes())
+        (tmp / "mismatch" / "coords.txt").write_text(f"WGS84 UTM 35N\n{offset[0] + 100:.0f} {offset[1]:.0f}\n")
+        try:
+            st.load_scan(str(tmp / "mismatch" / "model.glb"))
+            check(False, "a GLB whose CESIUM_RTC disagrees with coords.txt is refused")
+        except st.ScanError as e:
+            check("CESIUM_RTC" in str(e), f"RTC mismatch refusal: {e}")
         lo, hi = s["bounds_enu_m"][:3], s["bounds_enu_m"][3:]
         expect_lo = (MAST_EAST - MAST_HALF, centre[1] - BOX_HALF[1])
         expect_hi = (centre[0] + BOX_HALF[0], centre[1] + BOX_HALF[1], MAST_HEIGHT)
@@ -441,6 +490,30 @@ def main() -> int:
             ],
             "osm_buildings.py",
         )
+        # A scan with nothing above the ground cut clears no footprints.
+        empty = run(
+            [
+                sys.executable,
+                str(COOKER_DIR / "scan_tiles.py"),
+                str(tmp / "empty_obj"),
+                "--buildings",
+                str(tmp / "osm_obj"),
+                "--scan",
+                str(project),
+                "--ground-cut",
+                "100",
+            ],
+            "scan_tiles.py --ground-cut 100",
+        )
+        empty_anchor = json.loads((tmp / "empty_obj" / "anchor.json").read_text())
+        check(
+            "replaces no footprints" in empty and empty_anchor["footprints_replaced_by_scans"] == 0,
+            f"a scan with no triangles replaces nothing ({empty_anchor['footprints_replaced_by_scans']})",
+        )
+        # An earlier run's tile is removed; a tile of someone else's is only warned about.
+        (tmp / "world_obj").mkdir()
+        (tmp / "world_obj" / "tile_50_50.obj").write_text("# skysim merged tile tile_50_50.obj (old)\nv 0 0 0\n")
+        (tmp / "world_obj" / "tile_51_51.obj").write_text("# mine\nv 0 0 0\n")
         out = run(
             [
                 sys.executable,
@@ -454,12 +527,19 @@ def main() -> int:
             "scan_tiles.py",
         )
         print(out.strip())
+        check(
+            not (tmp / "world_obj" / "tile_50_50.obj").exists() and "tile_51_51.obj" in out,
+            "stale tiles: an earlier run's removed, a foreign one warned about",
+        )
+        (tmp / "world_obj" / "tile_51_51.obj").unlink()
         anchor = json.loads((tmp / "world_obj" / "anchor.json").read_text())
         check(
             anchor.get("footprints_replaced_by_scans") == 1
+            and anchor.get("footprints") == 3
             and anchor["origin_wgs84"][:2] == [ANCHOR_LAT, ANCHOR_LON]
             and anchor["scans"][0]["footprints_replaced"] == 1
-            and anchor.get("heights"),
+            and anchor["scans"][0]["triangles"] == s["triangles"]
+            and (anchor.get("buildings") or {}).get("heights"),
             f"anchor.json: OSM's record plus the scan's ({anchor.get('footprints_replaced_by_scans')})",
         )
         objs = sorted(str(p) for p in (tmp / "world_obj").glob("*.obj"))

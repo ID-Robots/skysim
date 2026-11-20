@@ -38,7 +38,8 @@ Collision mesh, per scan:
    not consistently wound at all.
 2. Decimation by vertex clustering: vertices are merged per ``--cell`` cube (1 m) to the mean of
    their members; triangles that collapse are dropped, the rest keep their winding. Each
-   vertex moves at most a cell diagonal, so a wall stays within ~0.9 m of the scan at 1 m.
+   vertex moves at most a cell diagonal (1.7 m at 1 m; a plane's members average out, and the
+   ODM fixture's walls stay a median 0.13 m from the truth).
    Over ``--max-triangles`` the cell grows by half until under it.
 3. Ground: triangles wholly below ``--ground-cut`` (1 m) are dropped. skysim has its own ground
    slab, and a landing on a ground triangle of a tile would count as a building strike.
@@ -46,9 +47,10 @@ Collision mesh, per scan:
    in ``osm_buildings.py``; the streamer keeps neighbouring tiles resident.
 
 Coverage (which OSM prisms the scan replaces): the scan's clustered vertices, ground included,
-rasterised on ``--coverage-cell`` (2 m) squares, gaps of one cell closed, then shrunk by
-``--margin`` (5 m) — the edge of a reconstruction is its worst part. A prism is dropped only when
-every point of its footprint (vertices, edges and caps sampled at half a cell) is covered.
+rasterised on ``--coverage-cell`` (2 m) squares, gaps of up to two cells closed, then shrunk by
+``--margin`` (5 m, rounded up to whole cells) — the edge of a reconstruction is its worst part. A
+prism is dropped only when every point of its footprint (vertices, edges and caps sampled at half
+a cell) is covered, and only by a scan that kept triangles.
 
 Usage:
   python3 tools/cooker/osm_buildings.py osm_obj --lat 42.1403890 --lon 24.7645490 --radius 5000
@@ -382,7 +384,10 @@ def read_glb(data: bytes) -> tuple[list[Vec3], list[Tri], dict]:
             + m[8] * (m[1] * m[6] - m[5] * m[2])
         )
         for prim in doc["meshes"][node["mesh"]].get("primitives") or []:
-            if prim.get("mode", 4) != 4:
+            mode = prim.get("mode", 4)
+            if mode in (5, 6):
+                raise ScanError("GLB: triangle strips and fans are not supported")
+            if mode != 4:
                 continue  # points / lines: nothing to collide with
             draco = (prim.get("extensions") or {}).get("KHR_draco_mesh_compression")
             if draco:
@@ -478,7 +483,14 @@ def load_scan(spec: str) -> Scan:
     else:
         raise ScanError(f"{name}: no coords.txt found; append @LAT,LON (the model's origin)")
     if data[:4] == b"glTF":
-        verts, faces, _ = read_glb(data)
+        verts, faces, extensions = read_glb(data)
+        # ODM writes its UTM offset as the RTC centre: a georeference that disagrees is the wrong one.
+        centre = (extensions.get("CESIUM_RTC") or {}).get("center")
+        if centre and len(centre) >= 2 and math.hypot(centre[0] - georef.easting, centre[1] - georef.northing) > 1.0:
+            raise ScanError(
+                f"{name}: CESIUM_RTC centre {centre[0]:.1f} {centre[1]:.1f} is not the {georef.source} offset "
+                f"{georef.easting:.1f} {georef.northing:.1f} (UTM {georef.zone})"
+            )
     else:
         verts, faces = read_obj(data.decode("utf-8", errors="replace"))
     if not faces:
@@ -588,7 +600,8 @@ class Coverage:
 
 
 def coverage_of(points: list[tuple[float, float]], cell: float, margin: float) -> Coverage:
-    """Squares holding a point, gaps of one square closed, then shrunk by ``margin``."""
+    """Squares holding a point; gaps of up to two squares closed (dilate by one, erode by one), then
+    shrunk by ``margin`` rounded up to whole squares."""
     cells = {(math.floor(x / cell), math.floor(y / cell)) for x, y in points}
     shrink = 1 + math.ceil(margin / cell)  # undo the closing's dilation, then the margin
     return Coverage(cell, _erode(_dilate(cells, 1), shrink))
@@ -834,6 +847,10 @@ def main(argv: list[str] | None = None) -> int:
             f"model z {s['ground_z_model_m']} m{', flipped' if s['flipped'] else ''}), "
             f"covers {s['coverage_m2']} m2"
         )
+        if not mesh.triangles:
+            # Nothing would stand where its prisms stood: the scan must not clear the map.
+            print(f"warning: {spec}: no triangles above --ground-cut; it replaces no footprints")
+            mesh.coverage.cells.clear()
         meshes.append(mesh)
 
     # The prisms: kept unless wholly inside some scan's coverage.
@@ -873,28 +890,38 @@ def main(argv: list[str] | None = None) -> int:
     for name in names:
         write_tile(
             args.out_dir / name,
-            f"skysim building tile {name} — ENU metres about {anchor_lat},{anchor_lon}; OSM prisms "
+            f"skysim merged tile {name} (scan_tiles.py) — ENU metres about {anchor_lat},{anchor_lon}; OSM prisms "
             f"({len(pieces_by_tile.get(name, []))}) + scan triangles ({len(triangles_by_tile.get(name, []))})",
             pieces_by_tile.get(name, []),
             triangles_by_tile.get(name, []),
         )
-    stale = sorted(p.name for p in args.out_dir.glob("tile_*.obj") if p.name not in names)
+    stale = []
+    for path in sorted(args.out_dir.glob("tile_*.obj")):
+        if path.name in names:
+            continue
+        with path.open() as f:
+            ours = f.readline().startswith("# skysim merged tile ")
+        if ours:  # an earlier run's tile with no geometry now: tile_cooker would cook it as phantom geometry
+            path.unlink()
+            print(f"removed {path}: left by an earlier run")
+        else:
+            stale.append(path.name)
     if stale:
         print(
             f"warning: {len(stale)} tile_*.obj in {args.out_dir} are not from this run (e.g. {stale[0]}): "
             "remove them before running tile_cooker on *.obj"
         )
 
-    anchor = dict(base_anchor)
-    anchor.update(
-        {
-            "origin_wgs84": [anchor_lat, anchor_lon, anchor_alt],
-            "crs": "ENU metres about origin_wgs84",
-            "tile_size_m": tile_size,
-            "footprints_replaced_by_scans": replaced,
-            "scans": [m.stats for m in meshes],
-        }
-    )
+    anchor = {
+        "origin_wgs84": [anchor_lat, anchor_lon, anchor_alt],
+        "crs": "ENU metres about origin_wgs84",
+        "tile_size_m": tile_size,
+        # osm_buildings.py's own record of the prisms before the merge (source, heights, ...).
+        "buildings": base_anchor or None,
+        "footprints": total,
+        "footprints_replaced_by_scans": replaced,
+        "scans": [m.stats for m in meshes],
+    }
     with (args.out_dir / "anchor.json").open("w") as f:
         json.dump(anchor, f, indent=2)
     print(f"{replaced} of {total} footprints replaced by scans; wrote {len(names)} tiles to {args.out_dir}")

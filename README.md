@@ -209,9 +209,9 @@ python3 tools/cooker/scan_tiles.py build/world_obj --buildings build/city_obj \
 ./build/tile_cooker build/world/tiles --anchor 42.1403890,24.7645490,0 build/world_obj/*.obj
 ```
 
-The decimation is vertex clustering on a `--cell` grid (1 m by default, so a wall stays within
-about 0.9 m of the scan). The cell grows until a scan fits in `--max-triangles` (300 000). The
-scan's ground level is found from its level surfaces, or set with `--ground-z`, and becomes
+The decimation is vertex clustering on a `--cell` grid, 1 m by default. A vertex moves at
+most a cell diagonal; walls stay a median 0.13 m from the truth on the fixture below. The cell
+grows until a scan fits in `--max-triangles` (300 000). The scan's ground level is found from its level surfaces, or set with `--ground-z`, and becomes
 z = 0. Triangles wholly below `--ground-cut` (1 m) are dropped. `anchor.json` records each
 scan's triangle counts, ground level, coverage and how many footprints it replaced. Limits:
 ODM meshes are open surfaces, so a wall no camera saw is missing. Coverage is ground the scan
