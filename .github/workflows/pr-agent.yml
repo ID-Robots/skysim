@@ -1,0 +1,128 @@
+name: PR-Agent
+
+# AI review by Qodo's open-source PR-Agent, running alongside CodeRabbit.
+#  - pull_request_target: describe + review + improve on open / reopen / ready for review; describe +
+#    review again on every push (see [github_action_config] in .pr_agent.toml). Draft PRs are skipped.
+#  - issue_comment: a PR comment such as /review, /improve, /describe or /ask <question> runs that command.
+# Behaviour and review instructions live in .pr_agent.toml; the model is chosen here, per run.
+#
+# Security: the API key is the secret ANTHROPIC_API_KEY of the GitHub Environment "pr-agent", which only
+# the default branch (main) may use. Both triggers always run this file as it is on the default branch
+# (main), never from the PR head or from another branch, so a PR cannot change what runs with the key.
+# A change to this file therefore takes effect only once it is on main.
+# PR-Agent reads the diff through the GitHub API.
+# NEVER add a checkout of, or any step that executes, pull-request code to this workflow.
+# Without the secret the run is skipped with a warning annotation.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, synchronize]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  # A running run is never cancelled; for pushes a pending run is replaced by the newest one (only the
+  # latest head is worth reviewing). Every slash command has a group of its own (the comment id is empty
+  # for pull_request), so a pending /review is never dropped when an /improve arrives behind it.
+  group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.event_name }}-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  pr-agent:
+    name: PR-Agent review
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: pr-agent
+    # Never react to bots (its own comments, CodeRabbit, Dependabot) or to PRs from a fork (the head must
+    # be a branch of this repository). Comments only count when they are
+    # a slash command on a PR from someone with write-level access to the repo. author_association below
+    # is only a cheap pre-filter (MEMBER is any org member, COLLABORATOR any invited collaborator, whatever
+    # their permission): the first step checks the commenter's actual permission.
+    if: >-
+      github.event.sender.type != 'Bot' && (
+        (github.event_name == 'pull_request_target' && !github.event.pull_request.draft &&
+         github.event.pull_request.head.repo.full_name == github.repository) ||
+        (github.event_name == 'issue_comment' &&
+         github.event.issue.pull_request &&
+         startsWith(github.event.comment.body, '/') &&
+         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+      )
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Require write access for slash commands
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMENTER: ${{ github.event.comment.user.login }}
+          COMMENT_PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          permission=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${COMMENTER}/permission" --jq .permission 2>/dev/null) || permission=none
+          if [ "$permission" != "admin" ] && [ "$permission" != "write" ]; then
+            echo "::error title=PR-Agent command refused::${COMMENTER} has '${permission}' access to this repository; slash commands need write or admin."
+            exit 1
+          fi
+          # The same PR rules as pull_request_target: no drafts, no PRs from a fork.
+          pr=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${COMMENT_PR_NUMBER}" --jq '"\(.draft) \(.head.repo.full_name)"') || {
+            echo "::error title=PR-Agent command refused::could not read PR #${COMMENT_PR_NUMBER}."
+            exit 1
+          }
+          if [ "$pr" != "false ${GITHUB_REPOSITORY}" ]; then
+            echo "::error title=PR-Agent command refused::PR #${COMMENT_PR_NUMBER} is a draft or comes from a fork (${pr})."
+            exit 1
+          fi
+
+      - name: Check ANTHROPIC_API_KEY
+        id: key
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=PR-Agent skipped::The ANTHROPIC_API_KEY secret is not set in the pr-agent environment, so PR-Agent did not run."
+          fi
+
+      # Sonnet by default; Opus when the PR changes more than 500 lines (additions + deletions).
+      # Always ask the API: a queued run's event payload can carry the size of an older head.
+      - name: Select model
+        id: model
+        if: steps.key.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          changed=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.additions + .deletions') || changed=""
+          case "$changed" in
+            ''|*[!0-9]*)
+              echo "::warning title=PR-Agent model::Could not read the PR size ('${changed}'), so Sonnet is used."
+              changed=0 ;;
+          esac
+          if [ "$changed" -gt 500 ]; then
+            model="anthropic/claude-opus-5-5"
+          else
+            model="anthropic/claude-sonnet-5-5"
+          fi
+          echo "model=$model" >> "$GITHUB_OUTPUT"
+          echo "Changed lines: $changed -> $model"
+
+      # PR-Agent v0.50.0, run from its release image pinned by digest (pragent/pr-agent:0.50.0-github_action).
+      # The action wrapper at The-PR-Agent/pr-agent builds FROM the rolling :github_action tag, so a commit
+      # SHA on the wrapper does not fix the version that runs. To upgrade: take the new digest from
+      # `docker buildx imagetools inspect pragent/pr-agent:<version>-github_action`.
+      - name: Run PR-Agent
+        if: steps.key.outputs.present == 'true'
+        uses: docker://pragent/pr-agent@sha256:548e894a88071180832b2f4233f734d0acd0db1a879e2fcbaa70bac8b8372ebe # 0.50.0-github_action
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC.KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          config.model: ${{ steps.model.outputs.model }}
+          # A Sonnet-class retry first: a response formatted wrongly (e.g. tool-call XML instead of YAML)
+          # is retried on Sonnet 5 before Haiku; PR-Agent does not retry a parse failure itself. Every
+          # entry must differ from the primary model: v0.50.0 skips partial-chunk recovery when the
+          # effective chain (primary + fallbacks) repeats a model.
+          config.fallback_models: '["anthropic/claude-sonnet-5", "anthropic/claude-haiku-5-5"]'

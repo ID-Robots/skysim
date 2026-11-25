@@ -1,0 +1,62 @@
+# Settings for Qodo's open-source PR-Agent (.github/workflows/pr-agent.yml). It runs alongside CodeRabbit.
+# PR-Agent reads this file from the default branch (main).
+# The model is set per run in the workflow, which takes precedence over this file; the API key is the
+# ANTHROPIC_API_KEY secret of the GitHub Environment "pr-agent".
+
+[github_action_config]
+# Describe + review + improve when a PR is opened, reopened or marked ready for review.
+auto_review = true
+auto_describe = true
+auto_improve = true
+pr_actions = ["opened", "reopened", "ready_for_review"]
+# New pushes by people to an open PR refresh the description and the review (pushes by bots are skipped, PR-Agent's
+# default); /improve stays manual (/improve in a comment).
+handle_push_trigger = true
+push_commands = ["/describe", "/review"]
+
+[ignore]
+glob = ["assets/**"]
+
+[pr_description]
+extra_instructions = '''
+Headless multi-vehicle drone simulator for ArduPilot SITL: C++ (src/**, Jolt Physics, CMake), Python tools and
+Docker images. Call out changes to the SITL/MAVLink interface, the camera/render pose, network ports and the
+Docker entrypoint explicitly.
+'''
+
+[pr_reviewer]
+extra_instructions = '''
+Focus on real bugs, security, interface breaks and missing tests. No style nitpicks: .clang-format owns
+formatting. Say nothing about a file unless there is something concrete to fix.
+
+Review for:
+- C++ (src/**): memory and lifetime bugs, data races between the physics, render and network threads, integer
+  overflow, unchecked sizes or indices on data read from the network or from files
+- The ArduPilot SITL / MAVLink interface: message layout, units, coordinate frames (NED vs ENU), timestamps and
+  sim time vs wall time
+- Physics: units, frame transforms and fixed-step assumptions
+- Shell, Docker and CI (Dockerfile*, docker-entrypoint.sh, buildspec.yml, .github/**): unquoted variables,
+  secrets in images or logs, unpinned base images
+- Missing or weak tests for changed behaviour
+'''
+
+[pr_code_suggestions]
+extra_instructions = '''
+Suggest only changes that fix a real bug, a security problem, a contract break or a missing test.
+No style, naming or formatting nitpicks. At most 10 suggestions in total.
+
+Look for:
+- Memory, lifetime and thread-safety bugs in C++
+- Wrong units, frames or timestamps on the SITL/MAVLink interface
+- Unchecked input from the network or files
+- Shell/Docker scripts that break on spaces or leak secrets
+
+Output format: answer with the YAML object only, as plain text. Never call tools and never wrap the answer
+or the YAML in XML/HTML tags (no <invoke>, <parameter> or similar wrappers). Tags that belong to the code
+itself (HTML, JSX, XML files) are fine inside code snippets.
+'''
+# At most 3 suggestions per chunk x 3 chunks = 9, within the cap of 10.
+num_code_suggestions_per_chunk = 3
+max_number_of_calls = 3
+# Drop low-scored suggestions (0-10), which are mostly nitpicks.
+suggestions_score_threshold = 5
