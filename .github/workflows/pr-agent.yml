@@ -58,10 +58,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           COMMENTER: ${{ github.event.comment.user.login }}
+          COMMENT_PR_NUMBER: ${{ github.event.issue.number }}
         run: |
           permission=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${COMMENTER}/permission" --jq .permission 2>/dev/null) || permission=none
           if [ "$permission" != "admin" ] && [ "$permission" != "write" ]; then
             echo "::error title=PR-Agent command refused::${COMMENTER} has '${permission}' access to this repository; slash commands need write or admin."
+            exit 1
+          fi
+          # The same PR rules as pull_request_target: no drafts, no PRs from a fork.
+          pr=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${COMMENT_PR_NUMBER}" --jq '"\(.draft) \(.head.repo.full_name)"') || {
+            echo "::error title=PR-Agent command refused::could not read PR #${COMMENT_PR_NUMBER}."
+            exit 1
+          }
+          if [ "$pr" != "false ${GITHUB_REPOSITORY}" ]; then
+            echo "::error title=PR-Agent command refused::PR #${COMMENT_PR_NUMBER} is a draft or comes from a fork (${pr})."
             exit 1
           fi
 
@@ -113,6 +123,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ANTHROPIC.KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           config.model: ${{ steps.model.outputs.model }}
-          # Sonnet again first: a response it formats wrongly (e.g. tool-call XML instead of YAML) is
-          # retried once on the same model before Haiku; PR-Agent does not retry a parse failure itself.
-          config.fallback_models: '["anthropic/claude-sonnet-5-5", "anthropic/claude-haiku-5-5"]'
+          # A Sonnet-class retry first: a response formatted wrongly (e.g. tool-call XML instead of YAML)
+          # is retried on Sonnet 5 before Haiku; PR-Agent does not retry a parse failure itself. Every
+          # entry must differ from the primary model: v0.50.0 skips partial-chunk recovery when the
+          # effective chain (primary + fallbacks) repeats a model.
+          config.fallback_models: '["anthropic/claude-sonnet-5", "anthropic/claude-haiku-5-5"]'
