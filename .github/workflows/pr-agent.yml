@@ -102,8 +102,13 @@ jobs:
           if [ "$EVENT_NAME" = "pull_request_target" ]; then
             changed=$((PR_ADDITIONS + PR_DELETIONS))
           else
-            changed=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${COMMENT_PR_NUMBER}" --jq '.additions + .deletions' || echo 0)
+            changed=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${COMMENT_PR_NUMBER}" --jq '.additions + .deletions') || changed=""
           fi
+          case "$changed" in
+            ''|*[!0-9]*)
+              echo "::warning title=PR-Agent model::Could not read the PR size ('${changed}'), so Sonnet is used."
+              changed=0 ;;
+          esac
           if [ "$changed" -gt 500 ]; then
             model="anthropic/claude-opus-5-5"
           else
