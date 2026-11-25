@@ -9,7 +9,8 @@ auto_review = true
 auto_describe = true
 auto_improve = true
 pr_actions = ["opened", "reopened", "ready_for_review"]
-# New pushes to an open PR refresh the description and the review; /improve stays manual (/improve in a comment).
+# New pushes by people to an open PR refresh the description and the review (pushes by bots are skipped, PR-Agent's
+# default); /improve stays manual (/improve in a comment).
 handle_push_trigger = true
 push_commands = ["/describe", "/review"]
 
@@ -50,8 +51,9 @@ Look for:
 - Unchecked input from the network or files
 - Shell/Docker scripts that break on spaces or leak secrets
 
-Output format: answer with the YAML object only, as plain text. Never call tools, never use XML or HTML
-tags (no <invoke>, <parameter> or similar wrappers) and never wrap the YAML in tags.
+Output format: answer with the YAML object only, as plain text. Never call tools and never wrap the answer
+or the YAML in XML/HTML tags (no <invoke>, <parameter> or similar wrappers). Tags that belong to the code
+itself (HTML, JSX, XML files) are fine inside code snippets.
 '''
 # At most 3 suggestions per chunk x 3 chunks = 9, within the cap of 10.
 num_code_suggestions_per_chunk = 3
