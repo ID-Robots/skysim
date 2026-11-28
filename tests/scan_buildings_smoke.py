@@ -242,6 +242,28 @@ def unit_checks(st: types.ModuleType, ob: types.ModuleType, tmp: Path) -> None:
         back = st.utm_to_latlon(e, n, zone, northern)
         check(abs(back[0] - lat) < 1e-8 and abs(back[1] - lon) < 1e-8, f"UTM round trip of {lat},{lon}: {back}")
 
+    # The antimeridian: 180 and -180 are one place, and an explicit zone across it still reaches it.
+    e_am, n_am, zone_am, _ = st.latlon_to_utm(0.0, 180.0)
+    for lon_a, lon_b in ((180.0, -180.0), (179.5, -180.5)):
+        a, b = st.latlon_to_utm(0.0, lon_a, 1), st.latlon_to_utm(0.0, lon_b, 1)
+        check(
+            abs(a[0] - b[0]) < 1e-6 and abs(a[1] - b[1]) < 1e-6 and a[2] == b[2] == 1,
+            f"UTM of {lon_a} and {lon_b} in zone 1 agree: {a} vs {b}",
+        )
+    check(
+        zone_am == 1 and abs(e_am - 166022.0) < 5.0 and abs(n_am) < 1e-6,
+        f"UTM of 0,180 is 3 degrees west of zone 1's meridian: {e_am:.1f} {n_am:.3f} zone {zone_am}",
+    )
+
+    # ... a model across it from its anchor lands beside it, not a turn of the globe away.
+    across = st.georef_from_origin(0.0, 179.5, 1)  # zone 1 is centred on 177 degrees west
+    for x, expected in ((0.0, 0.0), (100.0, 100.0)):
+        got = across.to_enu(x, 0.0, 0.0, 179.5)
+        check(
+            abs(got[0] - expected) < 0.5 and abs(got[1]) < 0.5,
+            f"a zone-1 model at 179.5 east of an anchor there: {x} m east is {got}",
+        )
+
     # A known point lands at its ENU place, through coords.txt and through an origin.
     target = (-1460.0, 545.0)  # metres east, north of the anchor
     lat, lon = enu_to_latlon(*target)
@@ -294,6 +316,15 @@ def unit_checks(st: types.ModuleType, ob: types.ModuleType, tmp: Path) -> None:
         check(False, "a triangle strip is refused, not skipped")
     except st.ScanError as e:
         check("strip" in str(e), f"triangle strip refusal: {e}")
+    for accessor, key, value, word in ((0, "type", "VEC4", "POSITION"), (1, "componentType", 5126, "indices")):
+        wrong = json.loads(json.dumps(strip))
+        wrong["meshes"][0]["primitives"][0]["mode"] = 4
+        wrong["accessors"][accessor][key] = value
+        try:
+            st.read_glb(glb_bytes(wrong, b""))
+            check(False, f"a GLB with {word} {key} {value} is refused")
+        except st.ScanError as e:
+            check(word in str(e), f"{word} {key} {value} refusal: {e}")
     draco_doc = {
         "asset": {"version": "2.0"},
         "nodes": [{"mesh": 0}],
@@ -323,7 +354,7 @@ def unit_checks(st: types.ModuleType, ob: types.ModuleType, tmp: Path) -> None:
     fine.patch((0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (0.0, 10.0, 0.0), 40, 40)  # 0.25 m quads, facing up
     cverts, cfaces = st.cluster(fine.verts, fine.faces, 1.0)
     up = all(normal_z((cverts[a], cverts[b], cverts[c])) > 0 for a, b, c in cfaces)
-    check(len(cfaces) < len(fine.faces) / 8 and up, f"decimation: {len(fine.faces)} -> {len(cfaces)}, all up: {up}")
+    check(0 < len(cfaces) < len(fine.faces) / 8 and up, f"decimation: {len(fine.faces)} -> {len(cfaces)}, all up: {up}")
 
     # Coverage: a prism wholly inside is replaced; one across its edge, one outside, and one whose
     # corners are covered but whose middle is a hole are kept.
@@ -446,6 +477,7 @@ def roof(east: float, north: float) -> float | None:
 def level_hit(start: tuple[float, float], end: tuple[float, float], height: float) -> tuple[float, float] | None:
     """(east, north) of the first hit on a level leg at ``height``, or None."""
     result = mission_check([[start[1], start[0], -height], [end[1], end[0], -height]])
+    check(result.get("checked") is True, "skysim had building geometry for the level leg")
     hits = result.get("hits") or []
     return (hits[0]["position_ned"][1], hits[0]["position_ned"][0]) if hits else None
 
@@ -581,9 +613,16 @@ def main() -> int:
             f"a scan with no triangles replaces nothing ({empty_anchor['footprints_replaced_by_scans']})",
         )
         # Operator mistakes the CLI refuses rather than cook a wrong world.
-        for extra, what in (
-            (["--buildings", str(tmp / "no_such_dir")], "a missing --buildings directory"),
-            (["--buildings", str(tmp / "osm_obj"), "--tile-size", "500"], "a --tile-size other than the prisms'"),
+        for extra, what, why in (
+            (["--buildings", str(tmp / "no_such_dir")], "a missing --buildings directory", "no such directory"),
+            (["--buildings", str(tmp / "osm_obj"), "--alt", "nan"], "a --alt that is not a number", "finite"),
+            (["--buildings", str(tmp / "osm_obj"), "--ground-z", "nan"], "a --ground-z that is not a number", "finite"),
+            (["--buildings", str(tmp / "osm_obj"), "--cell", "inf"], "an infinite --cell", "finite"),
+            (
+                ["--buildings", str(tmp / "osm_obj"), "--tile-size", "500"],
+                "a --tile-size other than the prisms'",
+                "tile-size",
+            ),
         ):
             refused = subprocess.run(
                 [
@@ -603,7 +642,10 @@ def main() -> int:
                 timeout=300,
                 check=False,
             )
-            check(refused.returncode != 0, f"{what} is refused ({refused.stderr.strip()[-200:]})")
+            check(
+                refused.returncode != 0 and why in refused.stderr,
+                f"{what} is refused ({refused.stderr.strip()[-200:]})",
+            )
         run(
             [
                 sys.executable,
@@ -655,6 +697,28 @@ def main() -> int:
         objs = sorted(str(p) for p in (tmp / "world_obj").glob("*.obj"))
         names = [Path(p).name for p in objs]
         check("tile_m7_2.obj" in names and "tile_m6_2.obj" in names, f"the mast is cut to both tiles: {names}")
+        # A tile of another origin under a name this run writes is not overwritten, and nothing is
+        # written; a rerun over its own tiles is.
+        (tmp / "foreign_obj").mkdir()
+        (tmp / "foreign_obj" / names[0]).write_text("# mine\nv 0 0 0\n")
+        scan_args = ["--buildings", str(tmp / "osm_obj"), "--scan", str(project)]
+        foreign = subprocess.run(
+            [sys.executable, str(COOKER_DIR / "scan_tiles.py"), str(tmp / "foreign_obj"), *scan_args],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        check(
+            foreign.returncode != 0
+            and (tmp / "foreign_obj" / names[0]).read_text() == "# mine\nv 0 0 0\n"
+            and [p.name for p in (tmp / "foreign_obj").iterdir()] == [names[0]],
+            f"a foreign tile is not overwritten, nothing else written ({foreign.stderr.strip()[-200:]})",
+        )
+        run(
+            [sys.executable, str(COOKER_DIR / "scan_tiles.py"), str(tmp / "world_obj"), *scan_args],
+            "scan_tiles.py over its own tiles",
+        )
         # No ground in the tiles: below 0.5 m, only the feet of the scanned walls (within 1 m of a footprint).
         footprints = [(centre[0], centre[1], BOX_HALF[0], BOX_HALF[1]), (MAST_EAST, centre[1], MAST_HALF, MAST_HALF)]
         low = 0

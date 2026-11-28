@@ -177,7 +177,7 @@ def latlon_to_utm(lat: float, lon: float, zone: int | None = None) -> tuple[floa
     n = _A / math.sqrt(1.0 - _E2 * math.sin(phi) ** 2)
     t = math.tan(phi) ** 2
     c = _EP2 * math.cos(phi) ** 2
-    a = math.cos(phi) * (lam - lam0)
+    a = math.cos(phi) * ((lam - lam0 + math.pi) % (2.0 * math.pi) - math.pi)  # the short way round the antimeridian
     m = _A * (
         (1.0 - _E2 / 4.0 - 3.0 * _E2**2 / 64.0 - 5.0 * _E2**3 / 256.0) * phi
         - (3.0 * _E2 / 8.0 + 3.0 * _E2**2 / 32.0 + 45.0 * _E2**3 / 1024.0) * math.sin(2.0 * phi)
@@ -215,6 +215,7 @@ class Georef:
 
     def to_enu(self, x: float, y: float, anchor_lat: float, anchor_lon: float) -> tuple[float, float]:
         lat, lon = utm_to_latlon(self.easting + x, self.northing + y, self.zone, self.northern)
+        lon = anchor_lon + (lon - anchor_lon + 180.0) % 360.0 - 180.0  # the short way round the antimeridian
         return osm_buildings.to_enu(lat, lon, anchor_lat, anchor_lon)
 
 
@@ -402,6 +403,13 @@ def read_glb(data: bytes) -> tuple[list[Vec3], list[Tri], dict]:
             if draco:
                 positions, indices = _draco(doc, binary, draco)
             else:
+                at = doc["accessors"][prim["attributes"]["POSITION"]]
+                if at.get("type") != "VEC3" or at.get("componentType") != 5126:
+                    raise ScanError("GLB: POSITION must be float VEC3")
+                if "indices" in prim:
+                    at = doc["accessors"][prim["indices"]]
+                    if at.get("type") != "SCALAR" or at.get("componentType") not in (5121, 5123, 5125):
+                        raise ScanError("GLB: indices must be unsigned SCALAR")
                 positions = _accessor(doc, binary, prim["attributes"]["POSITION"])
                 indices = (
                     _accessor(doc, binary, prim["indices"])
@@ -863,6 +871,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--two-sided", action="store_true", help="write every scan triangle both ways round")
     args = ap.parse_args(argv)
+    for name in ("lat", "lon", "alt", "tile_size", "cell", "ground_z", "ground_cut", "coverage_cell", "margin"):
+        if getattr(args, name) is not None and not math.isfinite(getattr(args, name)):
+            ap.error(f"--{name.replace('_', '-')} must be a finite number")
     for name in ("cell", "coverage_cell"):
         if not getattr(args, name) > 0.0:
             ap.error(f"--{name.replace('_', '-')} must be positive")
@@ -890,12 +901,14 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("no anchor: give --lat/--lon, or --buildings with an anchor.json")
     anchor_lat, anchor_lon = float(origin[0]), float(origin[1])
     anchor_alt = float(args.alt) if args.alt is not None else float(origin[2]) if len(origin) > 2 else 0.0
+    if not all(math.isfinite(v) for v in (anchor_lat, anchor_lon, anchor_alt)):
+        ap.error("the anchor (--lat/--lon/--alt or anchor.json) must be finite numbers")
     base_tile = base_anchor.get("tile_size_m")
     if args.tile_size and base_tile and not math.isclose(float(args.tile_size), float(base_tile)):
         ap.error(f"--tile-size {args.tile_size:g} differs from {args.buildings}/anchor.json tile_size_m {base_tile}")
     tile_size = float(args.tile_size or base_tile or 250.0)
-    if not tile_size > 0.0:
-        ap.error("--tile-size must be positive")
+    if not 0.0 < tile_size < math.inf:
+        ap.error("--tile-size must be positive and finite")
 
     meshes = []
     for spec in args.scan:
@@ -961,6 +974,11 @@ def main(argv: list[str] | None = None) -> int:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     names = sorted(set(pieces_by_tile) | set(triangles_by_tile))
+    for name in names:  # before any is written: a tile of another origin is not ours to overwrite
+        if (args.out_dir / name).is_file():
+            with (args.out_dir / name).open() as f:
+                if not f.readline().startswith("# skysim merged tile "):
+                    raise SystemExit(f"scan_tiles: {args.out_dir / name} is not from scan_tiles.py: not overwriting it")
     for name in names:
         write_tile(
             args.out_dir / name,
