@@ -450,12 +450,13 @@ def grab_rtsp(url: str, out_dir: str, frames: int) -> list[str]:
     writes one, about 30 for 3 PNGs. Each is a 1920x1080 picture the camera draws first, seconds
     apiece in the coverage build, so a 3-frame grab outlasted the 120 s on a CI runner. A 32-byte
     probe and one decoder thread write from the first access unit on; passthrough makes each PNG
-    one decoded frame, none repeated to fill a constant output rate."""
+    one decoded frame, none repeated to fill a constant output rate (-vsync, deprecated for
+    -fps_mode since ffmpeg 5.1, because Ubuntu 22.04's 4.4 has only that)."""
     shutil.rmtree(out_dir, ignore_errors=True)
     os.makedirs(out_dir)
     pattern = os.path.join(out_dir, "f_%02d.png")
     rc = subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-rtsp_transport", "tcp", "-probesize", "32",
-                         "-threads", "1", "-i", url, "-fps_mode", "passthrough",
+                         "-threads", "1", "-i", url, "-vsync", "passthrough",
                          "-frames:v", str(frames), "-start_number", "0", pattern],
                         capture_output=True, timeout=120, check=False)
     if rc.returncode != 0:

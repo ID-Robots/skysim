@@ -403,14 +403,14 @@ def main() -> int:
         off_top = 0.0  # the landing-off vehicle's greatest height
         switched_at: list[float] = []  # wall times of vehicle 54's mode changes (as polled)
         switch_polls: list[tuple[float, float]] = []  # ... and the poll before each, that saw the old mode
-        draw_ms: list[tuple[float, float]] = []  # (wall time, vehicle 54's last frame's draw time) per poll
+        draws: list[tuple[float, int, float]] = []  # per poll: wall time, vehicle 54's frames drawn, the last one's ms
         last_mode = None
         last_poll = time.time()
         deadline = time.time() + 60
         while time.time() < deadline:
             cam = call("GET", f"/instances/{BASE}/camera")[1]
             now = time.time()
-            draw_ms.append((now, cam["render_ms"]))
+            draws.append((now, cam["frames_drawn"], cam["render_ms"]))
             height = -call("GET", f"/instances/{BASE}/camera/dock")[1]["vehicle_pose"]["offset_ned"][2]
             timeline.append((round(height, 1), cam["now"]["mode"]))
             if last_mode is not None and cam["now"]["mode"] != last_mode:
@@ -440,10 +440,7 @@ def main() -> int:
         check(intrinsics_ok, "the intrinsics route: the same picture, drawn full size at the landing rate")
         check(not others_switched, f"neither the parked vehicle nor the landing-off one switched ({others_switched})")
         check(off_top > LANDING_HEIGHT, f"... the landing-off one climbed through the zone (to {off_top:.1f} m)")
-        until = time.time() + 2.0  # frames of its own mode after the switch back
-        while time.time() < until:
-            draw_ms.append((time.time(), call("GET", f"/instances/{BASE}/camera")[1]["render_ms"]))
-            time.sleep(0.25)
+        time.sleep(2.0)  # frames of its own mode after the switch back
         receiver.stop = True
         receiver.join(timeout=5)
         frames = receiver.client.frames
@@ -512,31 +509,34 @@ def main() -> int:
                       f"all {len(known)} access units drawn in mode {m + 1} are coded at {expected[m]:g} fps"
                       f" ({len(wrong)} are not: {sorted({r for r in wrong if r is not None})[:3]})")
         # Frame spacing over RTP, away from the switches: the landing rate (5 fps, 200 ms) while it
-        # was landing, the vehicle's own (8 fps, 125 ms) after. A frame comes no sooner than it is
-        # drawn, and RTP stamps when that was done: one drawn within its period waits for its turn,
-        # one that is not holds the next back, so each takes the longer of the period and its
-        # drawing. Where a build draws slower than the period (the coverage build's -O0 on a CI
-        # runner: landing frames 237 ms apart), that, averaged over the draw times the camera route
-        # reported in the same window (render_ms, polled above), is the spacing to hold them to.
+        # was landing, the vehicle's own (8 fps, 125 ms) after. RTP stamps when a frame was drawn, and
+        # a frame is drawn when it is due or when the one before is done, whichever is later: frame i
+        # comes at most max(period - D[i-1], 0) + D[i] after frame i-1, D being draw times. Where a
+        # build draws the landing frames (full size, the dock marker close up) slower than their
+        # period (the coverage build's -O0 on a CI runner: 237 ms apart), the median of that bound is
+        # what their median spacing is held to; drawn within it, the period, the bounds' 10 %
+        # covering the draw times' jitter. Two polls of the camera route that saw consecutive frames
+        # drawn (frames_drawn, render_ms) give one bound.
         def spacing(t0: float, t1: float) -> float | None:
             window = [f for f in frames if t0 <= f.received <= t1]
             steps = sorted((b.rtp_ts - a.rtp_ts) / 90.0 for a, b in zip(window, window[1:]))
             return steps[len(steps) // 2] if steps else None
 
         def due_spacing(t0: float, t1: float, period_ms: float) -> float:
-            taken = [max(period_ms, ms) for t, ms in draw_ms if t0 <= t <= t1]
-            return sum(taken) / len(taken) if taken else period_ms
+            pairs = [(d0, d1) for (t, n0, d0), (_, n1, d1) in zip(draws, draws[1:]) if t0 <= t <= t1 and n1 == n0 + 1]
+            if all(d <= period_ms for pair in pairs for d in pair):
+                return period_ms
+            bounds = sorted(max(period_ms - d0, 0.0) + d1 for d0, d1 in pairs)
+            return max(period_ms, bounds[len(bounds) // 2])
 
         if len(switched_at) == 2:
-            end = time.time()
             landing_step = spacing(switched_at[0] + 1.0, switched_at[1] - 0.5)
             landing_ms = due_spacing(switched_at[0] + 1.0, switched_at[1] - 0.5, 1000.0 / LANDING[0])
-            normal_step = spacing(switched_at[1] + 1.0, end)
-            normal_ms = due_spacing(switched_at[1] + 1.0, end, 1000.0 / OWN[2])
+            normal_step = spacing(switched_at[1] + 1.0, time.time())
             check(landing_step is not None and 180 < landing_step < 220 / 200 * landing_ms,
                   f"frames {landing_step} ms apart while landing ({landing_ms:.0f})")
-            check(normal_step is not None and 110 < normal_step < 140 / 125 * normal_ms,
-                  f"frames {normal_step} ms apart in its normal mode after ({normal_ms:.0f})")
+            check(normal_step is not None and 110 < normal_step < 140,
+                  f"frames {normal_step} ms apart in its normal mode after (125)")
 
         cam = call("GET", f"/instances/{BASE + 1}/camera")[1]
         check(not cam["landing"]["active"] and cam["now"]["mode"] == "normal" and cam["now"]["resting"],
