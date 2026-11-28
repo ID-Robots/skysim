@@ -432,7 +432,11 @@ def main() -> int:
             elif saw_landing and height > LANDING_HEIGHT + MARGIN:
                 saw_after = True
                 break
-            time.sleep(0.25)
+            until = time.time() + 0.25  # meanwhile vehicle 54's camera every 50 ms: each draw seen (below)
+            while time.time() < until:
+                time.sleep(0.05)
+                polled = call("GET", f"/instances/{BASE}/camera")[1]
+                draws.append((time.time(), polled["frames_drawn"], polled["render_ms"]))
         print(f"camera_modes_smoke: (height m, mode) every 0.25 s: {timeline}")
         check(saw_landing, "climbing from its dock it draws the landing mode")
         check(saw_after, f"above {LANDING_HEIGHT + MARGIN:g} m it draws its own mode again")
@@ -514,22 +518,26 @@ def main() -> int:
         # comes at most max(period - D[i-1], 0) + D[i] after frame i-1, D being draw times. Where a
         # build draws the landing frames (full size, the dock marker close up) slower than their
         # period (the coverage build's -O0 on a CI runner: 237 ms apart), their median spacing is held
-        # to the median of that bound over the draws the polls of the camera route saw (frames_drawn,
-        # render_ms) — exact where the poll before saw the draw before, else period + D[i] — and at
-        # most twice the period, so the rest rate (500 ms) never passes for landing. Where every draw
-        # seen fits in the period, the period: the bounds' 10 % covers the draw times' jitter.
+        # to that bound over the draws the polls of the camera route saw (frames_drawn, render_ms) —
+        # exact where the poll before saw the draw before, else period + D[i] — at its upper quartile,
+        # as the two are taken over different frames (alternating draw times put their medians in
+        # different halves), and at most twice the period, so the rest rate (500 ms) never passes for
+        # landing. Only where the polls saw every draw (one at most between two) and each fits in the
+        # period is it the period itself: the bounds' 10 % covers the draw times' jitter.
         def spacing(t0: float, t1: float) -> float | None:
             window = [f for f in frames if t0 <= f.received <= t1]
             steps = sorted((b.rtp_ts - a.rtp_ts) / 90.0 for a, b in zip(window, window[1:]))
             return steps[len(steps) // 2] if steps else None
 
         def due_spacing(t0: float, t1: float, period_ms: float) -> float:
-            seen = [(d1, max(period_ms - d0, 0.0) + d1 if n1 == n0 + 1 else period_ms + d1)
+            seen = [(n1 - n0, d1, max(period_ms - d0, 0.0) + d1 if n1 == n0 + 1 else period_ms + d1)
                     for (t, n0, d0), (_, n1, d1) in zip(draws, draws[1:]) if t0 <= t <= t1 and n1 != n0]
-            if not seen or all(d <= period_ms for d, _ in seen):
-                return period_ms  # each draw in time, or none drawn (and then no frames to space either)
-            bounds = sorted(b for _, b in seen)
-            return min(2.0 * period_ms, max(period_ms, bounds[len(bounds) // 2]))
+            if not seen:
+                return 2.0 * period_ms  # no draw seen: no evidence either way
+            if all(k == 1 and d <= period_ms for k, d, _ in seen):
+                return period_ms
+            bounds = sorted(b for _, _, b in seen)
+            return min(2.0 * period_ms, max(period_ms, bounds[3 * len(bounds) // 4]))
 
         if len(switched_at) == 2:
             landing_step = spacing(switched_at[0] + 1.0, switched_at[1] - 0.5)
