@@ -519,11 +519,12 @@ def main() -> int:
         # build draws the landing frames (full size, the dock marker close up) slower than their
         # period (the coverage build's -O0 on a CI runner: 237 ms apart), their median spacing is held
         # to that bound over the draws the polls of the camera route saw (frames_drawn, render_ms) —
-        # exact where the poll before saw the draw before, else period + D[i] — at its upper quartile,
-        # as the two are taken over different frames (alternating draw times put their medians in
-        # different halves), and at most twice the period, so the rest rate (500 ms) never passes for
-        # landing. Only where the polls saw every draw (one at most between two) and each fits in the
-        # period is it the period itself: the bounds' 10 % covers the draw times' jitter.
+        # exact where the poll before saw the draw before, else period + D[i], and each draw no poll
+        # saw at the most allowed, twice the period, so the rest rate (500 ms) never passes for
+        # landing — at its upper quartile, as the two are taken over different frames (alternating
+        # draw times put their medians in different halves). Only where the polls saw every draw
+        # (one at most between two) and each fits in the period is it the period itself: the
+        # bounds' 10 % covers the draw times' jitter.
         def spacing(t0: float, t1: float) -> float | None:
             window = [f for f in frames if t0 <= f.received <= t1]
             steps = sorted((b.rtp_ts - a.rtp_ts) / 90.0 for a, b in zip(window, window[1:]))
@@ -536,7 +537,8 @@ def main() -> int:
                 return 2.0 * period_ms  # no draw seen: no evidence either way
             if all(k == 1 and d <= period_ms for k, d, _ in seen):
                 return period_ms
-            bounds = sorted(b for _, _, b in seen)
+            unseen = sum(k - 1 for k, _, _ in seen)  # drawn between two polls and never seen: nothing known
+            bounds = sorted([b for _, _, b in seen] + [2.0 * period_ms] * unseen)
             return min(2.0 * period_ms, max(period_ms, bounds[3 * len(bounds) // 4]))
 
         if len(switched_at) == 2:
