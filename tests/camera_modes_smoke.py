@@ -403,12 +403,14 @@ def main() -> int:
         off_top = 0.0  # the landing-off vehicle's greatest height
         switched_at: list[float] = []  # wall times of vehicle 54's mode changes (as polled)
         switch_polls: list[tuple[float, float]] = []  # ... and the poll before each, that saw the old mode
+        draws: list[tuple[float, int, float]] = []  # per poll: wall time, vehicle 54's frames drawn, the last one's ms
         last_mode = None
         last_poll = time.time()
         deadline = time.time() + 60
         while time.time() < deadline:
             cam = call("GET", f"/instances/{BASE}/camera")[1]
             now = time.time()
+            draws.append((now, cam["frames_drawn"], cam["render_ms"]))
             height = -call("GET", f"/instances/{BASE}/camera/dock")[1]["vehicle_pose"]["offset_ned"][2]
             timeline.append((round(height, 1), cam["now"]["mode"]))
             if last_mode is not None and cam["now"]["mode"] != last_mode:
@@ -430,7 +432,11 @@ def main() -> int:
             elif saw_landing and height > LANDING_HEIGHT + MARGIN:
                 saw_after = True
                 break
-            time.sleep(0.25)
+            until = time.time() + 0.25  # meanwhile vehicle 54's camera every 50 ms: each draw seen (below)
+            while time.time() < until:
+                time.sleep(0.05)
+                polled = call("GET", f"/instances/{BASE}/camera")[1]
+                draws.append((time.time(), polled["frames_drawn"], polled["render_ms"]))
         print(f"camera_modes_smoke: (height m, mode) every 0.25 s: {timeline}")
         check(saw_landing, "climbing from its dock it draws the landing mode")
         check(saw_after, f"above {LANDING_HEIGHT + MARGIN:g} m it draws its own mode again")
@@ -507,17 +513,41 @@ def main() -> int:
                       f"all {len(known)} access units drawn in mode {m + 1} are coded at {expected[m]:g} fps"
                       f" ({len(wrong)} are not: {sorted({r for r in wrong if r is not None})[:3]})")
         # Frame spacing over RTP, away from the switches: the landing rate (5 fps, 200 ms) while it
-        # was landing, the vehicle's own (8 fps, 125 ms) after.
+        # was landing, the vehicle's own (8 fps, 125 ms) after. RTP stamps when a frame was drawn, and
+        # a frame is drawn when it is due or when the one before is done, whichever is later: frame i
+        # comes at most max(period - D[i-1], 0) + D[i] after frame i-1, D being draw times. Where a
+        # build draws the landing frames (full size, the dock marker close up) slower than their
+        # period (the coverage build's -O0 on a CI runner: 237 ms apart), their median spacing is held
+        # to that bound over the draws the polls of the camera route saw (frames_drawn, render_ms) —
+        # exact where the poll before saw the draw before, else period + D[i], and each draw no poll
+        # saw at the most allowed, twice the period, so the rest rate (500 ms) never passes for
+        # landing — at its upper quartile, as the two are taken over different frames (alternating
+        # draw times put their medians in different halves). Only where the polls saw every draw
+        # (one at most between two) and each fits in the period is it the period itself: the
+        # bounds' 10 % covers the draw times' jitter. Every interval between two polls that overlaps
+        # the window counts, at its edges too.
         def spacing(t0: float, t1: float) -> float | None:
             window = [f for f in frames if t0 <= f.received <= t1]
             steps = sorted((b.rtp_ts - a.rtp_ts) / 90.0 for a, b in zip(window, window[1:]))
             return steps[len(steps) // 2] if steps else None
 
+        def due_spacing(t0: float, t1: float, period_ms: float) -> float:
+            seen = [(n1 - n0, d1, max(period_ms - d0, 0.0) + d1 if n1 == n0 + 1 else period_ms + d1)
+                    for (t, n0, d0), (u, n1, d1) in zip(draws, draws[1:]) if u >= t0 and t <= t1 and n1 != n0]
+            if not seen:
+                return 2.0 * period_ms  # no draw seen: no evidence either way
+            if all(k == 1 and d <= period_ms for k, d, _ in seen):
+                return period_ms
+            unseen = sum(k - 1 for k, _, _ in seen)  # drawn between two polls and never seen: nothing known
+            bounds = sorted([b for _, _, b in seen] + [2.0 * period_ms] * unseen)
+            return min(2.0 * period_ms, max(period_ms, bounds[3 * len(bounds) // 4]))
+
         if len(switched_at) == 2:
             landing_step = spacing(switched_at[0] + 1.0, switched_at[1] - 0.5)
+            landing_ms = due_spacing(switched_at[0] + 1.0, switched_at[1] - 0.5, 1000.0 / LANDING[0])
             normal_step = spacing(switched_at[1] + 1.0, time.time())
-            check(landing_step is not None and 180 < landing_step < 220,
-                  f"frames {landing_step} ms apart while landing (200)")
+            check(landing_step is not None and 180 < landing_step < 220 / 200 * landing_ms,
+                  f"frames {landing_step} ms apart while landing ({landing_ms:.0f})")
             check(normal_step is not None and 110 < normal_step < 140,
                   f"frames {normal_step} ms apart in its normal mode after (125)")
 
