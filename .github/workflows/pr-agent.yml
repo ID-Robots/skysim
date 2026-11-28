@@ -5,6 +5,7 @@ name: PR-Agent
 #    review again on every push (see [github_action_config] in .pr_agent.toml). Draft PRs are skipped.
 #  - issue_comment: a PR comment such as /review, /improve, /describe or /ask <question> runs that command.
 # Behaviour and review instructions live in .pr_agent.toml; the model is chosen here, per run.
+# The last step fails the job when the review left changed files out (token budget).
 #
 # Security: the API key is the secret ANTHROPIC_API_KEY of the GitHub Environment "pr-agent", which only
 # the default branch (main) may use. Both triggers always run this file as it is on the default branch
@@ -126,3 +127,67 @@ jobs:
           # entry must differ from the primary model: v0.50.0 skips partial-chunk recovery when the
           # effective chain (primary + fallbacks) repeats a model.
           config.fallback_models: '["anthropic/claude-sonnet-5", "anthropic/claude-haiku-5-5"]'
+
+      # A review that left changed files out (token budget) fails the job instead of passing green.
+      # GitHub API only, no checkout: the hidden pr-agent-review-state block of the "PR Reviewer Guide"
+      # comment lists in last_run.excluded_files the files its review of last_run.head_sha did not (fully)
+      # cover. Files PR-Agent filters out itself ([ignore] globs, generated code, lockfiles, binaries) are
+      # never in that list. No state block for the current head (e.g. a review without findings): warning.
+      - name: Check review coverage
+        if: >-
+          steps.key.outputs.present == 'true' &&
+          (github.event_name == 'pull_request_target' || startsWith(github.event.comment.body, '/review'))
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          set -o pipefail
+          if [ "$GITHUB_EVENT_NAME" = "issue_comment" ]; then
+            read -r command _ <<< "$COMMENT_BODY" || true
+            case "$command" in
+              /review|/review_pr) ;;
+              *) echo "Not a review command; coverage not checked."; exit 0 ;;
+            esac
+          fi
+          warn="::warning title=PR-Agent review coverage::"
+          head_sha=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq .head.sha) || head_sha=""
+          if [ -z "$head_sha" ]; then
+            echo "${warn}Could not read the head commit of PR #${PR_NUMBER}; coverage not checked."
+            exit 0
+          fi
+          # The review comment carries its identity line near the top (as PR-Agent matches it); the state
+          # block is the one line of JSON after the only state marker line (pr-agent-review-state:v1). The marker
+          # is built from two strings: PR-Agent cuts a review at its literal text, which a quote of this step has.
+          state=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" | jq -c -s '
+            [add // [] | .[] | select(.user.login == "github-actions[bot]")
+              | select(.body | split("\n")[:5] | any(.[]; gsub("^\\s+|\\s+$"; "") == "<!-- pr-agent:review:full -->"))]
+            | (max_by(.id) // {}).body // ""
+            | split("\n<!-- " + "pr-agent-review-state:v1\n")
+            | if length == 2 then (.[1] | split("\n-->")[0] // "" | try fromjson catch null) else null end
+            | if (.last_run | type) == "object" and (.last_run.excluded_files | type) == "array" then . else null end
+          ') || state=""
+          if [ -z "$state" ] || [ "$state" = "null" ]; then
+            echo "${warn}No review state in the PR Reviewer Guide comment of PR #${PR_NUMBER}; coverage not checked."
+            exit 0
+          fi
+          state_sha=$(jq -r '.last_run.head_sha // "" | tostring | gsub("[^0-9a-f]"; "")' <<< "$state")
+          if [ "$state_sha" != "$head_sha" ]; then
+            echo "${warn}The review state is for commit '${state_sha:0:7}', not the PR head ${head_sha:0:7}; coverage not checked."
+            exit 0
+          fi
+          skipped=$(jq '.last_run.excluded_files | length' <<< "$state")
+          if [ "$skipped" -eq 0 ]; then
+            echo "The review of ${head_sha:0:7} covered every changed file."
+            exit 0
+          fi
+          echo "Files the review of ${head_sha:0:7} did not (fully) cover:"
+          jq -r '.last_run.excluded_files[] | tostring | "  - " + gsub("[\r\n]"; " ")' <<< "$state"
+          files=$(jq -r '.last_run.excluded_files | map(tostring) | .[:50] | join(", ")
+            | gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A")' <<< "$state")
+          if [ "$skipped" -gt 50 ]; then
+            files="${files} and $((skipped - 50)) more (see the log)"
+          fi
+          echo "::error title=PR-Agent review incomplete::The review of ${head_sha:0:7} left out ${skipped} changed file(s)" \
+            "because of the token budget: ${files}. Split the PR, or add generated files to [ignore] in .pr_agent.toml."
+          exit 1

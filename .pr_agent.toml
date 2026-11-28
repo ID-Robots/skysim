@@ -3,6 +3,15 @@
 # The model is set per run in the workflow, which takes precedence over this file; the API key is the
 # ANTHROPIC_API_KEY secret of the GitHub Environment "pr-agent".
 
+[config]
+# Token budget of one model call, for automatic runs and slash commands (a comment can still pass
+# --config.max_model_tokens=N). PR-Agent's default of 32000 left most files of large PRs out of the review.
+# PR-Agent 0.50.0 uses min(max_model_tokens, model limit), and the limit of Opus 5.5, Sonnet 5.5 and the
+# fallbacks Sonnet 5 and Haiku 5.5 is 1M tokens. PR-Agent fits the diff with an OpenAI tokenizer; Claude's
+# count can be ~1.76x that (1.3 estimate factor x 1.35 for Claude's current tokenizer), so 500000 keeps a
+# full request below 1M. A review that still leaves files out fails the workflow's coverage check.
+max_model_tokens = 500000
+
 [github_action_config]
 # Describe + review + improve when a PR is opened, reopened or marked ready for review.
 auto_review = true
@@ -38,6 +47,10 @@ Review for:
 - Shell, Docker and CI (Dockerfile*, docker-entrypoint.sh, buildspec.yml, .github/**): unquoted variables,
   secrets in images or logs, unpinned base images
 - Missing or weak tests for changed behaviour
+
+You see only the diff. A concern that depends on code not visible in the diff (middleware, proxies, callers,
+config) is worded as a question to verify and names what to check (file, function or setting), never as a
+confirmed finding or as a security concern.
 '''
 
 [pr_code_suggestions]
@@ -50,6 +63,10 @@ Look for:
 - Wrong units, frames or timestamps on the SITL/MAVLink interface
 - Unchecked input from the network or files
 - Shell/Docker scripts that break on spaces or leak secrets
+
+You see only the diff. A concern that depends on code not visible in the diff (middleware, proxies, callers,
+config) is worded as a question to verify and names what to check (file, function or setting), never as a
+confirmed finding or as a security concern.
 
 Output format: answer with the YAML object only, as plain text. Never call tools and never wrap the answer
 or the YAML in XML/HTML tags (no <invoke>, <parameter> or similar wrappers). Tags that belong to the code
