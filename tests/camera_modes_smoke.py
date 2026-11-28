@@ -524,7 +524,8 @@ def main() -> int:
         # landing — at its upper quartile, as the two are taken over different frames (alternating
         # draw times put their medians in different halves). Only where the polls saw every draw
         # (one at most between two) and each fits in the period is it the period itself: the
-        # bounds' 10 % covers the draw times' jitter.
+        # bounds' 10 % covers the draw times' jitter. Every interval between two polls that overlaps
+        # the window counts, at its edges too.
         def spacing(t0: float, t1: float) -> float | None:
             window = [f for f in frames if t0 <= f.received <= t1]
             steps = sorted((b.rtp_ts - a.rtp_ts) / 90.0 for a, b in zip(window, window[1:]))
@@ -532,7 +533,7 @@ def main() -> int:
 
         def due_spacing(t0: float, t1: float, period_ms: float) -> float:
             seen = [(n1 - n0, d1, max(period_ms - d0, 0.0) + d1 if n1 == n0 + 1 else period_ms + d1)
-                    for (t, n0, d0), (_, n1, d1) in zip(draws, draws[1:]) if t0 <= t <= t1 and n1 != n0]
+                    for (t, n0, d0), (u, n1, d1) in zip(draws, draws[1:]) if u >= t0 and t <= t1 and n1 != n0]
             if not seen:
                 return 2.0 * period_ms  # no draw seen: no evidence either way
             if all(k == 1 and d <= period_ms for k, d, _ in seen):
