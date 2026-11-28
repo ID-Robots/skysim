@@ -691,12 +691,15 @@ def build_scan_mesh(
         if max_triangles <= 0 or len(kept) * (2 if two_sided else 1) <= max_triangles:
             if kept or cell == start_cell:
                 break
-            raise ScanError(f"--max-triangles {max_triangles} is met only by collapsing the scan to nothing")
-        if cell >= largest:
+            if cell >= largest:
+                raise ScanError(f"--max-triangles {max_triangles} is met only by collapsing the scan to nothing")
+        elif cell >= largest:
             raise ScanError(
                 f"cannot decimate to --max-triangles {max_triangles} with cells up to {largest:g} m: "
                 f"{len(kept)} triangles left"
             )
+        # The grids of two cell sizes are not nested: a cell that collapses every triangle can be
+        # followed by one that keeps some, so an empty retry goes on to the next cell.
         cell = min(cell * 1.5, largest)  # the last try is the largest cell itself
 
     # Into the map frame, every clustered vertex (the coverage needs the ground's too).

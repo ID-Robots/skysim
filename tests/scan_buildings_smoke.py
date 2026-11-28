@@ -445,6 +445,23 @@ def unit_checks(st: types.ModuleType, ob: types.ModuleType, tmp: Path) -> None:
         st.Scan("two", two, [(0, 1, 2), (3, 4, 5)], from_coords), lat0, lon0, max_triangles=1, ground_z=0.0
     )
     check(last.stats["cell_m"] == 10.0 and last.stats["triangles"] == 1, f"the 10 m cell is tried ({last.stats})")
+    # ... and a cell that collapses every triangle does not end the search: the grids are not nested,
+    # so here 1 m keeps two, 1.5 m none and 2.25 m one.
+    pair = [
+        (1.6, 1.6, 5.0),
+        (2.6, 1.6, 5.0),
+        (1.6, 2.6, 5.0),
+        (0.8, 0.8, 5.0),
+        (1.2, 0.8, 5.0),
+        (0.8, 1.2, 5.0),
+    ]
+    through = st.build_scan_mesh(
+        st.Scan("pair", pair, [(0, 1, 2), (3, 4, 5)], from_coords), lat0, lon0, max_triangles=1, ground_z=0.0
+    )
+    check(
+        through.stats["cell_m"] == 2.25 and through.stats["triangles"] == 1,
+        f"a retry that keeps nothing goes on to the next cell ({through.stats})",
+    )
 
 
 # ---------------------------------------------------------------------------- the world
