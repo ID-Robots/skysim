@@ -157,12 +157,13 @@ jobs:
             exit 0
           fi
           # The review comment carries its identity line near the top (as PR-Agent matches it); the state
-          # block is the one line of JSON after the only "<!-- pr-agent-review-state:v1" that starts a line.
+          # block is the one line of JSON after the only state marker line (pr-agent-review-state:v1). The marker
+          # is built from two strings: PR-Agent cuts a review at its literal text, which a quote of this step has.
           state=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" | jq -c -s '
             [add // [] | .[] | select(.user.login == "github-actions[bot]")
               | select(.body | split("\n")[:5] | any(.[]; gsub("^\\s+|\\s+$"; "") == "<!-- pr-agent:review:full -->"))]
             | (max_by(.id) // {}).body // ""
-            | split("\n<!-- pr-agent-review-state:v1\n")
+            | split("\n<!-- " + "pr-agent-review-state:v1\n")
             | if length == 2 then (.[1] | split("\n-->")[0] // "" | try fromjson catch null) else null end
             | if (.last_run | type) == "object" and (.last_run.excluded_files | type) == "array" then . else null end
           ') || state=""
