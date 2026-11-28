@@ -513,21 +513,22 @@ def main() -> int:
         # a frame is drawn when it is due or when the one before is done, whichever is later: frame i
         # comes at most max(period - D[i-1], 0) + D[i] after frame i-1, D being draw times. Where a
         # build draws the landing frames (full size, the dock marker close up) slower than their
-        # period (the coverage build's -O0 on a CI runner: 237 ms apart), the median of that bound is
-        # what their median spacing is held to, at most twice the period (so the rest rate, 500 ms,
-        # never passes for landing); drawn within it, the period, the bounds' 10 % covering the draw
-        # times' jitter. Two polls of the camera route that saw consecutive frames drawn
-        # (frames_drawn, render_ms) give one bound.
+        # period (the coverage build's -O0 on a CI runner: 237 ms apart), their median spacing is held
+        # to the median of that bound over the draws the polls of the camera route saw (frames_drawn,
+        # render_ms) — exact where the poll before saw the draw before, else period + D[i] — and at
+        # most twice the period, so the rest rate (500 ms) never passes for landing. Where every draw
+        # seen fits in the period, the period: the bounds' 10 % covers the draw times' jitter.
         def spacing(t0: float, t1: float) -> float | None:
             window = [f for f in frames if t0 <= f.received <= t1]
             steps = sorted((b.rtp_ts - a.rtp_ts) / 90.0 for a, b in zip(window, window[1:]))
             return steps[len(steps) // 2] if steps else None
 
         def due_spacing(t0: float, t1: float, period_ms: float) -> float:
-            pairs = [(d0, d1) for (t, n0, d0), (_, n1, d1) in zip(draws, draws[1:]) if t0 <= t <= t1 and n1 == n0 + 1]
-            if all(d <= period_ms for pair in pairs for d in pair):
-                return period_ms
-            bounds = sorted(max(period_ms - d0, 0.0) + d1 for d0, d1 in pairs)
+            seen = [(d1, max(period_ms - d0, 0.0) + d1 if n1 == n0 + 1 else period_ms + d1)
+                    for (t, n0, d0), (_, n1, d1) in zip(draws, draws[1:]) if t0 <= t <= t1 and n1 != n0]
+            if not seen or all(d <= period_ms for d, _ in seen):
+                return period_ms  # each draw in time, or none drawn (and then no frames to space either)
+            bounds = sorted(b for _, b in seen)
             return min(2.0 * period_ms, max(period_ms, bounds[len(bounds) // 2]))
 
         if len(switched_at) == 2:
