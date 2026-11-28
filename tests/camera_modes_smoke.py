@@ -514,9 +514,10 @@ def main() -> int:
         # comes at most max(period - D[i-1], 0) + D[i] after frame i-1, D being draw times. Where a
         # build draws the landing frames (full size, the dock marker close up) slower than their
         # period (the coverage build's -O0 on a CI runner: 237 ms apart), the median of that bound is
-        # what their median spacing is held to; drawn within it, the period, the bounds' 10 %
-        # covering the draw times' jitter. Two polls of the camera route that saw consecutive frames
-        # drawn (frames_drawn, render_ms) give one bound.
+        # what their median spacing is held to, at most twice the period (so the rest rate, 500 ms,
+        # never passes for landing); drawn within it, the period, the bounds' 10 % covering the draw
+        # times' jitter. Two polls of the camera route that saw consecutive frames drawn
+        # (frames_drawn, render_ms) give one bound.
         def spacing(t0: float, t1: float) -> float | None:
             window = [f for f in frames if t0 <= f.received <= t1]
             steps = sorted((b.rtp_ts - a.rtp_ts) / 90.0 for a, b in zip(window, window[1:]))
@@ -527,7 +528,7 @@ def main() -> int:
             if all(d <= period_ms for pair in pairs for d in pair):
                 return period_ms
             bounds = sorted(max(period_ms - d0, 0.0) + d1 for d0, d1 in pairs)
-            return max(period_ms, bounds[len(bounds) // 2])
+            return min(2.0 * period_ms, max(period_ms, bounds[len(bounds) // 2]))
 
         if len(switched_at) == 2:
             landing_step = spacing(switched_at[0] + 1.0, switched_at[1] - 0.5)
