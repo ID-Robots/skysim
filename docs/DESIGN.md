@@ -74,6 +74,14 @@ Offline pipeline (`tools/cooker` + Python pre-step):
 3. C++ cooker loads each tile (OBJ/glTF), builds a Jolt `MeshShape`, `SaveBinaryState` to
    `tiles/<x>_<y>.jshape` + an index JSON (AABBs, origin, CRS).
 
+Merged worlds (TASK-2735): `osm_buildings.py` extrudes the map's footprints everywhere.
+`scan_tiles.py` then takes ODM models, places each one in the tile frame vertex by vertex (UTM
+about coords.txt or the gateway's `model_origin`, to WGS84, to ENU about the anchor), decimates
+it by vertex clustering (1 m cells; winding kept, an inside-out mesh flipped whole), drops its
+ground below 1 m, and drops every prism whose footprint lies wholly inside the scan's coverage
+(occupied 2 m cells, shrunk 5 m). A scan triangle goes whole to the tile holding its centroid,
+like a building. The OBJ-per-tile contract with `tile_cooker` is unchanged.
+
 Runtime: `tile_streamer` keeps tiles resident within radius R of any vehicle AABB, add/remove
 static bodies at tick boundaries. Rangefinders/lidar = raycasts against the same BVH.
 
