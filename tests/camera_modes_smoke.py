@@ -403,12 +403,14 @@ def main() -> int:
         off_top = 0.0  # the landing-off vehicle's greatest height
         switched_at: list[float] = []  # wall times of vehicle 54's mode changes (as polled)
         switch_polls: list[tuple[float, float]] = []  # ... and the poll before each, that saw the old mode
+        draw_ms: list[tuple[float, float]] = []  # (wall time, vehicle 54's last frame's draw time) per poll
         last_mode = None
         last_poll = time.time()
         deadline = time.time() + 60
         while time.time() < deadline:
             cam = call("GET", f"/instances/{BASE}/camera")[1]
             now = time.time()
+            draw_ms.append((now, cam["render_ms"]))
             height = -call("GET", f"/instances/{BASE}/camera/dock")[1]["vehicle_pose"]["offset_ned"][2]
             timeline.append((round(height, 1), cam["now"]["mode"]))
             if last_mode is not None and cam["now"]["mode"] != last_mode:
@@ -438,7 +440,10 @@ def main() -> int:
         check(intrinsics_ok, "the intrinsics route: the same picture, drawn full size at the landing rate")
         check(not others_switched, f"neither the parked vehicle nor the landing-off one switched ({others_switched})")
         check(off_top > LANDING_HEIGHT, f"... the landing-off one climbed through the zone (to {off_top:.1f} m)")
-        time.sleep(2.0)  # frames of its own mode after the switch back
+        until = time.time() + 2.0  # frames of its own mode after the switch back
+        while time.time() < until:
+            draw_ms.append((time.time(), call("GET", f"/instances/{BASE}/camera")[1]["render_ms"]))
+            time.sleep(0.25)
         receiver.stop = True
         receiver.join(timeout=5)
         frames = receiver.client.frames
@@ -507,19 +512,31 @@ def main() -> int:
                       f"all {len(known)} access units drawn in mode {m + 1} are coded at {expected[m]:g} fps"
                       f" ({len(wrong)} are not: {sorted({r for r in wrong if r is not None})[:3]})")
         # Frame spacing over RTP, away from the switches: the landing rate (5 fps, 200 ms) while it
-        # was landing, the vehicle's own (8 fps, 125 ms) after.
+        # was landing, the vehicle's own (8 fps, 125 ms) after. A frame comes no sooner than it is
+        # drawn, and RTP stamps when that was done: one drawn within its period waits for its turn,
+        # one that is not holds the next back, so each takes the longer of the period and its
+        # drawing. Where a build draws slower than the period (the coverage build's -O0 on a CI
+        # runner: landing frames 237 ms apart), that, averaged over the draw times the camera route
+        # reported in the same window (render_ms, polled above), is the spacing to hold them to.
         def spacing(t0: float, t1: float) -> float | None:
             window = [f for f in frames if t0 <= f.received <= t1]
             steps = sorted((b.rtp_ts - a.rtp_ts) / 90.0 for a, b in zip(window, window[1:]))
             return steps[len(steps) // 2] if steps else None
 
+        def due_spacing(t0: float, t1: float, period_ms: float) -> float:
+            taken = [max(period_ms, ms) for t, ms in draw_ms if t0 <= t <= t1]
+            return sum(taken) / len(taken) if taken else period_ms
+
         if len(switched_at) == 2:
+            end = time.time()
             landing_step = spacing(switched_at[0] + 1.0, switched_at[1] - 0.5)
-            normal_step = spacing(switched_at[1] + 1.0, time.time())
-            check(landing_step is not None and 180 < landing_step < 220,
-                  f"frames {landing_step} ms apart while landing (200)")
-            check(normal_step is not None and 110 < normal_step < 140,
-                  f"frames {normal_step} ms apart in its normal mode after (125)")
+            landing_ms = due_spacing(switched_at[0] + 1.0, switched_at[1] - 0.5, 1000.0 / LANDING[0])
+            normal_step = spacing(switched_at[1] + 1.0, end)
+            normal_ms = due_spacing(switched_at[1] + 1.0, end, 1000.0 / OWN[2])
+            check(landing_step is not None and 180 < landing_step < 220 / 200 * landing_ms,
+                  f"frames {landing_step} ms apart while landing ({landing_ms:.0f})")
+            check(normal_step is not None and 110 < normal_step < 140 / 125 * normal_ms,
+                  f"frames {normal_step} ms apart in its normal mode after ({normal_ms:.0f})")
 
         cam = call("GET", f"/instances/{BASE + 1}/camera")[1]
         check(not cam["landing"]["active"] and cam["now"]["mode"] == "normal" and cam["now"]["resting"],
